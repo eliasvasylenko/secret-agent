@@ -2,6 +2,7 @@ package command
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -28,16 +29,20 @@ func New(environment Environment, line []string) *Command {
 }
 
 func (c *Command) UnmarshalJSON(p []byte) error {
-	if err := json.Unmarshal(p, &c.Line); err == nil {
+	err1 := json.Unmarshal(p, &c.Line)
+	if err1 == nil {
 		c.exec = &execCommand
 		return nil
 	}
 	type command Command
 	var temp command
-	err := json.Unmarshal(p, &temp)
+	err2 := json.Unmarshal(p, &temp)
+	if err2 != nil {
+		return errors.Join(err1, err2)
+	}
 	*c = Command(temp)
 	c.exec = &execCommand
-	return err
+	return nil
 }
 
 func (c *Command) MarshalJSON() ([]byte, error) {
@@ -53,7 +58,7 @@ func (c *Command) Process(input string) (string, error) {
 		return "", fmt.Errorf("command line is empty")
 	}
 
-	args := make([]string, len(c.Line)-1)
+	args := make([]string, 0)
 	name := c.Environment.Expand(c.Line[0])
 	for _, arg := range c.Line[1:] {
 		args = append(args, c.Environment.Expand(arg))

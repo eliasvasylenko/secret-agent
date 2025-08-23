@@ -10,6 +10,10 @@ import (
 	"testing"
 )
 
+const marshalObject = `{"environment":{"VAR1":"abc","VAR2":"xyz"},"line":["program","-argument1","-argument2=$VAR1","$VAR2"]}`
+
+const marshalArray = `["program","-argument1","-argument2=var1","var2"]`
+
 func TestMarshalJSON(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -30,7 +34,7 @@ func TestMarshalJSON(t *testing.T) {
 					"$VAR2",
 				},
 			},
-			expected: `{"environment":{"VAR1":"abc","VAR2":"xyz"},"line":["program","-argument1","-argument2=$VAR1","$VAR2"]}`,
+			expected: marshalObject,
 		},
 		{
 			name: "array",
@@ -42,7 +46,7 @@ func TestMarshalJSON(t *testing.T) {
 					"var2",
 				},
 			},
-			expected: `["program","-argument1","-argument2=var1","var2"]`,
+			expected: marshalArray,
 		},
 	}
 	for _, tc := range tests {
@@ -67,7 +71,7 @@ func TestUnmarshalJSON(t *testing.T) {
 	}{
 		{
 			name: "object",
-			json: `{"environment":{"VAR1":"abc","VAR2":"xyz"},"line":["program","-argument1","-argument2=$VAR1","$VAR2"]}`,
+			json: marshalObject,
 			expected: Command{
 				Environment: Environment{
 					"VAR1": "abc",
@@ -84,7 +88,7 @@ func TestUnmarshalJSON(t *testing.T) {
 		},
 		{
 			name: "array",
-			json: `["program","-argument1","-argument2=var1","var2"]`,
+			json: marshalArray,
 			expected: Command{
 				Line: []string{
 					"program",

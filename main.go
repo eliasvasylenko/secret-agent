@@ -7,8 +7,8 @@ import (
 
 	"github.com/urfave/cli/v3"
 
-	"github.com/eliasvasylenko/secret-agent/internal/pebble"
 	"github.com/eliasvasylenko/secret-agent/internal/secret"
+	"github.com/eliasvasylenko/secret-agent/internal/sqlite"
 )
 
 func main() {
@@ -18,11 +18,20 @@ func main() {
 	var name string
 	secretArgument := &cli.StringArg{Name: "secret", Destination: &name}
 
-	store := pebble.NewStore()
+	var debug bool
+	debugFlag := &cli.BoolFlag{Name: "debug", Aliases: []string{"d"}, Destination: &debug, Required: false}
+
+	var force bool
+	forceFlag := &cli.BoolFlag{Name: "force", Aliases: []string{"f"}, Destination: &force, Required: false}
+
+	store := func() secret.InstanceStore {
+		return sqlite.NewStore(debug)
+	}
 
 	cmd := &cli.Command{
 		Usage:           "An agent to manage secrets",
 		HideHelpCommand: true,
+		Flags:           []cli.Flag{debugFlag},
 		Commands: []*cli.Command{
 			{
 				Name:            "list",
@@ -30,7 +39,7 @@ func main() {
 				HideHelpCommand: true,
 				Flags:           []cli.Flag{plansFileFlag},
 				Action: func(ctx context.Context, c *cli.Command) error {
-					secrets, err := secret.LoadAll(plansFile, store)
+					secrets, err := secret.LoadAll(plansFile, store())
 					if err != nil {
 						return err
 					}
@@ -44,7 +53,7 @@ func main() {
 				Arguments:       []cli.Argument{secretArgument},
 				Flags:           []cli.Flag{plansFileFlag},
 				Action: func(ctx context.Context, c *cli.Command) error {
-					secret, err := secret.Load(plansFile, name, store)
+					secret, err := secret.Load(plansFile, name, store())
 					if err != nil {
 						return err
 					}
@@ -56,13 +65,13 @@ func main() {
 				Usage:           "Rotate a secret",
 				HideHelpCommand: true,
 				Arguments:       []cli.Argument{secretArgument},
-				Flags:           []cli.Flag{plansFileFlag},
+				Flags:           []cli.Flag{plansFileFlag, forceFlag},
 				Action: func(ctx context.Context, c *cli.Command) error {
-					secret, err := secret.Load(plansFile, name, store)
+					secret, err := secret.Load(plansFile, name, store())
 					if err != nil {
 						return err
 					}
-					return secret.Rotate()
+					return secret.Rotate(force)
 				},
 			},
 		},

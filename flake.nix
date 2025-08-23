@@ -4,7 +4,7 @@
     nix-vscode-extensions.url = "github:nix-community/nix-vscode-extensions";
     nix-vscode-extensions.inputs.nixpkgs.follows = "nixpkgs";
     gomod2nix = {
-      url = "github:tweag/gomod2nix";
+      url = "github:nix-community/gomod2nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
@@ -41,15 +41,16 @@
           ...
         }:
         {
-          default = pkgs.buildGoApplication {
-            name = "secret-agent";
+          default = pkgs.buildGoModule {
+            pname = "secret-agent";
+            version = "0.1";
             src = ./.;
-            CGO_ENABLED = 0;
-            flags = [ "-trimpath" ];
+            vendorHash = "sha256-IkpSjrTUxnYT5eZlx0+MJ6MBEezgpoUXcwm4GKBt3fg=";
+            env.CGO_ENABLED = 1;
+            flags = [ "-trimpath" "-tags=linux"];
             ldflags = [
               "-s"
               "-w"
-              "-extldflags -static"
             ];
           };
         }
@@ -69,6 +70,7 @@
                   vscodeExtensions = with extensions.open-vsx; [
                     golang.go
                     jnoortheen.nix-ide
+                    qwtel.sqlite-viewer
                   ];
                 })
                 nil
