@@ -62,10 +62,19 @@ func (s *Plans) MarshalJSON() ([]byte, error) {
 }
 
 func (p *Plan) process(input string, command func(*Plan) *command.Command) error {
-	output, err := command(p).Process(input)
-	if err != nil {
-		return err
+	var output string
+
+	cmd := command(p)
+	if cmd != nil {
+		commandOutput, err := cmd.Process(input)
+		if err != nil {
+			return err
+		}
+		output = commandOutput
+	} else {
+		output = ""
 	}
+
 	return p.processSubsteps(output, command)
 }
 

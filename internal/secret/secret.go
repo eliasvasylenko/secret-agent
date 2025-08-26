@@ -68,6 +68,51 @@ func LoadAll(plansFileName string, store InstanceStore) (Secrets, error) {
 	return secrets, nil
 }
 
+func (s Secrets) List() error {
+	bytes, err := json.Marshal(s)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Println(string(bytes))
+	return err
+}
+
+func (s *Secret) Show(pretty bool) error {
+	var bytes []byte
+	var err error
+	if pretty {
+		bytes, err = json.MarshalIndent(s, "", "  ")
+	} else {
+		bytes, err = json.Marshal(s)
+	}
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Println(string(bytes))
+	return err
+}
+
+func (s *Secret) CreateInstance() (*Instance, error) {
+	if s.Plan == nil {
+		return nil, fmt.Errorf("Cannot create instance of orphaned secret.")
+	}
+	id := uuid.NewString()
+	instance, err := CreateInstance(id, *s.Plan, s.store)
+	s.Instances[id] = instance
+	if err != nil {
+		return nil, err
+	}
+	return instance, nil
+}
+
+func (s *Secret) GetInstance(id string) (*Instance, error) {
+	instance := s.Instances[id]
+	if instance == nil {
+		return nil, fmt.Errorf("Instance '%v' not found.", id)
+	}
+	return instance, nil
+}
+
 func (s *Secret) Rotate(force bool) error {
 	if s.Plan == nil {
 		return fmt.Errorf("Cannot rotate orphaned secret.")
@@ -82,22 +127,4 @@ func (s *Secret) Rotate(force bool) error {
 	//active.Deactivate(force)
 	instance.Activate(force)
 	return s.Plan.process("", func(p *Plan) *command.Command { return p.Create })
-}
-
-func (s *Secret) Show() error {
-	bytes, err := json.Marshal(s)
-	if err != nil {
-		return err
-	}
-	_, err = fmt.Println(string(bytes))
-	return err
-}
-
-func (s Secrets) List() error {
-	bytes, err := json.Marshal(s)
-	if err != nil {
-		return err
-	}
-	_, err = fmt.Println(string(bytes))
-	return err
 }

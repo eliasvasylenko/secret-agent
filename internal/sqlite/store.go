@@ -36,9 +36,9 @@ func NewStore(debug bool) *InstanceStore {
 	_, err = db.Exec(`
 		CREATE TABLE IF NOT EXISTS instances (
 			id VARCHAR(128) NOT NULL PRIMARY KEY,
-			name VARCHAR(1024),
+			name VARCHAR(1024) NOT NULL,
 			plan JSONB NOT NULL,
-			status VARCHAR(32)
+			status VARCHAR(32) NOT NULL
 		)
 	`)
 	if err != nil {
@@ -47,8 +47,8 @@ func NewStore(debug bool) *InstanceStore {
 	_, err = db.Exec(`
 		CREATE TABLE IF NOT EXISTS secrets (
 			name VARCHAR(1024) NOT NULL PRIMARY KEY,
-			id VARCHAR(128),
-			status VARCHAR(32)
+			activeId VARCHAR(128) NOT NULL,
+			status VARCHAR(32) NOT NULL
 		)
 	`)
 	if err != nil {
@@ -62,16 +62,16 @@ func (s *InstanceStore) Close() {
 }
 
 func (s *InstanceStore) Activate(name string, id string, force bool) (func() error, error) {
-	err := s.updateSecret(name, &id, nil, activating, deactivated, force)
+	err := s.updateSecret(name, id, "", activating, deactivated, force)
 	return func() error {
-		return s.updateSecret(name, &id, &id, activated, activating, false)
+		return s.updateSecret(name, id, id, activated, activating, false)
 	}, err
 }
 
 func (s *InstanceStore) Deactivate(name string, id string, force bool) (func() error, error) {
-	err := s.updateSecret(name, &id, &id, deactivating, activated, force)
+	err := s.updateSecret(name, id, id, deactivating, activated, force)
 	return func() error {
-		return s.updateSecret(name, nil, &id, deactivated, deactivating, false)
+		return s.updateSecret(name, "", id, deactivated, deactivating, false)
 	}, err
 }
 
@@ -80,37 +80,48 @@ func (s *InstanceStore) ReadActive(name string) (*string, bool, bool, error) {
 	if err != nil {
 		return nil, false, false, err
 	}
-	return id, status == activating, status == deactivating, nil
+	idp := &id
+	if id == "" {
+		idp = nil
+	}
+	return idp, status == activating, status == deactivating, nil
 }
 
-func (s *InstanceStore) readActive(name string) (*string, activeStatus, error) {
-	var id *string
+func (s *InstanceStore) readActive(name string) (string, activeStatus, error) {
+	var activeId string
 	var status activeStatus
 	err := s.db.QueryRow(`
-		SELECT id, status FROM secrets
+		SELECT activeId, status FROM secrets
 		WHERE name = ?
-	`, name).Scan(&id, &status)
-	return id, status, err
+	`, name).Scan(&activeId, &status)
+	return activeId, status, err
 }
 
-func (s *InstanceStore) updateSecret(name string, id *string, priorId *string, status activeStatus, priorStatus activeStatus, force bool) error {
-	result, err := s.db.Exec(`
-		UPDATE secrets SET id = ?, status = ?
+func (s *InstanceStore) updateSecret(name string, activeId string, priorId string, status activeStatus, priorStatus activeStatus, force bool) error {
+	var newStatus activeStatus
+	rows, err := s.db.Query(`
+		UPDATE secrets SET activeId = ?, status = ?
 		WHERE name = ?
-		AND id = ?
+		AND activeId = ?
 		AND (status = ? OR ?)
-	`, id, status, name, priorId, priorStatus, force)
+		RETURNING status
+	`, activeId, status, name, priorId, priorStatus, force)
 	if err != nil {
 		return err
 	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return err
+	defer rows.Close()
+	if rows.Next() {
+		err = rows.Scan(&newStatus)
+		if err != nil {
+			return err
+		}
+		if newStatus != status {
+			return fmt.Errorf("failed to update status of %s from %s to %s", name, newStatus, status)
+		}
+	} else {
+		return fmt.Errorf("failed to update status of %s from expected %s to %s", name, priorStatus, status)
 	}
-	if affected == 0 {
-		return fmt.Errorf("Failed to update status of %s from %s to %s", name, priorStatus, status)
-	}
-	return err
+	return nil
 }
 
 func (s *InstanceStore) Create(id string, plan []byte, name string) (func() error, error) {
@@ -139,14 +150,22 @@ func (s *InstanceStore) Destroy(id string, force bool) (func() error, error) {
 		if err != nil {
 			return err
 		}
-		tx.Exec(`
-			DELETE * FROM instances
+		_, err = tx.Exec(`
+			DELETE FROM instances
 			WHERE id = ?
 		`, id)
-		tx.Exec(`
-			DELETE * FROM secrets
+		if err != nil {
+			tx.Rollback()
+			return err
+		}
+		_, err = tx.Exec(`
+			DELETE FROM secrets
 			WHERE name = ?
 		`, name)
+		if err != nil {
+			tx.Rollback()
+			return err
+		}
 		return tx.Commit()
 	}, nil
 }
@@ -198,10 +217,25 @@ func (s *InstanceStore) ListAll() ([]string, error) {
 }
 
 func (s *InstanceStore) createInstance(plan []byte, name string, id string) error {
-	_, err := s.db.Exec(`
+	tx, err := s.db.BeginTx(context.Background(), &sql.TxOptions{})
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(`
 		INSERT INTO instances(id, name, plan, status) VALUES(?, ?, ?, ?)
 	`, id, name, plan, creating)
-	return err
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	_, err = tx.Exec(`
+		INSERT OR IGNORE INTO secrets(name, activeId, status) VALUES(?, '', ?)
+	`, name, deactivated)
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *InstanceStore) readInstance(id string) ([]byte, string, instanceStatus, error) {
@@ -219,39 +253,30 @@ func (s *InstanceStore) readInstance(id string) ([]byte, string, instanceStatus,
 }
 
 func (s *InstanceStore) updateInstance(id string, status instanceStatus, priorStatus instanceStatus, force bool) error {
-	// result, err := s.db.Query(`
-	// 	UPDATE instances SET status = ?
-	// 	WHERE id = ?
-	// 	AND (status = ? OR ?)
-	// 	AND (
-	// 		SELECT id FROM secrets WHERE name = plan->>'name'
-	// 	) != id
-	// 	RETURNING status
-	// `, status, id, priorStatus, force)
-	// if err != nil {
-	// 	return err
-	// }
-	// var oldStatus instanceStatus
-	// err = result.Scan(&oldStatus)
-
-	result, err := s.db.Exec(`
+	var newStatus instanceStatus
+	rows, err := s.db.Query(`
 		UPDATE instances SET status = ?
 		WHERE id = ?
 		AND (status = ? OR ?)
 		AND NOT EXISTS(
-			SELECT 1 FROM secrets s WHERE s.name = name AND s.id = id
+			SELECT 1 FROM secrets s WHERE s.name = name AND s.activeId = id
 		)
 		RETURNING status
 	`, status, id, priorStatus, force)
 	if err != nil {
 		return err
 	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if affected == 0 {
-		return fmt.Errorf("Failed to update status of %s from %s to %s", id, priorStatus, status)
+	defer rows.Close()
+	if rows.Next() {
+		err = rows.Scan(&newStatus)
+		if err != nil {
+			return err
+		}
+		if newStatus != status {
+			return fmt.Errorf("failed to update status of %s from %s to %s", id, newStatus, status)
+		}
+	} else {
+		return fmt.Errorf("failed to update status of %s from expected %s to %s", id, priorStatus, status)
 	}
 	return nil
 }
