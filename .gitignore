@@ -8,6 +8,7 @@
 *.so
 *.dylib
 
+
 # Test binary, built with `go test -c`
 *.test
 
@@ -29,7 +30,10 @@ go.work.sum
 .envrc
 .direnv
 
+# build output
 result
+secret-agent
 
+# testing files
 plans.json
 instances.db
