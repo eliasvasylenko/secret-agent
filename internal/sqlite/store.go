@@ -161,6 +161,9 @@ func (s *InstanceStore) Destroy(id string, force bool) (func() error, error) {
 		_, err = tx.Exec(`
 			DELETE FROM secrets
 			WHERE name = ?
+			AND NOT EXISTS(
+				SELECT 1 FROM instances s WHERE s.name = name
+			)
 		`, name)
 		if err != nil {
 			tx.Rollback()

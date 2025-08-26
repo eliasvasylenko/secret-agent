@@ -112,21 +112,6 @@ func CreateInstance(id string, plan Plan, store InstanceStore) (*Instance, error
 	return i, err
 }
 
-func (i *Instance) Show(pretty bool) error {
-	var bytes []byte
-	var err error
-	if pretty {
-		bytes, err = json.MarshalIndent(i, "", "  ")
-	} else {
-		bytes, err = json.Marshal(i)
-	}
-	if err != nil {
-		return err
-	}
-	_, err = fmt.Println(string(bytes))
-	return err
-}
-
 func (i *Instance) Destroy(force bool) error {
 	return i.process(
 		"destroy",
@@ -167,6 +152,21 @@ func (i *Instance) Deactivate(force bool) error {
 
 func (i *Instance) Test(force bool) error {
 	return i.process("test", Active, force, nil, func(p *Plan) *command.Command { return p.Test })
+}
+
+func (i *Instance) Show(pretty bool) error {
+	var bytes []byte
+	var err error
+	if pretty {
+		bytes, err = json.MarshalIndent(i, "", "  ")
+	} else {
+		bytes, err = json.Marshal(i)
+	}
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Println(string(bytes))
+	return err
 }
 
 func (i *Instance) process(operation string, condition InstanceStatus, force bool, start func(InstanceStore, string, string, bool) (func() error, error), command func(*Plan) *command.Command) error {
