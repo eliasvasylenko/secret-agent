@@ -29,7 +29,7 @@ go.work.sum
 .envrc
 .direnv
 
-result/
+result
 
 plans.json
 instances.db
