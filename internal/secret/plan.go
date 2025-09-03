@@ -39,7 +39,7 @@ type Plan struct {
 type Plans map[string]*Plan
 
 func (s *Plans) UnmarshalJSON(p []byte) error {
-	plans := make([]Plan, 0)
+	plans := make([]*Plan, 0)
 	if err := json.Unmarshal(p, &plans); err != nil {
 		return err
 	}
@@ -48,25 +48,31 @@ func (s *Plans) UnmarshalJSON(p []byte) error {
 		if plan.Name == "" {
 			panic(string(p))
 		}
-		(*s)[plan.Name] = &plan
+		(*s)[plan.Name] = plan
 	}
 	return nil
 }
 
-func (s *Plans) MarshalJSON() ([]byte, error) {
+func (s Plans) MarshalJSON() ([]byte, error) {
 	plans := make([]*Plan, 0)
-	for _, plan := range *s {
+	for _, plan := range s {
 		plans = append(plans, plan)
 	}
 	return json.Marshal(plans)
 }
 
-func (p *Plan) process(input string, command func(*Plan) *command.Command) error {
+func (p *Plan) process(input string, env command.Environment, getCommand func(*Plan) *command.Command) error {
 	var output string
 
-	cmd := command(p)
+	path := p.Name
+	if parent, ok := env["PATH"]; ok {
+		path = fmt.Sprintf("%s/%s/", parent, path)
+	}
+	env = command.Environment{"PATH": path, "NAME": p.Name}.Merge(env)
+
+	cmd := getCommand(p)
 	if cmd != nil {
-		commandOutput, err := cmd.Process(input)
+		commandOutput, err := cmd.Process(input, env)
 		if err != nil {
 			return err
 		}
@@ -75,12 +81,12 @@ func (p *Plan) process(input string, command func(*Plan) *command.Command) error
 		output = ""
 	}
 
-	return p.processSubsteps(output, command)
+	return p.processSubsteps(output, env, getCommand)
 }
 
-func (p *Plan) processSubsteps(input string, command func(*Plan) *command.Command) error {
+func (p *Plan) processSubsteps(input string, env command.Environment, command func(*Plan) *command.Command) error {
 	for _, plan := range p.Plans {
-		if err := plan.process(input, command); err != nil {
+		if err := plan.process(input, env, command); err != nil {
 			return err
 		}
 	}

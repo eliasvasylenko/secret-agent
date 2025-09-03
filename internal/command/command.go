@@ -16,20 +16,20 @@ var execCommand = exec.Command
 // A command consists of the name of the program to run, the arguments to pass to the program, and the environment to supply to the program.
 type Command struct {
 	Environment Environment `json:"environment"`
-	Line        []string    `json:"line"`
+	Script      string      `json:"script"`
 	exec        *func(name string, arg ...string) *exec.Cmd
 }
 
-func New(environment Environment, line []string) *Command {
+func New(environment Environment, script string) *Command {
 	return &Command{
 		Environment: environment,
-		Line:        line,
+		Script:      script,
 		exec:        &execCommand,
 	}
 }
 
 func (c *Command) UnmarshalJSON(p []byte) error {
-	err1 := json.Unmarshal(p, &c.Line)
+	err1 := json.Unmarshal(p, &c.Script)
 	if err1 == nil {
 		c.exec = &execCommand
 		return nil
@@ -47,25 +47,17 @@ func (c *Command) UnmarshalJSON(p []byte) error {
 
 func (c *Command) MarshalJSON() ([]byte, error) {
 	if len(c.Environment) == 0 {
-		return json.Marshal(c.Line)
+		return json.Marshal(c.Script)
 	}
 	type command Command
 	return json.Marshal(command(*c))
 }
 
-func (c *Command) Process(input string) (string, error) {
-	if len(c.Line) == 0 {
-		return "", fmt.Errorf("command line is empty")
-	}
+func (c *Command) Process(input string, environment Environment) (string, error) {
+	env := c.Environment.Merge(environment)
 
-	args := make([]string, 0)
-	name := c.Environment.Expand(c.Line[0])
-	for _, arg := range c.Line[1:] {
-		args = append(args, c.Environment.Expand(arg))
-	}
-
-	subProcess := (*c.exec)(name, args...)
-	subProcess.Env = append(subProcess.Env, c.Environment.Render()...)
+	subProcess := (*c.exec)("bash", "-c", c.Script)
+	subProcess.Env = append(subProcess.Env, env.Render([]string{})...)
 	stdin, err := subProcess.StdinPipe()
 	if err != nil {
 		return "", fmt.Errorf("resource could not be created '%v'", c)

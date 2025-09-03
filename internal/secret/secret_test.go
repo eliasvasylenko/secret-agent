@@ -16,26 +16,26 @@ import (
 func TestLoad(t *testing.T) {
 	friend := &Plan{
 		Name:   "friend",
-		Create: command.New(nil, []string{"echo", "hello", "friend"}),
+		Create: command.New(nil, "echo hello friend"),
 	}
 	dbCreds := &Plan{
 		Name:   "db-creds",
-		Create: command.New(nil, []string{"openssl", "rand", "-base64", "32"}),
+		Create: command.New(nil, "openssl rand -base64 32"),
 		Plans: Plans{
 			"service": &Plan{
 				Name:       "service",
-				Create:     command.New(nil, []string{"cp", "-f", "/dev/stdin", "/etc/enrypted-creds/$NAME/$ID.cred"}),
-				Destroy:    command.New(nil, []string{"rm", "-f", "/etc/enrypted-creds/$NAME/$ID.cred"}),
-				Activate:   command.New(nil, []string{"cp", "-f", "/etc/enrypted-creds/$NAME/$ID.cred", "/etc/enrypted-creds/service.cred"}),
-				Deactivate: command.New(nil, []string{"rm", "-f", "/etc/enrypted-creds/service.cred"}),
+				Create:     command.New(nil, "cat > /etc/enrypted-creds/$NAME/$ID.cred"),
+				Destroy:    command.New(nil, "rm -f /etc/enrypted-creds/$NAME/$ID.cred"),
+				Activate:   command.New(nil, "cp -f /etc/enrypted-creds/$NAME/$ID.cred /etc/enrypted-creds/service.cred"),
+				Deactivate: command.New(nil, "rm -f /etc/enrypted-creds/service.cred"),
 			},
 			"remote": &Plan{
 				Name:       "remote",
-				Create:     command.New(nil, []string{"ssh", "host", "-csecret-agent create $NAME $ID"}),
-				Destroy:    command.New(nil, []string{"ssh", "host", "-csecret-agent destroy $NAME $ID"}),
-				Activate:   command.New(nil, []string{"ssh", "host", "-csecret-agent activate $NAME $ID"}),
-				Deactivate: command.New(nil, []string{"ssh", "host", "-csecret-agent deactivate $NAME $ID"}),
-				Test:       command.New(nil, []string{"ssh", "host", "-csecret-agent test $NAME $ID"}),
+				Create:     command.New(nil, "ssh host -csecret-agent create $NAME $ID"),
+				Destroy:    command.New(nil, "ssh host -csecret-agent destroy $NAME $ID"),
+				Activate:   command.New(nil, "ssh host -csecret-agent activate $NAME $ID"),
+				Deactivate: command.New(nil, "ssh host -csecret-agent deactivate $NAME $ID"),
+				Test:       command.New(nil, "ssh host -csecret-agent test $NAME $ID"),
 			},
 		},
 	}
@@ -177,26 +177,26 @@ func TestLoad(t *testing.T) {
 func TestLoadAll(t *testing.T) {
 	friend := &Plan{
 		Name:   "friend",
-		Create: command.New(nil, []string{"echo", "hello", "friend"}),
+		Create: command.New(nil, "echo hello friend"),
 	}
 	dbCreds := &Plan{
 		Name:   "db-creds",
-		Create: command.New(nil, []string{"openssl", "rand", "-base64", "32"}),
+		Create: command.New(nil, "openssl rand -base64 32"),
 		Plans: Plans{
 			"service": &Plan{
 				Name:       "service",
-				Create:     command.New(nil, []string{"cp", "-f", "/dev/stdin", "/etc/enrypted-creds/$NAME/$ID.cred"}),
-				Destroy:    command.New(nil, []string{"rm", "-f", "/etc/enrypted-creds/$NAME/$ID.cred"}),
-				Activate:   command.New(nil, []string{"cp", "-f", "/etc/enrypted-creds/$NAME/$ID.cred", "/etc/enrypted-creds/service.cred"}),
-				Deactivate: command.New(nil, []string{"rm", "-f", "/etc/enrypted-creds/service.cred"}),
+				Create:     command.New(nil, "cat > /etc/enrypted-creds/$NAME/$ID.cred"),
+				Destroy:    command.New(nil, "rm -f /etc/enrypted-creds/$NAME/$ID.cred"),
+				Activate:   command.New(nil, "cp -f /etc/enrypted-creds/$NAME/$ID.cred /etc/enrypted-creds/service.cred"),
+				Deactivate: command.New(nil, "rm -f /etc/enrypted-creds/service.cred"),
 			},
 			"remote": &Plan{
 				Name:       "remote",
-				Create:     command.New(nil, []string{"ssh", "host", "-csecret-agent create $NAME $ID"}),
-				Destroy:    command.New(nil, []string{"ssh", "host", "-csecret-agent destroy $NAME $ID"}),
-				Activate:   command.New(nil, []string{"ssh", "host", "-csecret-agent activate $NAME $ID"}),
-				Deactivate: command.New(nil, []string{"ssh", "host", "-csecret-agent deactivate $NAME $ID"}),
-				Test:       command.New(nil, []string{"ssh", "host", "-csecret-agent test $NAME $ID"}),
+				Create:     command.New(nil, "ssh host -csecret-agent create $NAME $ID"),
+				Destroy:    command.New(nil, "ssh host -csecret-agent destroy $NAME $ID"),
+				Activate:   command.New(nil, "ssh host -csecret-agent activate $NAME $ID"),
+				Deactivate: command.New(nil, "ssh host -csecret-agent deactivate $NAME $ID"),
+				Test:       command.New(nil, "ssh host -csecret-agent test $NAME $ID"),
 			},
 		},
 	}

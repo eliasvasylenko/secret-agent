@@ -169,7 +169,7 @@ func (i *Instance) Show(pretty bool) error {
 	return err
 }
 
-func (i *Instance) process(operation string, condition InstanceStatus, force bool, start func(InstanceStore, string, string, bool) (func() error, error), command func(*Plan) *command.Command) error {
+func (i *Instance) process(operation string, condition InstanceStatus, force bool, start func(InstanceStore, string, string, bool) (func() error, error), cmd func(*Plan) *command.Command) error {
 	if err := i.forceCheck(operation, condition, force); err != nil {
 		return err
 	}
@@ -181,7 +181,8 @@ func (i *Instance) process(operation string, condition InstanceStatus, force boo
 		}
 		complete = completeFunction
 	}
-	if err := i.Plan.process("", command); err != nil {
+	env := command.Environment{"ID": i.Id}
+	if err := i.Plan.process("", env, cmd); err != nil {
 		return fmt.Errorf("failed to process %s of instance - %v", operation, err.Error())
 	}
 	if complete != nil {

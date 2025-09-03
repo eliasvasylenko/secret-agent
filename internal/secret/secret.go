@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/eliasvasylenko/secret-agent/internal/command"
 	"github.com/google/uuid"
 )
 
@@ -113,6 +112,15 @@ func (s *Secret) GetInstance(id string) (*Instance, error) {
 	return instance, nil
 }
 
+func (s *Secret) GetActiveInstance() *Instance {
+	for _, instance := range s.Instances {
+		if instance.Status != Inactive {
+			return instance
+		}
+	}
+	return nil
+}
+
 func (s *Secret) Rotate(force bool) error {
 	if s.Plan == nil {
 		return fmt.Errorf("Cannot rotate orphaned secret.")
@@ -123,8 +131,9 @@ func (s *Secret) Rotate(force bool) error {
 	if err != nil {
 		return err
 	}
-	//active := s.Active()
-	//active.Deactivate(force)
-	instance.Activate(force)
-	return s.Plan.process("", func(p *Plan) *command.Command { return p.Create })
+	active := s.GetActiveInstance()
+	if active != nil {
+		active.Deactivate(force)
+	}
+	return instance.Activate(force)
 }

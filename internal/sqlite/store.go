@@ -10,10 +10,12 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
+// An instance store implementation backed by sqlite
 type InstanceStore struct {
 	db *sql.DB
 }
 
+// The lifecycle status of an instance
 type instanceStatus string
 
 const (
@@ -22,6 +24,7 @@ const (
 	destroying instanceStatus = "destroying"
 )
 
+// The active status of an instance
 type activeStatus string
 
 const (

@@ -10,9 +10,9 @@ import (
 	"testing"
 )
 
-const marshalObject = `{"environment":{"VAR1":"abc","VAR2":"xyz"},"line":["program","-argument1","-argument2=$VAR1","$VAR2"]}`
+const marshalObject = `{"environment":{"VAR1":"abc","VAR2":"xyz"},"script":"program -argument1 -argument2=$VAR1 $VAR2"}`
 
-const marshalArray = `["program","-argument1","-argument2=var1","var2"]`
+const marshalArray = `"program -argument1 -argument2=var1 var2"`
 
 func TestMarshalJSON(t *testing.T) {
 	tests := []struct {
@@ -27,24 +27,14 @@ func TestMarshalJSON(t *testing.T) {
 					"VAR1": "abc",
 					"VAR2": "xyz",
 				},
-				Line: []string{
-					"program",
-					"-argument1",
-					"-argument2=$VAR1",
-					"$VAR2",
-				},
+				Script: "program -argument1 -argument2=$VAR1 $VAR2",
 			},
 			expected: marshalObject,
 		},
 		{
-			name: "array",
+			name: "string",
 			command: &Command{
-				Line: []string{
-					"program",
-					"-argument1",
-					"-argument2=var1",
-					"var2",
-				},
+				Script: "program -argument1 -argument2=var1 var2",
 			},
 			expected: marshalArray,
 		},
@@ -77,26 +67,16 @@ func TestUnmarshalJSON(t *testing.T) {
 					"VAR1": "abc",
 					"VAR2": "xyz",
 				},
-				Line: []string{
-					"program",
-					"-argument1",
-					"-argument2=$VAR1",
-					"$VAR2",
-				},
-				exec: &execCommand,
+				Script: "program -argument1 -argument2=$VAR1 $VAR2",
+				exec:   &execCommand,
 			},
 		},
 		{
 			name: "array",
 			json: marshalArray,
 			expected: Command{
-				Line: []string{
-					"program",
-					"-argument1",
-					"-argument2=var1",
-					"var2",
-				},
-				exec: &execCommand,
+				Script: "program -argument1 -argument2=var1 var2",
+				exec:   &execCommand,
 			},
 		},
 	}
@@ -122,29 +102,29 @@ func TestProcess(t *testing.T) {
 		{
 			name: "process command",
 			fakeCommand: fakeCommand{
-				expectedLine: []string{"test-cmd"},
+				expectedScript: "test-cmd",
 			},
 		},
 		{
 			name: "process command input",
 			fakeCommand: fakeCommand{
-				expectedInput: "test-input",
-				expectedLine:  []string{"test-cmd"},
+				expectedInput:  "test-input",
+				expectedScript: "test-cmd",
 			},
 		},
 		{
 			name: "process command output",
 			fakeCommand: fakeCommand{
-				mockOutput:   "test-output",
-				expectedLine: []string{"test-cmd"},
+				mockOutput:     "test-output",
+				expectedScript: "test-cmd",
 			},
 		},
 		{
 			name: "process command input and output",
 			fakeCommand: fakeCommand{
-				expectedInput: "test-input",
-				mockOutput:    "test-output",
-				expectedLine:  []string{"test-cmd"},
+				expectedInput:  "test-input",
+				mockOutput:     "test-output",
+				expectedScript: "test-cmd",
 			},
 		},
 		{
@@ -156,7 +136,7 @@ func TestProcess(t *testing.T) {
 					"VAR1": "abc",
 					"VAR2": "xyz",
 				},
-				expectedLine: []string{"test-cmd"},
+				expectedScript: "test-cmd",
 			},
 		},
 	}
@@ -165,10 +145,10 @@ func TestProcess(t *testing.T) {
 		tc.testExec(t, tc.name, func(t *testing.T, fakeExecCommand func(name string, arg ...string) *exec.Cmd) {
 			command := Command{
 				Environment: tc.expectedEnvironment,
-				Line:        tc.expectedLine,
+				Script:      tc.expectedScript,
 				exec:        &fakeExecCommand,
 			}
-			output, err := command.Process(tc.expectedInput)
+			output, err := command.Process(tc.expectedInput, Environment{})
 			if err != nil {
 				t.Errorf("unexpected error '%v'", err)
 			}
@@ -181,7 +161,7 @@ func TestProcess(t *testing.T) {
 
 type fakeCommand struct {
 	mockOutput          string
-	expectedLine        []string
+	expectedScript      string
 	expectedEnvironment Environment
 	expectedInput       string
 }
@@ -201,8 +181,9 @@ func (f *fakeCommand) testExec(t *testing.T, name string, test func(t *testing.T
 			fmt.Printf("expected input '%v', got '%v'", f.expectedInput, string(bytes))
 		}
 		commandLine := os.Args[3:]
-		if !reflect.DeepEqual(f.expectedLine, commandLine) {
-			fmt.Printf("expected command '%v', got '%v'", f.expectedLine, commandLine)
+		expectedCommandLine := []string{"bash", "-c", f.expectedScript}
+		if !reflect.DeepEqual(expectedCommandLine, commandLine) {
+			fmt.Printf("expected command '%v', got '%v'", expectedCommandLine, commandLine)
 		}
 		for key, value := range f.expectedEnvironment {
 			if value != os.Getenv(key) {
