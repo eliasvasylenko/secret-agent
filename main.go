@@ -13,7 +13,10 @@ import (
 
 func main() {
 	var plansFile string
-	plansFileFlag := &cli.StringFlag{Name: "plans-file", Aliases: []string{"p"}, Destination: &plansFile, Required: true}
+	plansFileFlag := &cli.StringFlag{Name: "plans-file", Aliases: []string{"p"}, Destination: &plansFile, Sources: cli.EnvVars("PLANS_FILE")}
+
+	var shell string
+	shellFlag := &cli.StringFlag{Name: "shell", Aliases: []string{"s"}, Destination: &shell, Sources: cli.EnvVars("SHELL"), Value: "bash"}
 
 	var name string
 	secretArgument := &cli.StringArg{Name: "secret", Destination: &name}
@@ -71,7 +74,7 @@ func main() {
 				Usage:           "Create a secret instance",
 				HideHelpCommand: true,
 				Arguments:       []cli.Argument{secretArgument},
-				Flags:           []cli.Flag{plansFileFlag, prettyFlag},
+				Flags:           []cli.Flag{plansFileFlag, prettyFlag, shellFlag},
 				Action: func(ctx context.Context, c *cli.Command) error {
 					secret, err := secret.Load(plansFile, name, store())
 					if err != nil {
@@ -89,7 +92,7 @@ func main() {
 				Usage:           "Destroy a secret instance",
 				HideHelpCommand: true,
 				Arguments:       []cli.Argument{secretArgument, instanceArgument},
-				Flags:           []cli.Flag{plansFileFlag, forceFlag},
+				Flags:           []cli.Flag{plansFileFlag, forceFlag, shellFlag},
 				Action: func(ctx context.Context, c *cli.Command) error {
 					secret, err := secret.Load(plansFile, name, store())
 					if err != nil {
@@ -107,7 +110,7 @@ func main() {
 				Usage:           "Activate a secret instance",
 				HideHelpCommand: true,
 				Arguments:       []cli.Argument{secretArgument, instanceArgument},
-				Flags:           []cli.Flag{plansFileFlag, prettyFlag, forceFlag},
+				Flags:           []cli.Flag{plansFileFlag, prettyFlag, forceFlag, shellFlag},
 				Action: func(ctx context.Context, c *cli.Command) error {
 					secret, err := secret.Load(plansFile, name, store())
 					if err != nil {
@@ -129,7 +132,7 @@ func main() {
 				Usage:           "Deactivate a secret instance",
 				HideHelpCommand: true,
 				Arguments:       []cli.Argument{secretArgument, instanceArgument},
-				Flags:           []cli.Flag{plansFileFlag, prettyFlag, forceFlag},
+				Flags:           []cli.Flag{plansFileFlag, prettyFlag, forceFlag, shellFlag},
 				Action: func(ctx context.Context, c *cli.Command) error {
 					secret, err := secret.Load(plansFile, name, store())
 					if err != nil {
@@ -151,7 +154,7 @@ func main() {
 				Usage:           "Test an active secret instance",
 				HideHelpCommand: true,
 				Arguments:       []cli.Argument{secretArgument, instanceArgument},
-				Flags:           []cli.Flag{plansFileFlag, prettyFlag, forceFlag},
+				Flags:           []cli.Flag{plansFileFlag, prettyFlag, forceFlag, shellFlag},
 				Action: func(ctx context.Context, c *cli.Command) error {
 					secret, err := secret.Load(plansFile, name, store())
 					if err != nil {
@@ -173,7 +176,7 @@ func main() {
 				Usage:           "Rotate a secret",
 				HideHelpCommand: true,
 				Arguments:       []cli.Argument{secretArgument},
-				Flags:           []cli.Flag{plansFileFlag, prettyFlag, forceFlag},
+				Flags:           []cli.Flag{plansFileFlag, prettyFlag, forceFlag, shellFlag},
 				Action: func(ctx context.Context, c *cli.Command) error {
 					secret, err := secret.Load(plansFile, name, store())
 					if err != nil {
