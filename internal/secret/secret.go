@@ -3,6 +3,7 @@ package secret
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 
 	"github.com/google/uuid"
 )
@@ -23,27 +24,15 @@ type Secret struct {
 
 type Secrets map[string]*Secret
 
-func Load(plansFileName string, name string, store InstanceStore) (*Secret, error) {
-	plans, err := LoadPlans(plansFileName)
+func New(plan *Plan, name string, store InstanceStore) (*Secret, error) {
+	instances, err := LoadPlanInstances(plan.Name, store)
 	if err != nil {
 		return nil, err
 	}
-	plan := plans[name]
-
-	instances, err := LoadPlanInstances(name, store)
-	if err != nil {
-		return nil, err
-	}
-
-	return &Secret{name, plan, instances, store}, nil
+	return &Secret{plan.Name, plan, instances, store}, nil
 }
 
-func LoadAll(plansFileName string, store InstanceStore) (Secrets, error) {
-	plans, err := LoadPlans(plansFileName)
-	if err != nil {
-		return nil, err
-	}
-
+func NewSecrets(plans Plans, store InstanceStore) (Secrets, error) {
 	secrets := make(map[string]*Secret)
 	for name, plan := range plans {
 		secrets[plan.Name] = &Secret{name, plan, make(map[string]*Instance), store}
@@ -67,27 +56,38 @@ func LoadAll(plansFileName string, store InstanceStore) (Secrets, error) {
 	return secrets, nil
 }
 
-func (s Secrets) List() error {
+func Load(plansFileName string, name string, store InstanceStore) (*Secret, error) {
+	plans, err := LoadPlans(plansFileName)
+	if err != nil {
+		return nil, err
+	}
+	plan := plans[name]
+	return New(plan, name, store)
+}
+
+func LoadSecrets(plansFileName string, store InstanceStore) (Secrets, error) {
+	plans, err := LoadPlans(plansFileName)
+	if err != nil {
+		return nil, err
+	}
+	return NewSecrets(plans, store)
+}
+
+func (s Secrets) List(writer io.Writer) error {
 	bytes, err := json.Marshal(s)
 	if err != nil {
 		return err
 	}
-	_, err = fmt.Println(string(bytes))
+	_, err = fmt.Fprintln(writer, string(bytes))
 	return err
 }
 
-func (s *Secret) Show(pretty bool) error {
-	var bytes []byte
-	var err error
-	if pretty {
-		bytes, err = json.MarshalIndent(s, "", "  ")
-	} else {
-		bytes, err = json.Marshal(s)
-	}
+func (s *Secret) Show(writer io.Writer) error {
+	bytes, err := json.Marshal(s)
 	if err != nil {
 		return err
 	}
-	_, err = fmt.Println(string(bytes))
+	_, err = fmt.Fprintln(writer, string(bytes))
 	return err
 }
 

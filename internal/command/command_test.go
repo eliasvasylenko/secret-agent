@@ -10,7 +10,7 @@ import (
 	"testing"
 )
 
-const marshalObject = `{"environment":{"VAR1":"abc","VAR2":"xyz"},"script":"program -argument1 -argument2=$VAR1 $VAR2"}`
+const marshalObject = `{"script":"program -argument1 -argument2=$VAR1 $VAR2","environment":{"VAR1":"abc","VAR2":"xyz"},"shell":""}`
 
 const marshalArray = `"program -argument1 -argument2=var1 var2"`
 
@@ -97,38 +97,44 @@ func TestUnmarshalJSON(t *testing.T) {
 func TestProcess(t *testing.T) {
 	tests := []struct {
 		fakeCommand
-		name string
+		script        string
+		expectedShell string
+		shell         string
 	}{
 		{
-			name: "process command",
+			script: "process command",
 			fakeCommand: fakeCommand{
-				expectedScript: "test-cmd",
+				expectedCommand: []string{"bash", "-c", "process command"},
 			},
+			expectedShell: "bash",
 		},
 		{
-			name: "process command input",
+			script: "process command input",
 			fakeCommand: fakeCommand{
-				expectedInput:  "test-input",
-				expectedScript: "test-cmd",
+				expectedInput:   "test-input",
+				expectedCommand: []string{"bash", "-c", "process command input"},
 			},
+			expectedShell: "bash",
 		},
 		{
-			name: "process command output",
+			script: "process command output",
 			fakeCommand: fakeCommand{
-				mockOutput:     "test-output",
-				expectedScript: "test-cmd",
+				mockOutput:      "test-output",
+				expectedCommand: []string{"bash", "-c", "process command output"},
 			},
+			expectedShell: "bash",
 		},
 		{
-			name: "process command input and output",
+			script: "process command input and output",
 			fakeCommand: fakeCommand{
-				expectedInput:  "test-input",
-				mockOutput:     "test-output",
-				expectedScript: "test-cmd",
+				expectedInput:   "test-input",
+				mockOutput:      "test-output",
+				expectedCommand: []string{"bash", "-c", "process command input and output"},
 			},
+			expectedShell: "bash",
 		},
 		{
-			name: "process command environment",
+			script: "process command environment",
 			fakeCommand: fakeCommand{
 				expectedInput: "test-input",
 				mockOutput:    "test-output",
@@ -136,16 +142,28 @@ func TestProcess(t *testing.T) {
 					"VAR1": "abc",
 					"VAR2": "xyz",
 				},
-				expectedScript: "test-cmd",
+				expectedCommand: []string{"bash", "-c", "process command environment"},
 			},
+			expectedShell: "bash",
+		},
+		{
+			script: "process command shell",
+			fakeCommand: fakeCommand{
+				expectedInput:   "test-input",
+				mockOutput:      "test-output",
+				expectedCommand: []string{"bash", "-c", "process command shell"},
+			},
+			shell:         "",
+			expectedShell: defaultShell,
 		},
 	}
 
 	for _, tc := range tests {
-		tc.testExec(t, tc.name, func(t *testing.T, fakeExecCommand func(name string, arg ...string) *exec.Cmd) {
+		tc.testExec(t, tc.script, func(t *testing.T, fakeExecCommand func(name string, arg ...string) *exec.Cmd) {
 			command := Command{
 				Environment: tc.expectedEnvironment,
-				Script:      tc.expectedScript,
+				Script:      tc.script,
+				Shell:       tc.shell,
 				exec:        &fakeExecCommand,
 			}
 			output, err := command.Process(tc.expectedInput, Environment{})
@@ -161,7 +179,7 @@ func TestProcess(t *testing.T) {
 
 type fakeCommand struct {
 	mockOutput          string
-	expectedScript      string
+	expectedCommand     []string
 	expectedEnvironment Environment
 	expectedInput       string
 }
@@ -181,9 +199,8 @@ func (f *fakeCommand) testExec(t *testing.T, name string, test func(t *testing.T
 			fmt.Printf("expected input '%v', got '%v'", f.expectedInput, string(bytes))
 		}
 		commandLine := os.Args[3:]
-		expectedCommandLine := []string{"bash", "-c", f.expectedScript}
-		if !reflect.DeepEqual(expectedCommandLine, commandLine) {
-			fmt.Printf("expected command '%v', got '%v'", expectedCommandLine, commandLine)
+		if !reflect.DeepEqual(f.expectedCommand, commandLine) {
+			fmt.Printf("expected command '%v', got '%v'", f.expectedCommand, commandLine)
 		}
 		for key, value := range f.expectedEnvironment {
 			if value != os.Getenv(key) {

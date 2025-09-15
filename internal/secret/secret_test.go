@@ -16,26 +16,26 @@ import (
 func TestLoad(t *testing.T) {
 	friend := &Plan{
 		Name:   "friend",
-		Create: command.New(nil, "echo hello friend"),
+		Create: command.New("echo hello friend", nil, ""),
 	}
 	dbCreds := &Plan{
 		Name:   "db-creds",
-		Create: command.New(nil, "openssl rand -base64 32"),
+		Create: command.New("openssl rand -base64 32", nil, ""),
 		Plans: Plans{
 			"service": &Plan{
 				Name:       "service",
-				Create:     command.New(nil, "cat > /etc/enrypted-creds/$NAME/$ID.cred"),
-				Destroy:    command.New(nil, "rm -f /etc/enrypted-creds/$NAME/$ID.cred"),
-				Activate:   command.New(nil, "cp -f /etc/enrypted-creds/$NAME/$ID.cred /etc/enrypted-creds/service.cred"),
-				Deactivate: command.New(nil, "rm -f /etc/enrypted-creds/service.cred"),
+				Create:     command.New("cat > /etc/enrypted-creds/$NAME/$ID.cred", nil, ""),
+				Destroy:    command.New("rm -f /etc/enrypted-creds/$NAME/$ID.cred", nil, ""),
+				Activate:   command.New("cp -f /etc/enrypted-creds/$NAME/$ID.cred /etc/enrypted-creds/service.cred", nil, ""),
+				Deactivate: command.New("rm -f /etc/enrypted-creds/service.cred", nil, ""),
 			},
 			"remote": &Plan{
 				Name:       "remote",
-				Create:     command.New(nil, "ssh host -csecret-agent create $NAME $ID"),
-				Destroy:    command.New(nil, "ssh host -csecret-agent destroy $NAME $ID"),
-				Activate:   command.New(nil, "ssh host -csecret-agent activate $NAME $ID"),
-				Deactivate: command.New(nil, "ssh host -csecret-agent deactivate $NAME $ID"),
-				Test:       command.New(nil, "ssh host -csecret-agent test $NAME $ID"),
+				Create:     command.New("ssh host -csecret-agent create $NAME $ID", nil, ""),
+				Destroy:    command.New("ssh host -csecret-agent destroy $NAME $ID", nil, ""),
+				Activate:   command.New("ssh host -csecret-agent activate $NAME $ID", nil, ""),
+				Deactivate: command.New("ssh host -csecret-agent deactivate $NAME $ID", nil, ""),
+				Test:       command.New("ssh host -csecret-agent test $NAME $ID", nil, ""),
 			},
 		},
 	}
@@ -177,26 +177,26 @@ func TestLoad(t *testing.T) {
 func TestLoadAll(t *testing.T) {
 	friend := &Plan{
 		Name:   "friend",
-		Create: command.New(nil, "echo hello friend"),
+		Create: command.New("echo hello friend", nil, ""),
 	}
 	dbCreds := &Plan{
 		Name:   "db-creds",
-		Create: command.New(nil, "openssl rand -base64 32"),
+		Create: command.New("openssl rand -base64 32", nil, ""),
 		Plans: Plans{
 			"service": &Plan{
 				Name:       "service",
-				Create:     command.New(nil, "cat > /etc/enrypted-creds/$NAME/$ID.cred"),
-				Destroy:    command.New(nil, "rm -f /etc/enrypted-creds/$NAME/$ID.cred"),
-				Activate:   command.New(nil, "cp -f /etc/enrypted-creds/$NAME/$ID.cred /etc/enrypted-creds/service.cred"),
-				Deactivate: command.New(nil, "rm -f /etc/enrypted-creds/service.cred"),
+				Create:     command.New("cat > /etc/enrypted-creds/$NAME/$ID.cred", nil, ""),
+				Destroy:    command.New("rm -f /etc/enrypted-creds/$NAME/$ID.cred", nil, ""),
+				Activate:   command.New("cp -f /etc/enrypted-creds/$NAME/$ID.cred /etc/enrypted-creds/service.cred", nil, ""),
+				Deactivate: command.New("rm -f /etc/enrypted-creds/service.cred", nil, ""),
 			},
 			"remote": &Plan{
 				Name:       "remote",
-				Create:     command.New(nil, "ssh host -csecret-agent create $NAME $ID"),
-				Destroy:    command.New(nil, "ssh host -csecret-agent destroy $NAME $ID"),
-				Activate:   command.New(nil, "ssh host -csecret-agent activate $NAME $ID"),
-				Deactivate: command.New(nil, "ssh host -csecret-agent deactivate $NAME $ID"),
-				Test:       command.New(nil, "ssh host -csecret-agent test $NAME $ID"),
+				Create:     command.New("ssh host -csecret-agent create $NAME $ID", nil, ""),
+				Destroy:    command.New("ssh host -csecret-agent destroy $NAME $ID", nil, ""),
+				Activate:   command.New("ssh host -csecret-agent activate $NAME $ID", nil, ""),
+				Deactivate: command.New("ssh host -csecret-agent deactivate $NAME $ID", nil, ""),
+				Test:       command.New("ssh host -csecret-agent test $NAME $ID", nil, ""),
 			},
 		},
 	}
@@ -346,7 +346,7 @@ func TestLoadAll(t *testing.T) {
 			for _, read := range tc.mockReadActives {
 				mocks.Expect(&store.Mock, store.ReadActive, read)
 			}
-			secrets, err := LoadAll(fmt.Sprintf("./test/plans/%v", tc.plans), store)
+			secrets, err := LoadSecrets(fmt.Sprintf("./test/plans/%v", tc.plans), store)
 			if !errors.Is(err, tc.expectedErr) {
 				t.Errorf("expected error '%v', got '%v'", tc.expectedErr, err)
 			}

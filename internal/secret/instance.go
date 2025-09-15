@@ -3,6 +3,7 @@ package secret
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 
 	"github.com/eliasvasylenko/secret-agent/internal/command"
 )
@@ -154,18 +155,14 @@ func (i *Instance) Test(force bool) error {
 	return i.process("test", Active, force, nil, func(p *Plan) *command.Command { return p.Test })
 }
 
-func (i *Instance) Show(pretty bool) error {
+func (i *Instance) Show(writer io.Writer) error {
 	var bytes []byte
 	var err error
-	if pretty {
-		bytes, err = json.MarshalIndent(i, "", "  ")
-	} else {
-		bytes, err = json.Marshal(i)
-	}
+	bytes, err = json.Marshal(i)
 	if err != nil {
 		return err
 	}
-	_, err = fmt.Println(string(bytes))
+	_, err = fmt.Fprintln(writer, string(bytes))
 	return err
 }
 

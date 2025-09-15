@@ -15,15 +15,17 @@ var execCommand = exec.Command
 // A command to execute.
 // A command consists of the name of the program to run, the arguments to pass to the program, and the environment to supply to the program.
 type Command struct {
-	Environment Environment `json:"environment"`
 	Script      string      `json:"script"`
+	Environment Environment `json:"environment"`
+	Shell       string      `json:"shell"`
 	exec        *func(name string, arg ...string) *exec.Cmd
 }
 
-func New(environment Environment, script string) *Command {
+func New(script string, environment Environment, shell string) *Command {
 	return &Command{
-		Environment: environment,
 		Script:      script,
+		Environment: environment,
+		Shell:       shell,
 		exec:        &execCommand,
 	}
 }
@@ -56,7 +58,12 @@ func (c *Command) MarshalJSON() ([]byte, error) {
 func (c *Command) Process(input string, environment Environment) (string, error) {
 	env := c.Environment.Merge(environment)
 
-	subProcess := (*c.exec)("bash", "-c", c.Script)
+	shell, args, err := BuildShellExec(c.Script, c.Shell)
+	if err != nil {
+		return "", err
+	}
+
+	subProcess := (*c.exec)(shell, args...)
 	subProcess.Env = append(subProcess.Env, env.Render([]string{})...)
 	stdin, err := subProcess.StdinPipe()
 	if err != nil {

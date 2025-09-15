@@ -8,9 +8,9 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
-
   outputs =
     {
+      self,
       nixpkgs,
       nix-vscode-extensions,
       gomod2nix,
@@ -21,64 +21,44 @@
         "x86_64-linux"
         "aarch64-linux"
       ];
-      forAllSystems =
-        function:
+      forEachSystem =
+        functions:
         nixpkgs.lib.genAttrs systems (
           system:
-          function ({
-            pkgs = import nixpkgs {
-              inherit system;
-              overlays = [ gomod2nix.overlays.default ];
-            };
-            extensions = nix-vscode-extensions.extensions.${system};
-          })
+          nixpkgs.lib.mapAttrs (
+            item: function:
+            function {
+              inherit system self;
+              pkgs = import nixpkgs {
+                inherit system;
+                overlays = [ gomod2nix.overlays.default ];
+              };
+              extensions = nix-vscode-extensions.extensions.${system}.open-vsx;
+            }
+          ) functions
         );
     in
     {
-      packages = forAllSystems (
-        {
-          pkgs,
-          ...
-        }:
-        {
-          default = pkgs.buildGoModule {
-            pname = "secret-agent";
-            version = "0.1";
-            src = ./.;
-            vendorHash = "sha256-hXSKTS0vPY2psCG8zcivyS2hvm07LYx6dBHF73OJgYE=";
-            env.CGO_ENABLED = 1;
-            flags = [ "-trimpath" "-tags=linux"];
-            ldflags = [
-              "-s"
-              "-w"
-            ];
-          };
-        }
-      );
-      devShells = forAllSystems (
-        {
-          pkgs,
-          extensions,
-        }:
-        {
-          default =
-            with pkgs;
-            mkShell {
-              buildInputs = [
-                (pkgs.vscode-with-extensions.override {
-                  vscode = pkgs.vscodium;
-                  vscodeExtensions = with extensions.open-vsx; [
-                    golang.go
-                    jnoortheen.nix-ide
-                    qwtel.sqlite-viewer
-                  ];
-                })
-                nil
-                nixfmt-rfc-style
-                go
-              ];
-            };
-        }
-      );
+      packages = forEachSystem {
+        default = { system, ... }: self.packages.${system}.secret-agent;
+        secret-agent = import ./nix/packages/secret-agent.nix;
+        secret-ops = import ./nix/packages/secret-ops.nix;
+      };
+      checks =
+        let
+          testFiles = builtins.attrNames (builtins.readDir ./nix/integrationTests);
+          tests = nixpkgs.lib.attrsets.genAttrs testFiles (
+            testFile: { pkgs, ... }: pkgs.testers.runNixOSTest (import ./nix/integrationTests/${testFile} self)
+          );
+        in
+        forEachSystem tests;
+      devShells = forEachSystem {
+        default = { system, ... }: self.devShells.${system}.codium;
+        codium = import ./nix/devShells/codium.nix;
+      };
+      nixosModules = {
+        default = self.nixosModules.secret-agent;
+        secret-agent = import ./nix/nixosModules/secret-agent.nix;
+      };
     };
 }

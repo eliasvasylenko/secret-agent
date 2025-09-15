@@ -26,14 +26,14 @@ go.work
 go.work.sum
 
 # env file
-.env
-.envrc
-.direnv
+./.env
+./.envrc
+./.direnv
 
 # build output
-result
-secret-agent
+./result
+./secret-agent
 
 # testing files
-plans.json
-instances.db
+./plans.json
+./instances.db

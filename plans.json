@@ -1,0 +1,30 @@
+[
+  {
+    "name": "friend",
+    "create": "echo hello friend"
+  },
+  {
+    "name": "db-creds",
+    "create": "echo secret-password",
+    "plans": [
+      {
+        "name": "service",
+        "create": "mkdir -p ./test/enrypted-creds/$PATH/$ID && cat > ./test/enrypted-creds/$PATH/$ID.cred",
+        "destroy": "rm -f ./test/enrypted-creds/$PATH/$ID.cred",
+        "activate": "cp -f ./test/enrypted-creds/$PATH/$ID.cred ./test/enrypted-creds/service.cred",
+        "deactivate": "rm -f ./test/enrypted-creds/service.cred"
+      },
+      {
+        "name": "remote",
+        "env": {
+          "HOST": "determinist.lan.vasylenko.uk"
+        },
+        "create": "ssh $HOST -csecret-agent create $NAME $ID",
+        "destroy": "ssh $HOST -csecret-agent destroy $NAME $ID",
+        "activate": "ssh $HOST -csecret-agent activate $NAME $ID",
+        "deactivate": "ssh $HOST -csecret-agent deactivate $NAME $ID",
+        "test": "ssh $HOST -csecret-agent test $NAME $ID"
+      }
+    ]
+  }
+]
