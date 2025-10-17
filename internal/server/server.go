@@ -7,131 +7,123 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"strings"
 
 	"github.com/eliasvasylenko/secret-agent/internal/secret"
-	"github.com/eliasvasylenko/secret-agent/internal/sqlite"
+	"github.com/eliasvasylenko/secret-agent/internal/store"
 )
 
 type Server struct {
-	socket string
-	store  secret.InstanceStore
-	plans  secret.Plans
+	socket  string
+	handler http.Handler
 }
 
-func New(socket string, plansFileName string, debug bool) (*Server, error) {
-	store := sqlite.NewStore(debug)
-	plans, err := secret.LoadPlans(plansFileName)
-	if err != nil {
-		return nil, err
-	}
-
-	server := &Server{
-		socket: socket,
-		store:  store,
-		plans:  plans,
-	}
-
+func New(socket string, secretStore store.Secrets, debug bool) (*Server, error) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /secrets", func(w http.ResponseWriter, r *http.Request) {
-		if secrets := loadSecrets(w, plans, store); secrets != nil {
-			secrets.List(w)
+		secrets, err := secretStore.List(r.Context())
+		if handleError(w, err, http.StatusBadRequest) {
+			return
+		}
+		result := struct {
+			Items []*secret.Secret `json:"items"`
+		}{}
+		for _, secret := range secrets {
+			result.Items = append(result.Items, secret)
+		}
+		writeResult(w, http.StatusOK, result)
+	})
+	mux.HandleFunc("GET /secrets/{secretId}", func(w http.ResponseWriter, r *http.Request) {
+		secretId := r.PathValue("secretId")
+		secret, err := secretStore.Get(r.Context(), secretId)
+		if !handleError(w, err, http.StatusBadRequest) {
+			writeResult(w, http.StatusOK, secret)
 		}
 	})
-	mux.HandleFunc("GET /secrets/{name}", func(w http.ResponseWriter, r *http.Request) {
-		if secret := loadSecret(w, r, plans, store); secret != nil {
-			secret.Show(w)
+	mux.HandleFunc("POST /secrets/{secretId}/instances", func(w http.ResponseWriter, r *http.Request) {
+		secretId := r.PathValue("secretId")
+		instances := secretStore.Instances(secretId)
+		var operation OperationCreate
+		if readBody(w, r, operation) {
+			parameters := secret.OperationParameters{
+				Env:       operation.Env,
+				Forced:    operation.Forced,
+				Reason:    operation.Reason,
+				StartedBy: operation.StartedBy,
+			}
+			instance, err := instances.Create(r.Context(), parameters)
+			if !handleError(w, err, http.StatusInternalServerError) {
+				writeResult(w, http.StatusOK, instance)
+			}
 		}
 	})
-	mux.HandleFunc("POST /secrets/{name}", func(w http.ResponseWriter, r *http.Request) {
-		if secret := loadSecret(w, r, plans, store); secret != nil {
-			secret.CreateInstance()
+	mux.HandleFunc("GET /secrets/{secretId}/instances/{instanceId}", func(w http.ResponseWriter, r *http.Request) {
+		secretId := r.PathValue("secretId")
+		instanceId := r.PathValue("instanceId")
+		instances := secretStore.Instances(secretId)
+		instance, err := instances.Get(r.Context(), instanceId)
+		if !handleError(w, err, http.StatusInternalServerError) {
+			writeResult(w, http.StatusOK, instance)
 		}
 	})
-	mux.HandleFunc("GET /secrets/{name}/instances/{instance}", func(w http.ResponseWriter, r *http.Request) {
-		if instance := loadInstance(w, r, plans, store); instance != nil {
-			instance.Show(w)
+	mux.HandleFunc("GET /secrets/{secretId}/instances/{instanceId}/operations", func(w http.ResponseWriter, r *http.Request) {
+		secretId := r.PathValue("secretId")
+		instanceId := r.PathValue("instanceId")
+		instances := secretStore.Instances(secretId)
+		operations, err := instances.History(r.Context(), instanceId, 0, 100)
+		if !handleError(w, err, http.StatusInternalServerError) {
+			writeResult(w, http.StatusOK, operations)
 		}
 	})
-	mux.HandleFunc("DELETE /secrets/{name}/instances/{instance}", func(w http.ResponseWriter, r *http.Request) {
-		if instance := loadInstance(w, r, plans, store); instance != nil {
-			force := getBool(r, "force")
-			instance.Destroy(force)
-		}
-	})
-	mux.HandleFunc("PATCH /secrets/{name}/instances/{instance}", func(w http.ResponseWriter, r *http.Request) {
-		if instance := loadInstance(w, r, plans, store); instance != nil {
-			if patch := getPatch(w, r); patch != nil {
-				force := getBool(r, "force")
-				switch patch.Status {
-				case secret.Active:
-					instance.Activate(force)
-				case secret.Inactive:
-					instance.Deactivate(force)
-				}
+	mux.HandleFunc("POST /secrets/{secretId}/instances/{instanceId}/operations", func(w http.ResponseWriter, r *http.Request) {
+		secretId := r.PathValue("secretId")
+		instanceId := r.PathValue("instanceId")
+		var operation OperationCreate
+		if readBody(w, r, operation) {
+			parameters := secret.OperationParameters{
+				Env:       operation.Env,
+				Forced:    operation.Forced,
+				Reason:    operation.Reason,
+				StartedBy: operation.StartedBy,
+			}
+			instances := secretStore.Instances(secretId)
+			var instance *secret.Instance
+			var err error
+			switch operation.Name {
+			case secret.Activate:
+				instance, err = instances.Activate(r.Context(), instanceId, parameters)
+			case secret.Deactivate:
+				instance, err = instances.Deactivate(r.Context(), instanceId, parameters)
+			case secret.Destroy:
+				instance, err = instances.Destroy(r.Context(), instanceId, parameters)
+			case secret.Test:
+				instance, err = instances.Test(r.Context(), instanceId, parameters)
+			default:
+				writeError(w, http.StatusBadRequest, fmt.Errorf("Cannot post operation %s", operation.Name))
+			}
+			if !handleError(w, err, http.StatusInternalServerError) && instance != nil {
+				writeResult(w, http.StatusOK, instance)
 			}
 		}
 	})
 
-	return server, nil
+	return &Server{
+		handler: mux,
+	}, nil
 }
 
-type InstancePatch struct {
-	// The plan for managing this secret
-	Status secret.InstanceStatus `json:"status"`
-}
-
-func getPatch(w http.ResponseWriter, r *http.Request) *InstancePatch {
-	var patch InstancePatch
-	body, _ := io.ReadAll(r.Body)
-	err := json.Unmarshal(body, &patch)
-	if err != nil {
-		writeError(w, 400, err)
-	} else if patch.Status != secret.Active && patch.Status != secret.Inactive {
-		writeError(w, 400, fmt.Errorf("Cannot patch status %s", patch.Status))
-	} else {
-		return &patch
+func readBody(w http.ResponseWriter, r *http.Request, v any) bool {
+	bytes, err := io.ReadAll(r.Body)
+	if err == nil {
+		err = json.Unmarshal(bytes, v)
 	}
-	return nil
-}
-
-func getBool(r *http.Request, name string) bool {
-	force := r.URL.Query()[name]
-	if len(force) != 1 {
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
 		return false
 	}
-	return strings.ToLower(force[0]) == "true"
-}
-
-func loadSecrets(w http.ResponseWriter, plans secret.Plans, store secret.InstanceStore) secret.Secrets {
-	secrets, err := secret.NewSecrets(plans, store)
-	if err != nil {
-		writeError(w, 500, err)
-	}
-	return secrets
-}
-
-func loadSecret(w http.ResponseWriter, r *http.Request, plans secret.Plans, store secret.InstanceStore) *secret.Secret {
-	name := r.PathValue("name")
-	secret, err := secret.New(plans[name], name, store)
-	if err != nil {
-		writeError(w, 500, err)
-	}
-	return secret
-}
-
-func loadInstance(w http.ResponseWriter, r *http.Request, plans secret.Plans, store secret.InstanceStore) *secret.Instance {
-	secret := loadSecret(w, r, plans, store)
-	id := r.PathValue("id")
-	instance, err := secret.GetInstance(id)
-	if err != nil {
-		writeError(w, 500, err)
-	}
-	return instance
+	return true
 }
 
 func (s *Server) Serve() error {
-
 	// clear old socket
 	if err := os.Remove(s.socket); err != nil {
 		return err
@@ -148,21 +140,18 @@ func (s *Server) Serve() error {
 	return nil
 }
 
-type errorResponse struct {
-	Error struct {
-		Status  string `json:"status"`
-		Message string `json:"message"`
-	} `json:"error"`
+func handleError(w http.ResponseWriter, err error, errorCode int) bool {
+	errored := err != nil
+	if errored {
+		writeError(w, errorCode, err)
+	}
+	return errored
 }
 
-func writeError(w http.ResponseWriter, code int, err error) error {
-	w.WriteHeader(code)
+func writeResult(w http.ResponseWriter, successCode int, value any) error {
+	w.WriteHeader(successCode)
 
-	var response errorResponse
-	response.Error.Status = http.StatusText(code)
-	response.Error.Message = err.Error()
-
-	bytes, err := json.Marshal(response)
+	bytes, err := json.Marshal(value)
 	if err != nil {
 		return err
 	}
@@ -171,4 +160,18 @@ func writeError(w http.ResponseWriter, code int, err error) error {
 		return err
 	}
 	return nil
+}
+
+func writeError(w http.ResponseWriter, errorCode int, err error) error {
+	var response errorResponse
+	response.Error.Status = http.StatusText(errorCode)
+	response.Error.Message = err.Error()
+	return writeResult(w, errorCode, response)
+}
+
+type errorResponse struct {
+	Error struct {
+		Status  string `json:"status"`
+		Message string `json:"message"`
+	} `json:"error"`
 }

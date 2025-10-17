@@ -1,139 +1,155 @@
 package secret
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
+	"strconv"
 
-	"github.com/google/uuid"
+	"github.com/eliasvasylenko/secret-agent/internal/command"
 )
 
+// A plan for the provisioning of a secret
 type Secret struct {
-	// unique name of the secret
-	Name string `json:"name"`
+	// The name of the secret
+	Id string `json:"id"`
 
-	// The plan for provisioning the secret
-	Plan *Plan `json:"plan"`
+	// The environment variables for the secret plan
+	Environment command.Environment `json:"environment,omitempty"`
 
-	// The current instances of the secret
-	Instances Instances `json:"instances,omitempty"`
+	// Create a new instance of the secret
+	Create *command.Command `json:"create,omitempty"`
 
-	// The DB for instance state
-	store InstanceStore
+	// Destroy an instance of the secret
+	Destroy *command.Command `json:"destroy,omitempty"`
+
+	// Activate an instance of the secret
+	Activate *command.Command `json:"activate,omitempty"`
+
+	// Deactivate an instance of the secret
+	Deactivate *command.Command `json:"deactivate,omitempty"`
+
+	// Test the active secret
+	Test *command.Command `json:"test,omitempty"`
+
+	// Derived secrets
+	DerivedSecrets Secrets `json:"derivedSecrets,omitempty"`
 }
 
 type Secrets map[string]*Secret
 
-func New(plan *Plan, name string, store InstanceStore) (*Secret, error) {
-	instances, err := LoadPlanInstances(plan.Name, store)
+func LoadSecrets(secretsFileName string) (Secrets, error) {
+	secretsFile, err := os.Open(secretsFileName)
 	if err != nil {
-		return nil, err
-	}
-	return &Secret{plan.Name, plan, instances, store}, nil
-}
-
-func NewSecrets(plans Plans, store InstanceStore) (Secrets, error) {
-	secrets := make(map[string]*Secret)
-	for name, plan := range plans {
-		secrets[plan.Name] = &Secret{name, plan, make(map[string]*Instance), store}
+		return Secrets{}, err
 	}
 
-	instances, err := LoadAllInstances(store)
+	plansBytes, err := io.ReadAll(secretsFile)
 	if err != nil {
-		return nil, err
+		return Secrets{}, err
 	}
-	for _, instance := range instances {
-		plan := instance.Plan
-		name := plan.Name
-		secret, ok := secrets[name]
-		if !ok {
-			secret = &Secret{name, nil, make(map[string]*Instance), store}
+
+	var secrets []*Secret
+	err = json.Unmarshal(plansBytes, &secrets)
+	if err != nil {
+		return Secrets{}, err
+	}
+
+	secretMap := make(map[string]*Secret)
+	for _, secret := range secrets {
+		if secret.Id == "" {
+			return Secrets{}, fmt.Errorf("Secret ID must not be empty")
 		}
-		secret.Instances[instance.Id] = instance
-		secrets[instance.Plan.Name] = secret
+		if _, ok := secretMap[secret.Id]; ok {
+			return Secrets{}, fmt.Errorf("Secret ID '%s' must be unique", secret.Id)
+		}
+		secretMap[secret.Id] = secret
 	}
-
-	return secrets, nil
+	return secretMap, nil
 }
 
-func Load(plansFileName string, name string, store InstanceStore) (*Secret, error) {
-	plans, err := LoadPlans(plansFileName)
-	if err != nil {
-		return nil, err
-	}
-	plan := plans[name]
-	return New(plan, name, store)
-}
-
-func LoadSecrets(plansFileName string, store InstanceStore) (Secrets, error) {
-	plans, err := LoadPlans(plansFileName)
-	if err != nil {
-		return nil, err
-	}
-	return NewSecrets(plans, store)
-}
-
-func (s Secrets) List(writer io.Writer) error {
-	bytes, err := json.Marshal(s)
-	if err != nil {
+func (s *Secrets) UnmarshalJSON(p []byte) error {
+	plans := make([]*Secret, 0)
+	if err := json.Unmarshal(p, &plans); err != nil {
 		return err
 	}
-	_, err = fmt.Fprintln(writer, string(bytes))
-	return err
-}
-
-func (s *Secret) Show(writer io.Writer) error {
-	bytes, err := json.Marshal(s)
-	if err != nil {
-		return err
-	}
-	_, err = fmt.Fprintln(writer, string(bytes))
-	return err
-}
-
-func (s *Secret) CreateInstance() (*Instance, error) {
-	if s.Plan == nil {
-		return nil, fmt.Errorf("Cannot create instance of orphaned secret.")
-	}
-	id := uuid.NewString()
-	instance, err := CreateInstance(id, *s.Plan, s.store)
-	s.Instances[id] = instance
-	if err != nil {
-		return nil, err
-	}
-	return instance, nil
-}
-
-func (s *Secret) GetInstance(id string) (*Instance, error) {
-	instance := s.Instances[id]
-	if instance == nil {
-		return nil, fmt.Errorf("Instance '%v' not found.", id)
-	}
-	return instance, nil
-}
-
-func (s *Secret) GetActiveInstance() *Instance {
-	for _, instance := range s.Instances {
-		if instance.Status != Inactive {
-			return instance
+	*s = map[string]*Secret{}
+	for _, plan := range plans {
+		if plan.Id == "" {
+			panic(string(p))
 		}
+		(*s)[plan.Id] = plan
 	}
 	return nil
 }
 
-func (s *Secret) Rotate(force bool) error {
-	if s.Plan == nil {
-		return fmt.Errorf("Cannot rotate orphaned secret.")
+func (s Secrets) MarshalJSON() ([]byte, error) {
+	plans := make([]*Secret, 0)
+	for _, plan := range s {
+		plans = append(plans, plan)
 	}
-	id := uuid.NewString()
-	instance, err := CreateInstance(id, *s.Plan, s.store)
-	s.Instances[id] = instance
-	if err != nil {
-		return err
+	return json.Marshal(plans)
+}
+
+func (s *Secret) Command(operation OperationName) *command.Command {
+	switch operation {
+	case Create:
+		return s.Create
+	case Destroy:
+		return s.Destroy
+	case Activate:
+		return s.Activate
+	case Deactivate:
+		return s.Deactivate
+	case Test:
+		return s.Test
+	default:
+		return nil
 	}
-	active := s.GetActiveInstance()
-	if active != nil {
-		active.Deactivate(force)
+}
+
+func (s *Secret) Process(ctx context.Context, operation OperationName, input string, parameters OperationParameters) error {
+	var output string
+	env := parameters.Env
+
+	path := s.Id
+	if parent, ok := env["PATH"]; ok {
+		path = fmt.Sprintf("%s/%s/", parent, path)
 	}
-	return instance.Activate(force)
+	env = command.Environment{
+		"PATH":       path,
+		"NAME":       s.Id,
+		"FORCE":      strconv.FormatBool(parameters.Forced),
+		"REASON":     parameters.Reason,
+		"STARTED_BY": parameters.StartedBy,
+	}.Merge(env)
+
+	command := s.Command(operation)
+	if command != nil {
+		commandOutput, err := command.Process(ctx, input, env)
+		if err != nil {
+			return err
+		}
+		output = commandOutput
+	} else {
+		output = ""
+	}
+
+	return s.processSubsteps(ctx, operation, output, OperationParameters{
+		Env:       env,
+		Forced:    parameters.Forced,
+		Reason:    parameters.Reason,
+		StartedBy: parameters.StartedBy,
+	})
+}
+
+func (s *Secret) processSubsteps(ctx context.Context, operation OperationName, input string, parameters OperationParameters) error {
+	for _, secret := range s.DerivedSecrets {
+		if err := secret.Process(ctx, operation, input, parameters); err != nil {
+			return err
+		}
+	}
+	return nil
 }

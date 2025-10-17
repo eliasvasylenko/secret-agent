@@ -8,24 +8,39 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/eliasvasylenko/secret-agent/internal/server"
+	"github.com/eliasvasylenko/secret-agent/internal/store"
 )
 
 func main() {
-	var plansFile string
-	plansFileFlag := &cli.StringFlag{Name: "plans-file", Aliases: []string{"p"}, Destination: &plansFile, Sources: cli.EnvVars("PLANS_FILE")}
+	ctx := context.Background()
+
+	var secretsFile string
+	secretsFileFlag := &cli.StringFlag{Name: "secrets-file", Aliases: []string{"s"}, Destination: &secretsFile, Sources: cli.EnvVars("SECRETS_FILE")}
 
 	var debug bool
 	debugFlag := &cli.BoolFlag{Name: "debug", Aliases: []string{"d"}, Destination: &debug, Required: false}
 
 	var socket string
-	socketFlag := &cli.StringFlag{Name: "socket", Aliases: []string{"s"}, Destination: &socket, Sources: cli.EnvVars("SOCKET")}
+	socketFlag := &cli.StringFlag{Name: "socket", Aliases: []string{"S"}, Destination: &socket, Sources: cli.EnvVars("SOCKET")}
+
+	newSecretStore := func() (store.Secrets, error) {
+		return store.New(ctx, store.Config{
+			Socket:      socket,
+			SecretsFile: secretsFile,
+			Debug:       debug,
+		})
+	}
 
 	cmd := &cli.Command{
 		Usage:           "An agent to manage secrets",
 		HideHelpCommand: true,
-		Flags:           []cli.Flag{plansFileFlag, debugFlag, socketFlag},
+		Flags:           []cli.Flag{secretsFileFlag, debugFlag, socketFlag},
 		Action: func(ctx context.Context, c *cli.Command) error {
-			server, err := server.New(socket, plansFile, debug)
+			secretStore, err := newSecretStore()
+			if err != nil {
+				return err
+			}
+			server, err := server.New(socket, secretStore, debug)
 			if err != nil {
 				return err
 			}

@@ -14,6 +14,14 @@ func NewEnvironment() Environment {
 	return make(Environment)
 }
 
+func (e Environment) Load(vars []string) Environment {
+	for _, variable := range vars {
+		keyvalue := strings.SplitN(variable, "=", 2)
+		e[keyvalue[0]] = keyvalue[1]
+	}
+	return e
+}
+
 func (e Environment) Render(vars []string) []string {
 	for i, variable := range vars {
 		keyvalue := strings.SplitN(variable, "=", 2)

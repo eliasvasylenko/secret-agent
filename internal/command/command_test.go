@@ -1,6 +1,7 @@
 package command
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -159,14 +160,14 @@ func TestProcess(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc.testExec(t, tc.script, func(t *testing.T, fakeExecCommand func(name string, arg ...string) *exec.Cmd) {
+		tc.testExec(t, tc.script, func(t *testing.T, fakeExecCommand func(ctx context.Context, name string, arg ...string) *exec.Cmd) {
 			command := Command{
 				Environment: tc.expectedEnvironment,
 				Script:      tc.script,
 				Shell:       tc.shell,
 				exec:        &fakeExecCommand,
 			}
-			output, err := command.Process(tc.expectedInput, Environment{})
+			output, err := command.Process(context.Background(), tc.expectedInput, Environment{})
 			if err != nil {
 				t.Errorf("unexpected error '%v'", err)
 			}
@@ -185,7 +186,7 @@ type fakeCommand struct {
 }
 
 // Intercept sub-process calls
-func (f *fakeCommand) testExec(t *testing.T, name string, test func(t *testing.T, fakeExecCommand func(name string, arg ...string) *exec.Cmd)) {
+func (f *fakeCommand) testExec(t *testing.T, name string, test func(t *testing.T, fakeExecCommand func(ctx context.Context, name string, arg ...string) *exec.Cmd)) {
 	t.Run(name, func(t *testing.T) {
 		if os.Getenv("SECRET_AGENT_TEST_FAKE_PROCESS") != "1" {
 			test(t, fakeExecCommand(t.Name()))
@@ -213,12 +214,12 @@ func (f *fakeCommand) testExec(t *testing.T, name string, test func(t *testing.T
 	})
 }
 
-func fakeExecCommand(testName string) func(command string, args ...string) *exec.Cmd {
+func fakeExecCommand(testName string) func(ctx context.Context, command string, args ...string) *exec.Cmd {
 	testRun := fmt.Sprintf("-test.run=%v", testName)
-	return func(command string, args ...string) *exec.Cmd {
+	return func(ctx context.Context, command string, args ...string) *exec.Cmd {
 		cs := []string{testRun, "--", command}
 		cs = append(cs, args...)
-		cmd := exec.Command(os.Args[0], cs...)
+		cmd := exec.CommandContext(ctx, os.Args[0], cs...)
 		cmd.Env = []string{"SECRET_AGENT_TEST_FAKE_PROCESS=1"}
 		return cmd
 	}

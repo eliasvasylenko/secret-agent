@@ -1,4 +1,10 @@
 { nixosModules, ... }:
+let
+  writeJSON = nix: builtins.toFile "op.json" (builtins.toJSON nix);
+  plans = writeJSON {
+    
+  };
+in
 {
   name = "create a secret";
 
@@ -20,7 +26,7 @@
 
   testScript = ''
     machine.wait_for_unit("default.target")
-    machine.succeed("nc -U /tmp/secret-agent.socket")
+    machine.succeed("ecret-agent rotate db-creds -p ${plans}")
     machine.fail("nc -U /tmp/secret-agent.socket")
   '';
 }
