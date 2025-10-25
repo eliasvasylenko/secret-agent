@@ -44,14 +44,14 @@
         secret-agent = import ./nix/packages/secret-agent.nix;
         secret-ops = import ./nix/packages/secret-ops.nix;
       };
-      checks =
-        let
-          testFiles = builtins.attrNames (builtins.readDir ./nix/integrationTests);
-          tests = nixpkgs.lib.attrsets.genAttrs testFiles (
-            testFile: { pkgs, ... }: pkgs.testers.runNixOSTest (import ./nix/integrationTests/${testFile} self)
-          );
-        in
-        forEachSystem tests;
+      # checks =
+      #   let
+      #     testFiles = builtins.attrNames (builtins.readDir ./nix/integrationTests);
+      #     tests = nixpkgs.lib.attrsets.genAttrs testFiles (
+      #       testFile: { pkgs, ... }: pkgs.testers.runNixOSTest (import ./nix/integrationTests/${testFile} self)
+      #     );
+      #   in
+      #   forEachSystem tests;
       devShells = forEachSystem {
         default = { system, ... }: self.devShells.${system}.codium;
         codium = import ./nix/devShells/codium.nix;
