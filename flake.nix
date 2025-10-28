@@ -42,7 +42,6 @@
       packages = forEachSystem {
         default = { system, ... }: self.packages.${system}.secret-agent;
         secret-agent = import ./nix/packages/secret-agent.nix;
-        secret-ops = import ./nix/packages/secret-ops.nix;
       };
       # checks =
       #   let

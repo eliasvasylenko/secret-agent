@@ -3,8 +3,7 @@ pkgs.buildGoModule {
   pname = "secret-agent";
   version = "0.1";
   src = ../..;
-  subPackages = "cmd/secret-agent";
-  vendorHash = "sha256-hXSKTS0vPY2psCG8zcivyS2hvm07LYx6dBHF73OJgYE=";
+  vendorHash = "sha256-Jc2/Uc4z0Sln/E+Bu6zZYAYWlQzg2iC0Hy9iSQaJDxM=";
   env.CGO_ENABLED = 1;
   flags = [
     "-trimpath"

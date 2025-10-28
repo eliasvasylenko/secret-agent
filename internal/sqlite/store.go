@@ -199,12 +199,12 @@ func (i *InstanceRepository) List(ctx context.Context, from int, to int) (secret
 	instances := secret.Instances{}
 	for err == nil && rows.Next() {
 		instance := &secret.Instance{}
-		instances[instance.Id] = instance
 		var secretBytes []byte
 		err = rows.Scan(&instance.Id, &secretBytes, &instance.Status.Name, &instance.Status.Forced, &instance.Status.Reason, &instance.Status.StartedBy, &instance.Status.StartedAt, &instance.Status.CompletedAt, &instance.Status.FailedAt)
 		if err != nil {
 			break
 		}
+		instances[instance.Id] = instance
 		err = json.Unmarshal(secretBytes, &instance.Secret)
 	}
 	return instances, err
@@ -293,6 +293,22 @@ func (i *InstanceRepository) Create(ctx context.Context, paramaters secret.Opera
 	return instance, err
 }
 
+func (i *InstanceRepository) Destroy(ctx context.Context, instanceId string, paramaters secret.OperationParameters) (*secret.Instance, error) {
+	return updateOperation(ctx, i.db, i.secretId, instanceId, secret.Destroy, paramaters)
+}
+
+func (i *InstanceRepository) Activate(ctx context.Context, instanceId string, paramaters secret.OperationParameters) (*secret.Instance, error) {
+	return updateOperation(ctx, i.db, i.secretId, instanceId, secret.Activate, paramaters)
+}
+
+func (i *InstanceRepository) Deactivate(ctx context.Context, instanceId string, paramaters secret.OperationParameters) (*secret.Instance, error) {
+	return updateOperation(ctx, i.db, i.secretId, instanceId, secret.Deactivate, paramaters)
+}
+
+func (i *InstanceRepository) Test(ctx context.Context, instanceId string, paramaters secret.OperationParameters) (*secret.Instance, error) {
+	return updateOperation(ctx, i.db, i.secretId, instanceId, secret.Test, paramaters)
+}
+
 func updateOperation(ctx context.Context, db *sql.DB, secretId string, instanceId string, operationName secret.OperationName, paramaters secret.OperationParameters) (*secret.Instance, error) {
 	tx, commit, rollback, err := beginTx(db)
 	if err != nil {
@@ -303,7 +319,7 @@ func updateOperation(ctx context.Context, db *sql.DB, secretId string, instanceI
 	var secretBytes []byte
 	var activeInstanceId *string
 	var previousOperation secret.Operation
-	err = db.QueryRowContext(ctx, `
+	err = tx.QueryRowContext(ctx, `
 		SELECT
 			i.secret,
 			s.activeInstanceId,
@@ -348,6 +364,8 @@ func updateOperation(ctx context.Context, db *sql.DB, secretId string, instanceI
 			return nil, fmt.Errorf("cannot %s", msg)
 		}
 	}
+
+	println(secretId, instanceId, operationName, previousOperation.Name, activeInstanceId, string(secretBytes), msg)
 
 	operation, err := startOperation(ctx, tx, secretId, instanceId, operationName, paramaters)
 	if err != nil {
@@ -434,22 +452,6 @@ func completeOperation(ctx context.Context, db *sql.DB, secretId string, instanc
 	}
 
 	return commit()
-}
-
-func (i *InstanceRepository) Destroy(ctx context.Context, instanceId string, paramaters secret.OperationParameters) (*secret.Instance, error) {
-	return updateOperation(ctx, i.db, i.secretId, instanceId, secret.Destroy, paramaters)
-}
-
-func (i *InstanceRepository) Activate(ctx context.Context, instanceId string, paramaters secret.OperationParameters) (*secret.Instance, error) {
-	return updateOperation(ctx, i.db, i.secretId, instanceId, secret.Activate, paramaters)
-}
-
-func (i *InstanceRepository) Deactivate(ctx context.Context, instanceId string, paramaters secret.OperationParameters) (*secret.Instance, error) {
-	return updateOperation(ctx, i.db, i.secretId, instanceId, secret.Deactivate, paramaters)
-}
-
-func (i *InstanceRepository) Test(ctx context.Context, instanceId string, paramaters secret.OperationParameters) (*secret.Instance, error) {
-	return updateOperation(ctx, i.db, i.secretId, instanceId, secret.Test, paramaters)
 }
 
 func (i *InstanceRepository) History(ctx context.Context, instanceId string, startAt int, endAt int) (operations []*secret.Operation, err error) {
