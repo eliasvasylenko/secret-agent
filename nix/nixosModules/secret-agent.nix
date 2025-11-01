@@ -176,10 +176,8 @@ in
             serviceConfig = {
               Type = "simple";
               Restart = "no";
-              ExecStart = ./secret-agent.sh;
-              StandardInput = "socket";
-              StandardOutput = "socket";
-              StandardError = "journal";
+              ExecStart = "${cfg.services.secret-agent.package}/bin/secret-agent serve -s ${configFile} -D ${dbFile} -S /tmp/secret-agent.socket";
+              NonBlocking = true;
             };
             requires = [ "secret-agent.socket" ];
             after = [ "secret-agent.socket" ];
@@ -192,7 +190,7 @@ in
         description = "Socket to communicate with secret agent";
         listenStreams = [ "/tmp/secret-agent.socket" ];
         socketConfig = {
-          Accept = "yes";
+          NoDelay = true;
         };
       };
 

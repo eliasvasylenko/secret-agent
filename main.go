@@ -8,7 +8,7 @@ import (
 	"github.com/alecthomas/kong"
 	com "github.com/eliasvasylenko/secret-agent/internal/command"
 	sec "github.com/eliasvasylenko/secret-agent/internal/secret"
-	"github.com/eliasvasylenko/secret-agent/internal/server"
+	ser "github.com/eliasvasylenko/secret-agent/internal/server"
 	"github.com/eliasvasylenko/secret-agent/internal/store"
 )
 
@@ -20,7 +20,7 @@ func main() {
 
 type CLI struct {
 	ClientSocket string          `short:"c"`
-	SecretsFile  string          `short:"S"`
+	SecretsFile  string          `short:"s"`
 	DbFile       string          `short:"D"`
 	Debug        bool            `short:"d"`
 	Pretty       bool            `short:"p"`
@@ -35,7 +35,7 @@ type CLI struct {
 	Activate     InstanceCommand `cmd:"" help:"Activate an instance of a secret"`
 	Deactivate   InstanceCommand `cmd:"" help:"Deactivate an instance of a secret"`
 	Test         InstanceCommand `cmd:"" help:"Test an instance of a secret"`
-	Deploy       Deploy          `cmd:"" help:"Deploy the secret agent (API server)"`
+	Serve        Serve           `cmd:"" help:"Serve the secret agent API"`
 
 	ctx         *kong.Context
 	secretStore store.Secrets
@@ -84,8 +84,9 @@ func (c *CLI) Run(ctx context.Context) {
 		result, err = c.secretStore.Instances(c.Deactivate.SecretID).Deactivate(ctx, c.Deactivate.InstanceID, c.Deactivate.parameters())
 	case "test <secret-id> <instance-id>":
 		result, err = c.secretStore.Instances(c.Test.SecretID).Test(ctx, c.Test.InstanceID, c.Test.parameters())
-	case "deploy":
-		server, err := server.New(c.Deploy.ServerSocket, c.secretStore, c.Debug)
+	case "serve":
+		var server *ser.Server
+		server, err = ser.New(c.Serve.ServerSocket, c.secretStore, c.Debug)
 		if err == nil {
 			err = server.Serve()
 		}
@@ -131,8 +132,8 @@ type History struct {
 }
 
 type Bounds struct {
-	From int `short:"l"`
-	To   int `short:"u"`
+	From int `short:"l" default:"0"`
+	To   int `short:"u" default:"10"`
 }
 
 type SecretCommand struct {
@@ -160,6 +161,6 @@ func (c *Command) parameters() sec.OperationParameters {
 	}
 }
 
-type Deploy struct {
-	ServerSocket string
+type Serve struct {
+	ServerSocket string `short:"S"`
 }

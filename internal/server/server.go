@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 
 	"github.com/eliasvasylenko/secret-agent/internal/secret"
 	"github.com/eliasvasylenko/secret-agent/internal/store"
@@ -107,6 +108,7 @@ func New(socket string, secretStore store.Secrets, debug bool) (*Server, error) 
 	})
 
 	return &Server{
+		socket:  socket,
 		handler: mux,
 	}, nil
 }
@@ -124,17 +126,40 @@ func readBody(w http.ResponseWriter, r *http.Request, v any) bool {
 }
 
 func (s *Server) Serve() error {
-	// clear old socket
-	if err := os.Remove(s.socket); err != nil {
-		return err
+	var listener net.Listener
+	var err error
+	if s.socket != "" {
+		// socket option given for manual execution
+
+		// resolve socket
+		var addr *net.UnixAddr
+		addr, err = net.ResolveUnixAddr("unix", s.socket)
+		if err != nil {
+			return err
+		}
+
+		// listen on socket
+		listener, err = net.ListenUnix("unix", addr)
+
+	} else if os.Getenv("LISTEN_PID") == strconv.Itoa(os.Getpid()) {
+		// started as a systemd service
+
+		// open file descriptor
+		f := os.NewFile(3, "socket")
+
+		// listen on FD
+		listener, err = net.FileListener(f)
+
+	} else {
+		return fmt.Errorf("No server socket")
 	}
-	// listen on socket
-	unixListener, err := net.Listen("unix", s.socket)
+
 	if err != nil {
 		return err
 	}
+
 	// serve http over socket
-	if err := http.Serve(unixListener, nil); err != nil {
+	if err := http.Serve(listener, s.handler); err != nil {
 		return err
 	}
 	return nil
