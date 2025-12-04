@@ -29,31 +29,36 @@ func New(socket string, secretStore store.Secrets, permissions *Permissions) *Se
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
-	handle := func(pattern string, subject roles.Subject, action roles.Action, handle func(w http.ResponseWriter, r *http.Request) (any, error, int)) {
+	handle := func(pattern string, subject roles.Subject, action roles.Action, handle func(w http.ResponseWriter, r *http.Request) (any, int, error)) {
 		mux.Handle(pattern, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			connection := r.Context().Value(connectionKey{}).(net.Conn)
 			identity, err := s.permissions.Claims.ClaimRoles(r, connection)
 			if err != nil {
-				writeError(w, NewErrorResponse(err.Error(), http.StatusUnauthorized))
+				writeError(w, NewErrorResponse(err, http.StatusUnauthorized))
 				return
 			}
 
 			err = s.permissions.Roles.AssertPermission(identity, roles.Permissions{subject: action})
 			if err != nil {
-				writeError(w, NewErrorResponse(err.Error(), http.StatusForbidden))
+				writeError(w, NewErrorResponse(err, http.StatusForbidden))
 				return
 			}
 
-			result, err, code := handle(w, r)
+			result, code, err := handle(w, r)
+			if err != nil {
+				writeError(w, err)
+				return
+			}
+
 			writeResult(w, result, code)
 		}))
 	}
 
 	handle("GET /secrets", roles.Secrets, roles.List,
-		func(w http.ResponseWriter, r *http.Request) (any, error, int) {
+		func(w http.ResponseWriter, r *http.Request) (any, int, error) {
 			secs, err := s.secretStore.List(r.Context())
 			if err != nil {
-				return nil, err, http.StatusBadRequest
+				return nil, 0, NewErrorResponse(err, http.StatusBadRequest)
 			}
 			result := struct {
 				Items []*secrets.Secret `json:"items"`
@@ -62,29 +67,27 @@ func (s *Server) Handler() http.Handler {
 				result.Items = append(result.Items, secret)
 			}
 
-			fmt.Printf("server-%v\n", result.Items[0].Create) // TODO get rid
-
-			return result, nil, http.StatusOK
+			return result, http.StatusOK, nil
 		})
 
 	handle("GET /secrets/{secretId}", roles.Secrets, roles.Read,
-		func(w http.ResponseWriter, r *http.Request) (any, error, int) {
+		func(w http.ResponseWriter, r *http.Request) (any, int, error) {
 			secretId := r.PathValue("secretId")
 			secret, err := s.secretStore.Get(r.Context(), secretId)
 			if err != nil {
-				return nil, err, http.StatusBadRequest
+				return nil, 0, NewErrorResponse(err, http.StatusBadRequest)
 			}
-			return secret, nil, http.StatusOK
+			return secret, http.StatusOK, nil
 		})
 
 	handle("POST /secrets/{secretId}/instances", roles.Instances, roles.Write,
-		func(w http.ResponseWriter, r *http.Request) (any, error, int) {
+		func(w http.ResponseWriter, r *http.Request) (any, int, error) {
 			secretId := r.PathValue("secretId")
 			instances := s.secretStore.Instances(secretId)
 			var operation OperationCreate
-			err, code := readBody(r, operation)
+			err := readBody(r, &operation)
 			if err != nil {
-				return nil, err, code
+				return nil, 0, err
 			}
 			parameters := secrets.OperationParameters{
 				Env:       operation.Env,
@@ -94,43 +97,43 @@ func (s *Server) Handler() http.Handler {
 			}
 			instance, err := instances.Create(r.Context(), parameters)
 			if err != nil {
-				return nil, err, http.StatusInternalServerError
+				return nil, 0, err
 			}
-			return instance, nil, http.StatusOK
+			return instance, http.StatusOK, nil
 		})
 
 	handle("GET /secrets/{secretId}/instances/{instanceId}", roles.Instances, roles.Read,
-		func(w http.ResponseWriter, r *http.Request) (any, error, int) {
+		func(w http.ResponseWriter, r *http.Request) (any, int, error) {
 			secretId := r.PathValue("secretId")
 			instanceId := r.PathValue("instanceId")
 			instances := s.secretStore.Instances(secretId)
 			instance, err := instances.Get(r.Context(), instanceId)
 			if err != nil {
-				return nil, err, http.StatusInternalServerError
+				return nil, 0, err
 			}
-			return instance, nil, http.StatusOK
+			return instance, http.StatusOK, nil
 		})
 
 	handle("GET /secrets/{secretId}/instances/{instanceId}/operations", roles.Instances, roles.Read,
-		func(w http.ResponseWriter, r *http.Request) (any, error, int) {
+		func(w http.ResponseWriter, r *http.Request) (any, int, error) {
 			secretId := r.PathValue("secretId")
 			instanceId := r.PathValue("instanceId")
 			instances := s.secretStore.Instances(secretId)
 			operations, err := instances.History(r.Context(), instanceId, 0, 100)
 			if err != nil {
-				return nil, err, http.StatusInternalServerError
+				return nil, 0, err
 			}
-			return operations, nil, http.StatusOK
+			return operations, http.StatusOK, nil
 		})
 
 	handle("POST /secrets/{secretId}/instances/{instanceId}/operations", roles.Instances, roles.Write,
-		func(w http.ResponseWriter, r *http.Request) (any, error, int) {
+		func(w http.ResponseWriter, r *http.Request) (any, int, error) {
 			secretId := r.PathValue("secretId")
 			instanceId := r.PathValue("instanceId")
 			var operation OperationCreate
-			err, code := readBody(r, operation)
+			err := readBody(r, &operation)
 			if err != nil {
-				return nil, err, code
+				return nil, 0, err
 			}
 
 			parameters := secrets.OperationParameters{
@@ -151,12 +154,12 @@ func (s *Server) Handler() http.Handler {
 			case secrets.Test:
 				instance, err = instances.Test(r.Context(), instanceId, parameters)
 			default:
-				return nil, fmt.Errorf("Cannot post operation %s", operation.Name), http.StatusBadRequest
+				return nil, 0, NewErrorResponse(fmt.Errorf("Cannot post operation %s", operation.Name), http.StatusBadRequest)
 			}
 			if err != nil {
-				return nil, err, http.StatusInternalServerError
+				return nil, 0, err
 			}
-			return instance, nil, http.StatusOK
+			return instance, http.StatusOK, nil
 		})
 
 	return mux
@@ -211,15 +214,15 @@ func (s *Server) Serve() error {
 	return nil
 }
 
-func readBody(r *http.Request, v any) (error, int) {
+func readBody(r *http.Request, v any) error {
 	bytes, err := io.ReadAll(r.Body)
 	if err == nil {
 		err = json.Unmarshal(bytes, v)
 	}
 	if err != nil {
-		return err, http.StatusBadRequest
+		return NewErrorResponse(err, http.StatusBadRequest)
 	}
-	return nil, 0
+	return nil
 }
 
 func writeResult(w http.ResponseWriter, value any, statusCode int) error {
@@ -238,8 +241,8 @@ func writeResult(w http.ResponseWriter, value any, statusCode int) error {
 func writeError(w http.ResponseWriter, err error) error {
 	var response *ErrorResponse
 	if !errors.As(err, &response) {
-		response.Err.Code = http.StatusInternalServerError
-		response.Err.Message = err.Error()
+		response.HttpError.Code = http.StatusInternalServerError
+		response.HttpError.Message = err.Error()
 	}
-	return writeResult(w, response, response.Err.Code)
+	return writeResult(w, response, response.HttpError.Code)
 }

@@ -18,6 +18,7 @@ pkgs.testers.runNixOSTest {
     };
 
   testScript = ''
+    ${pkgs.callPackage ./helpers { }}
     start_all()
     machine.wait_for_unit("sockets.target")
     machine.succeed("secret-agent create db-creds")

@@ -43,7 +43,7 @@ func (c *PlatformClaims) ClaimRoles(request *http.Request, connection net.Conn) 
 		return nil, fmt.Errorf("Control() error: %s", controlErr)
 	}
 
-	fmt.Printf("PlatformClaims: %v\n", *cred)
+	fmt.Printf("PlatformClaims: %v\n", *cred) // TODO debug log
 
 	return ClaimedRoles{"admin"}, nil
 }

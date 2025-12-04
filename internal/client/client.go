@@ -67,7 +67,7 @@ func Do[T any](client http.Client, req *http.Request, err error) (T, error) {
 
 	var errorResponse server.ErrorResponse
 	err = json.Unmarshal(bodyBytes, &errorResponse)
-	if err == nil && errorResponse.Err != nil {
+	if err == nil && errorResponse.HttpError != nil {
 		return body, &errorResponse
 	}
 

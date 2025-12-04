@@ -20,7 +20,7 @@ func TestLoadPlans(t *testing.T) {
 	dbCreds := &Secret{
 		Id:     "db-creds",
 		Create: command.New("openssl rand -base64 32", nil, ""),
-		Derived: Secrets{
+		Derive: Secrets{
 			"service": &Secret{
 				Id:         "service",
 				Create:     command.New("cat > /etc/enrypted-creds/$NAME/$ID.cred", nil, ""),

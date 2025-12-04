@@ -33,8 +33,8 @@ type Secret struct {
 	// Test the active secret
 	Test *command.Command `json:"test,omitempty"`
 
-	// Derived secrets
-	Derived Secrets `json:"derived,omitempty"`
+	// Derive sub-secrets
+	Derive Secrets `json:"derive,omitempty"`
 }
 
 type Secrets map[string]*Secret
@@ -54,11 +54,11 @@ func New(secretList []*Secret) (Secrets, error) {
 }
 
 func (s *Secrets) UnmarshalJSON(p []byte) error {
-	secretList := make([]*Secret, 0)
-	if err := json.Unmarshal(p, &secretList); err != nil {
+	secretMap := make([]*Secret, 0)
+	if err := json.Unmarshal(p, &secretMap); err != nil {
 		return err
 	}
-	secrets, err := New(secretList)
+	secrets, err := New(secretMap)
 	*s = secrets
 	return err
 }
@@ -98,7 +98,7 @@ func (s *Secret) Process(ctx context.Context, operation OperationName, input str
 	}
 	env = command.Environment{
 		"PATH":       path,
-		"NAME":       s.Id,
+		"ID":         s.Id,
 		"FORCE":      strconv.FormatBool(parameters.Forced),
 		"REASON":     parameters.Reason,
 		"STARTED_BY": parameters.StartedBy,
@@ -124,7 +124,7 @@ func (s *Secret) Process(ctx context.Context, operation OperationName, input str
 }
 
 func (s *Secret) processSubsteps(ctx context.Context, operation OperationName, input string, parameters OperationParameters) error {
-	for _, secret := range s.Derived {
+	for _, secret := range s.Derive {
 		if err := secret.Process(ctx, operation, input, parameters); err != nil {
 			return err
 		}

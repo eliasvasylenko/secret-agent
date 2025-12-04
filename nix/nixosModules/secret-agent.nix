@@ -70,8 +70,7 @@ let
     activate = mkCommandOptions "activate the secret";
     deactivate = mkCommandOptions "deactivate the secret";
     test = mkCommandOptions "test the activated secret";
-
-    derived = lib.mkOption {
+    derive = lib.mkOption {
       description = "Plans that derive from the secret";
       default = { };
       type =
@@ -179,19 +178,21 @@ let
   cfg = config.services.secret-agent;
 
   # Map the nix secrets config into a service secrets config
-  makeSecretsConfig = lib.attrsets.mapAttrsToList (
-    id: secret: {
-      inherit id;
-      inherit (secret)
-        create
-        destroy
-        activate
-        deactivate
-        test
-        ;
-      derived = makeSecretsConfig secret.derived;
-    }
-  );
+  makeSecretsConfig =
+    secrets:
+    lib.lists.sortOn ({ id, ... }: id) (
+      lib.attrsets.mapAttrsToList (id: secret: {
+        inherit id;
+        inherit (secret)
+          create
+          destroy
+          activate
+          deactivate
+          test
+          ;
+        derive = makeSecretsConfig secret.derive;
+      }) secrets
+    );
 
   # Write the permissions config file for the service backend
   permissionsFile = pkgs.writeText "permissions.config" (
