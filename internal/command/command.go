@@ -8,6 +8,8 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+
+	"github.com/eliasvasylenko/secret-agent/internal/marshal"
 )
 
 // Default function to execute a command
@@ -50,10 +52,10 @@ func (c *Command) UnmarshalJSON(p []byte) error {
 
 func (c *Command) MarshalJSON() ([]byte, error) {
 	if len(c.Environment) == 0 {
-		return json.Marshal(c.Script)
+		return marshal.JSON(c.Script)
 	}
 	type command Command
-	return json.Marshal(command(*c))
+	return marshal.JSON(command(*c))
 }
 
 func (c *Command) Process(ctx context.Context, input string, environment Environment) (string, error) {

@@ -22,42 +22,35 @@
         "aarch64-linux"
       ];
       forEachSystem =
-        functions:
+        function:
         nixpkgs.lib.genAttrs systems (
           system:
-          nixpkgs.lib.mapAttrs (
-            item: function:
-            function {
-              inherit system self;
-              pkgs = import nixpkgs {
-                inherit system;
-                overlays = [ gomod2nix.overlays.default ];
-              };
-              extensions = nix-vscode-extensions.extensions.${system}.open-vsx;
-            }
-          ) functions
+          function {
+            inherit system self;
+            root = ./.;
+            pkgs = import nixpkgs {
+              inherit system;
+              overlays = [ gomod2nix.overlays.default ];
+            };
+            extensions = nix-vscode-extensions.extensions.${system}.open-vsx;
+          }
+        );
+      readNixFiles =
+        path: args:
+        let
+          allFiles = builtins.attrNames (builtins.readDir path);
+          nixFiles = builtins.filter (nixpkgs.lib.strings.hasSuffix ".nix") allFiles;
+          nixFileNames = builtins.map (nixpkgs.lib.strings.removeSuffix ".nix") nixFiles;
+        in
+        nixpkgs.lib.attrsets.genAttrs nixFileNames (
+          regularFile: import "${path}/${regularFile}.nix" args
         );
     in
     {
-      packages = forEachSystem {
-        default = { system, ... }: self.packages.${system}.secret-agent;
-        secret-agent = import ./nix/packages/secret-agent.nix;
-      };
-      # checks =
-      #   let
-      #     testFiles = builtins.attrNames (builtins.readDir ./nix/integrationTests);
-      #     tests = nixpkgs.lib.attrsets.genAttrs testFiles (
-      #       testFile: { pkgs, ... }: pkgs.testers.runNixOSTest (import ./nix/integrationTests/${testFile} self)
-      #     );
-      #   in
-      #   forEachSystem tests;
-      devShells = forEachSystem {
-        default = { system, ... }: self.devShells.${system}.codium;
-        codium = import ./nix/devShells/codium.nix;
-      };
-      nixosModules = {
-        default = self.nixosModules.secret-agent;
-        secret-agent = import ./nix/nixosModules/secret-agent.nix;
-      };
+      overlays.default = (final: prev: { inherit (self.packages.${final.system}) secret-agent; });
+      packages = forEachSystem (readNixFiles ./nix/packages);
+      nixosModules = readNixFiles ./nix/nixosModules self;
+      devShells = forEachSystem (readNixFiles ./nix/devShells);
+      checks = forEachSystem (readNixFiles ./nix/checks);
     };
 }

@@ -1,10 +1,8 @@
 package server
 
-import (
-	"github.com/eliasvasylenko/secret-agent/internal/secret"
-)
+import "github.com/eliasvasylenko/secret-agent/internal/secrets"
 
 type OperationCreate struct {
-	Name                       secret.OperationName `json:"name"`
-	secret.OperationParameters `json:""`
+	Name                        secrets.OperationName `json:"name"`
+	secrets.OperationParameters `json:""`
 }

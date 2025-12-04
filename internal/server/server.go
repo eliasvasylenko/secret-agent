@@ -1,7 +1,9 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -9,121 +11,158 @@ import (
 	"os"
 	"strconv"
 
-	"github.com/eliasvasylenko/secret-agent/internal/secret"
+	"github.com/eliasvasylenko/secret-agent/internal/roles"
+	"github.com/eliasvasylenko/secret-agent/internal/secrets"
 	"github.com/eliasvasylenko/secret-agent/internal/store"
 )
 
 type Server struct {
-	socket  string
-	handler http.Handler
+	socket      string
+	secretStore store.Secrets
+	permissions *Permissions
 }
 
-func New(socket string, secretStore store.Secrets, debug bool) (*Server, error) {
+func New(socket string, secretStore store.Secrets, permissions *Permissions) *Server {
+	return &Server{socket, secretStore, permissions}
+}
+
+func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /secrets", func(w http.ResponseWriter, r *http.Request) {
-		secrets, err := secretStore.List(r.Context())
-		if handleError(w, err, http.StatusBadRequest) {
-			return
-		}
-		result := struct {
-			Items []*secret.Secret `json:"items"`
-		}{}
-		for _, secret := range secrets {
-			result.Items = append(result.Items, secret)
-		}
-		writeResult(w, http.StatusOK, result)
-	})
-	mux.HandleFunc("GET /secrets/{secretId}", func(w http.ResponseWriter, r *http.Request) {
-		secretId := r.PathValue("secretId")
-		secret, err := secretStore.Get(r.Context(), secretId)
-		if !handleError(w, err, http.StatusBadRequest) {
-			writeResult(w, http.StatusOK, secret)
-		}
-	})
-	mux.HandleFunc("POST /secrets/{secretId}/instances", func(w http.ResponseWriter, r *http.Request) {
-		secretId := r.PathValue("secretId")
-		instances := secretStore.Instances(secretId)
-		var operation OperationCreate
-		if readBody(w, r, operation) {
-			parameters := secret.OperationParameters{
+
+	handle := func(pattern string, subject roles.Subject, action roles.Action, handle func(w http.ResponseWriter, r *http.Request) (any, error, int)) {
+		mux.Handle(pattern, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			connection := r.Context().Value(connectionKey{}).(net.Conn)
+			identity, err := s.permissions.Claims.ClaimRoles(r, connection)
+			if err != nil {
+				writeError(w, NewErrorResponse(err.Error(), http.StatusUnauthorized))
+				return
+			}
+
+			err = s.permissions.Roles.AssertPermission(identity, roles.Permissions{subject: action})
+			if err != nil {
+				writeError(w, NewErrorResponse(err.Error(), http.StatusForbidden))
+				return
+			}
+
+			result, err, code := handle(w, r)
+			writeResult(w, result, code)
+		}))
+	}
+
+	handle("GET /secrets", roles.Secrets, roles.List,
+		func(w http.ResponseWriter, r *http.Request) (any, error, int) {
+			secs, err := s.secretStore.List(r.Context())
+			if err != nil {
+				return nil, err, http.StatusBadRequest
+			}
+			result := struct {
+				Items []*secrets.Secret `json:"items"`
+			}{}
+			for _, secret := range secs {
+				result.Items = append(result.Items, secret)
+			}
+
+			fmt.Printf("server-%v\n", result.Items[0].Create) // TODO get rid
+
+			return result, nil, http.StatusOK
+		})
+
+	handle("GET /secrets/{secretId}", roles.Secrets, roles.Read,
+		func(w http.ResponseWriter, r *http.Request) (any, error, int) {
+			secretId := r.PathValue("secretId")
+			secret, err := s.secretStore.Get(r.Context(), secretId)
+			if err != nil {
+				return nil, err, http.StatusBadRequest
+			}
+			return secret, nil, http.StatusOK
+		})
+
+	handle("POST /secrets/{secretId}/instances", roles.Instances, roles.Write,
+		func(w http.ResponseWriter, r *http.Request) (any, error, int) {
+			secretId := r.PathValue("secretId")
+			instances := s.secretStore.Instances(secretId)
+			var operation OperationCreate
+			err, code := readBody(r, operation)
+			if err != nil {
+				return nil, err, code
+			}
+			parameters := secrets.OperationParameters{
 				Env:       operation.Env,
 				Forced:    operation.Forced,
 				Reason:    operation.Reason,
 				StartedBy: operation.StartedBy,
 			}
 			instance, err := instances.Create(r.Context(), parameters)
-			if !handleError(w, err, http.StatusInternalServerError) {
-				writeResult(w, http.StatusOK, instance)
+			if err != nil {
+				return nil, err, http.StatusInternalServerError
 			}
-		}
-	})
-	mux.HandleFunc("GET /secrets/{secretId}/instances/{instanceId}", func(w http.ResponseWriter, r *http.Request) {
-		secretId := r.PathValue("secretId")
-		instanceId := r.PathValue("instanceId")
-		instances := secretStore.Instances(secretId)
-		instance, err := instances.Get(r.Context(), instanceId)
-		if !handleError(w, err, http.StatusInternalServerError) {
-			writeResult(w, http.StatusOK, instance)
-		}
-	})
-	mux.HandleFunc("GET /secrets/{secretId}/instances/{instanceId}/operations", func(w http.ResponseWriter, r *http.Request) {
-		secretId := r.PathValue("secretId")
-		instanceId := r.PathValue("instanceId")
-		instances := secretStore.Instances(secretId)
-		operations, err := instances.History(r.Context(), instanceId, 0, 100)
-		if !handleError(w, err, http.StatusInternalServerError) {
-			writeResult(w, http.StatusOK, operations)
-		}
-	})
-	mux.HandleFunc("POST /secrets/{secretId}/instances/{instanceId}/operations", func(w http.ResponseWriter, r *http.Request) {
-		secretId := r.PathValue("secretId")
-		instanceId := r.PathValue("instanceId")
-		var operation OperationCreate
-		if readBody(w, r, operation) {
-			parameters := secret.OperationParameters{
+			return instance, nil, http.StatusOK
+		})
+
+	handle("GET /secrets/{secretId}/instances/{instanceId}", roles.Instances, roles.Read,
+		func(w http.ResponseWriter, r *http.Request) (any, error, int) {
+			secretId := r.PathValue("secretId")
+			instanceId := r.PathValue("instanceId")
+			instances := s.secretStore.Instances(secretId)
+			instance, err := instances.Get(r.Context(), instanceId)
+			if err != nil {
+				return nil, err, http.StatusInternalServerError
+			}
+			return instance, nil, http.StatusOK
+		})
+
+	handle("GET /secrets/{secretId}/instances/{instanceId}/operations", roles.Instances, roles.Read,
+		func(w http.ResponseWriter, r *http.Request) (any, error, int) {
+			secretId := r.PathValue("secretId")
+			instanceId := r.PathValue("instanceId")
+			instances := s.secretStore.Instances(secretId)
+			operations, err := instances.History(r.Context(), instanceId, 0, 100)
+			if err != nil {
+				return nil, err, http.StatusInternalServerError
+			}
+			return operations, nil, http.StatusOK
+		})
+
+	handle("POST /secrets/{secretId}/instances/{instanceId}/operations", roles.Instances, roles.Write,
+		func(w http.ResponseWriter, r *http.Request) (any, error, int) {
+			secretId := r.PathValue("secretId")
+			instanceId := r.PathValue("instanceId")
+			var operation OperationCreate
+			err, code := readBody(r, operation)
+			if err != nil {
+				return nil, err, code
+			}
+
+			parameters := secrets.OperationParameters{
 				Env:       operation.Env,
 				Forced:    operation.Forced,
 				Reason:    operation.Reason,
 				StartedBy: operation.StartedBy,
 			}
-			instances := secretStore.Instances(secretId)
-			var instance *secret.Instance
-			var err error
+			instances := s.secretStore.Instances(secretId)
+			var instance *secrets.Instance
 			switch operation.Name {
-			case secret.Activate:
+			case secrets.Activate:
 				instance, err = instances.Activate(r.Context(), instanceId, parameters)
-			case secret.Deactivate:
+			case secrets.Deactivate:
 				instance, err = instances.Deactivate(r.Context(), instanceId, parameters)
-			case secret.Destroy:
+			case secrets.Destroy:
 				instance, err = instances.Destroy(r.Context(), instanceId, parameters)
-			case secret.Test:
+			case secrets.Test:
 				instance, err = instances.Test(r.Context(), instanceId, parameters)
 			default:
-				writeError(w, http.StatusBadRequest, fmt.Errorf("Cannot post operation %s", operation.Name))
+				return nil, fmt.Errorf("Cannot post operation %s", operation.Name), http.StatusBadRequest
 			}
-			if !handleError(w, err, http.StatusInternalServerError) && instance != nil {
-				writeResult(w, http.StatusOK, instance)
+			if err != nil {
+				return nil, err, http.StatusInternalServerError
 			}
-		}
-	})
+			return instance, nil, http.StatusOK
+		})
 
-	return &Server{
-		socket:  socket,
-		handler: mux,
-	}, nil
+	return mux
 }
 
-func readBody(w http.ResponseWriter, r *http.Request, v any) bool {
-	bytes, err := io.ReadAll(r.Body)
-	if err == nil {
-		err = json.Unmarshal(bytes, v)
-	}
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return false
-	}
-	return true
-}
+type connectionKey struct{}
 
 func (s *Server) Serve() error {
 	var listener net.Listener
@@ -158,45 +197,49 @@ func (s *Server) Serve() error {
 		return err
 	}
 
+	srv := &http.Server{
+		Handler: s.Handler(),
+		ConnContext: func(ctx context.Context, connection net.Conn) context.Context {
+			return context.WithValue(ctx, connectionKey{}, connection)
+		},
+	}
+
 	// serve http over socket
-	if err := http.Serve(listener, s.handler); err != nil {
+	if err := srv.Serve(listener); err != nil {
 		return err
 	}
 	return nil
 }
 
-func handleError(w http.ResponseWriter, err error, errorCode int) bool {
-	errored := err != nil
-	if errored {
-		writeError(w, errorCode, err)
+func readBody(r *http.Request, v any) (error, int) {
+	bytes, err := io.ReadAll(r.Body)
+	if err == nil {
+		err = json.Unmarshal(bytes, v)
 	}
-	return errored
+	if err != nil {
+		return err, http.StatusBadRequest
+	}
+	return nil, 0
 }
 
-func writeResult(w http.ResponseWriter, successCode int, value any) error {
-	w.WriteHeader(successCode)
+func writeResult(w http.ResponseWriter, value any, statusCode int) error {
+	w.WriteHeader(statusCode)
 
-	bytes, err := json.Marshal(value)
+	encoder := json.NewEncoder(w)
+	encoder.SetEscapeHTML(false)
+	err := encoder.Encode(value)
 	if err != nil {
 		return err
 	}
-	_, err = w.Write(bytes)
-	if err != nil {
-		return err
-	}
+
 	return nil
 }
 
-func writeError(w http.ResponseWriter, errorCode int, err error) error {
-	var response errorResponse
-	response.Error.Status = http.StatusText(errorCode)
-	response.Error.Message = err.Error()
-	return writeResult(w, errorCode, response)
-}
-
-type errorResponse struct {
-	Error struct {
-		Status  string `json:"status"`
-		Message string `json:"message"`
-	} `json:"error"`
+func writeError(w http.ResponseWriter, err error) error {
+	var response *ErrorResponse
+	if !errors.As(err, &response) {
+		response.Err.Code = http.StatusInternalServerError
+		response.Err.Message = err.Error()
+	}
+	return writeResult(w, response, response.Err.Code)
 }

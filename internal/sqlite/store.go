@@ -8,7 +8,8 @@ import (
 
 	"database/sql"
 
-	"github.com/eliasvasylenko/secret-agent/internal/secret"
+	"github.com/eliasvasylenko/secret-agent/internal/marshal"
+	"github.com/eliasvasylenko/secret-agent/internal/secrets"
 	"github.com/google/uuid"
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -16,13 +17,13 @@ import (
 // An instance store implementation backed by sqlite
 type SecretRespository struct {
 	db      *sql.DB
-	secrets secret.Secrets
+	secrets secrets.Secrets
 }
 
 type InstanceRepository struct {
 	db       *sql.DB
 	secretId string
-	secret   *secret.Secret
+	secret   *secrets.Secret
 }
 
 // The lifecycle status of an instance
@@ -34,7 +35,7 @@ const (
 	destroying instanceStatus = "destroying"
 )
 
-func NewSecretRepository(ctx context.Context, dbFile string, secrets secret.Secrets, debug bool) (*SecretRespository, error) {
+func NewSecretRepository(ctx context.Context, dbFile string, secrets secrets.Secrets, debug bool) (*SecretRespository, error) {
 	db, err := sql.Open("sqlite3", dbFile)
 	_, err = db.ExecContext(ctx, `
 		CREATE TABLE IF NOT EXISTS instance (
@@ -92,11 +93,11 @@ func beginTx(db *sql.DB) (*sql.Tx, func() error, func(), error) {
 	return tx, commit, rollback, err
 }
 
-func (s *SecretRespository) List(ctx context.Context) (secret.Secrets, error) {
+func (s *SecretRespository) List(ctx context.Context) (secrets.Secrets, error) {
 	return s.secrets, nil
 }
 
-func (s *SecretRespository) Get(ctx context.Context, secretId string) (*secret.Secret, error) {
+func (s *SecretRespository) Get(ctx context.Context, secretId string) (*secrets.Secret, error) {
 	secret, ok := s.secrets[secretId]
 	if !ok {
 		return nil, fmt.Errorf("Secret plan does not exist %s", secretId)
@@ -104,43 +105,7 @@ func (s *SecretRespository) Get(ctx context.Context, secretId string) (*secret.S
 	return secret, nil
 }
 
-func (s *SecretRespository) GetActive(ctx context.Context, secretId string) (*secret.Instance, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT
-			i.id,
-			i.secret,
-			o.name,
-			o.forced,
-			o.reason,
-			o.startedBy,
-			o.startedAt,
-			o.completedAt,
-			o.failedAt
-		FROM secret s
-		INNER JOIN instance i
-			ON i.id = s.activeInstanceId
-		INNER JOIN (
-			SELECT MAX(id), *
-			FROM operation
-			GROUP BY instanceId
-		) o
-		 	ON o.instanceId = i.id
-		WHERE s.id = ?
-	`, secretId)
-	if err != nil || !rows.Next() {
-		return nil, err
-	}
-
-	var secretBytes []byte
-	var instance = &secret.Instance{}
-	err = rows.Scan(&instance.Id, &secretBytes, &instance.Status.Name, &instance.Status.Forced, &instance.Status.Reason, &instance.Status.StartedBy, &instance.Status.StartedAt, &instance.Status.CompletedAt, &instance.Status.FailedAt)
-	if err != nil {
-		return nil, err
-	}
-	return instance, json.Unmarshal(secretBytes, &instance.Secret)
-}
-
-func (s *SecretRespository) History(ctx context.Context, secretId string, startAt int, endAt int) ([]*secret.Operation, error) {
+func (s *SecretRespository) History(ctx context.Context, secretId string, startAt int, endAt int) ([]*secrets.Operation, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT
 			id,
@@ -157,9 +122,9 @@ func (s *SecretRespository) History(ctx context.Context, secretId string, startA
 		WHERE secretId = ?
 		LIMIT ? OFFSET ?
 	`, secretId, endAt-startAt, startAt)
-	operations := []*secret.Operation{}
+	operations := []*secrets.Operation{}
 	for err == nil && rows.Next() {
-		operation := &secret.Operation{}
+		operation := &secrets.Operation{}
 		operations = append(operations, operation)
 		err = rows.Scan(&operation.Id, &operation.SecretId, &operation.InstanceId, &operation.Name, &operation.Forced, &operation.Reason, &operation.StartedBy, &operation.StartedAt, &operation.CompletedAt, &operation.FailedAt)
 	}
@@ -175,7 +140,7 @@ func (s *SecretRespository) Instances(secretId string) *InstanceRepository {
 	}
 }
 
-func (i *InstanceRepository) List(ctx context.Context, from int, to int) (secret.Instances, error) {
+func (i *InstanceRepository) List(ctx context.Context, from int, to int) (secrets.Instances, error) {
 	rows, err := i.db.QueryContext(ctx, `
 		SELECT
 			i.id,
@@ -196,9 +161,9 @@ func (i *InstanceRepository) List(ctx context.Context, from int, to int) (secret
 		 	ON o.instanceId = i.id
 		WHERE i.secretId = ?
 	`, i.secretId)
-	instances := secret.Instances{}
+	instances := secrets.Instances{}
 	for err == nil && rows.Next() {
-		instance := &secret.Instance{}
+		instance := &secrets.Instance{}
 		var secretBytes []byte
 		err = rows.Scan(&instance.Id, &secretBytes, &instance.Status.Name, &instance.Status.Forced, &instance.Status.Reason, &instance.Status.StartedBy, &instance.Status.StartedAt, &instance.Status.CompletedAt, &instance.Status.FailedAt)
 		if err != nil {
@@ -210,8 +175,8 @@ func (i *InstanceRepository) List(ctx context.Context, from int, to int) (secret
 	return instances, err
 }
 
-func (i *InstanceRepository) Get(ctx context.Context, instanceId string) (*secret.Instance, error) {
-	instance := &secret.Instance{
+func (i *InstanceRepository) Get(ctx context.Context, instanceId string) (*secrets.Instance, error) {
+	instance := &secrets.Instance{
 		Id: instanceId,
 	}
 	var secretBytes []byte
@@ -241,7 +206,43 @@ func (i *InstanceRepository) Get(ctx context.Context, instanceId string) (*secre
 	return instance, err
 }
 
-func (i *InstanceRepository) Create(ctx context.Context, paramaters secret.OperationParameters) (*secret.Instance, error) {
+func (i *InstanceRepository) GetActive(ctx context.Context) (*secrets.Instance, error) {
+	rows, err := i.db.QueryContext(ctx, `
+		SELECT
+			i.id,
+			i.secret,
+			o.name,
+			o.forced,
+			o.reason,
+			o.startedBy,
+			o.startedAt,
+			o.completedAt,
+			o.failedAt
+		FROM secret s
+		INNER JOIN instance i
+			ON i.id = s.activeInstanceId
+		INNER JOIN (
+			SELECT MAX(id), *
+			FROM operation
+			GROUP BY instanceId
+		) o
+		 	ON o.instanceId = i.id
+		WHERE s.id = ?
+	`, i.secretId)
+	if err != nil || !rows.Next() {
+		return nil, err
+	}
+
+	var secretBytes []byte
+	var instance = &secrets.Instance{}
+	err = rows.Scan(&instance.Id, &secretBytes, &instance.Status.Name, &instance.Status.Forced, &instance.Status.Reason, &instance.Status.StartedBy, &instance.Status.StartedAt, &instance.Status.CompletedAt, &instance.Status.FailedAt)
+	if err != nil {
+		return nil, err
+	}
+	return instance, json.Unmarshal(secretBytes, &instance.Secret)
+}
+
+func (i *InstanceRepository) Create(ctx context.Context, paramaters secrets.OperationParameters) (*secrets.Instance, error) {
 	if i.secret == nil {
 		return nil, fmt.Errorf("Secret plan does not exist %s", i.secretId)
 	}
@@ -260,7 +261,7 @@ func (i *InstanceRepository) Create(ctx context.Context, paramaters secret.Opera
 		return nil, err
 	}
 
-	secretBytes, err := json.Marshal(i.secret)
+	secretBytes, err := marshal.JSON(i.secret)
 	if err != nil {
 		return nil, err
 	}
@@ -274,7 +275,7 @@ func (i *InstanceRepository) Create(ctx context.Context, paramaters secret.Opera
 		return nil, err
 	}
 
-	operation, err := startOperation(ctx, tx, i.secretId, instanceId, secret.Create, paramaters)
+	operation, err := startOperation(ctx, tx, i.secretId, instanceId, secrets.Create, paramaters)
 	if err != nil {
 		return nil, err
 	}
@@ -283,7 +284,7 @@ func (i *InstanceRepository) Create(ctx context.Context, paramaters secret.Opera
 		return nil, err
 	}
 
-	instance := &secret.Instance{
+	instance := &secrets.Instance{
 		Id:     instanceId,
 		Status: operation.Status,
 		Secret: *i.secret,
@@ -293,23 +294,23 @@ func (i *InstanceRepository) Create(ctx context.Context, paramaters secret.Opera
 	return instance, err
 }
 
-func (i *InstanceRepository) Destroy(ctx context.Context, instanceId string, paramaters secret.OperationParameters) (*secret.Instance, error) {
-	return updateOperation(ctx, i.db, i.secretId, instanceId, secret.Destroy, paramaters)
+func (i *InstanceRepository) Destroy(ctx context.Context, instanceId string, paramaters secrets.OperationParameters) (*secrets.Instance, error) {
+	return updateOperation(ctx, i.db, i.secretId, instanceId, secrets.Destroy, paramaters)
 }
 
-func (i *InstanceRepository) Activate(ctx context.Context, instanceId string, paramaters secret.OperationParameters) (*secret.Instance, error) {
-	return updateOperation(ctx, i.db, i.secretId, instanceId, secret.Activate, paramaters)
+func (i *InstanceRepository) Activate(ctx context.Context, instanceId string, paramaters secrets.OperationParameters) (*secrets.Instance, error) {
+	return updateOperation(ctx, i.db, i.secretId, instanceId, secrets.Activate, paramaters)
 }
 
-func (i *InstanceRepository) Deactivate(ctx context.Context, instanceId string, paramaters secret.OperationParameters) (*secret.Instance, error) {
-	return updateOperation(ctx, i.db, i.secretId, instanceId, secret.Deactivate, paramaters)
+func (i *InstanceRepository) Deactivate(ctx context.Context, instanceId string, paramaters secrets.OperationParameters) (*secrets.Instance, error) {
+	return updateOperation(ctx, i.db, i.secretId, instanceId, secrets.Deactivate, paramaters)
 }
 
-func (i *InstanceRepository) Test(ctx context.Context, instanceId string, paramaters secret.OperationParameters) (*secret.Instance, error) {
-	return updateOperation(ctx, i.db, i.secretId, instanceId, secret.Test, paramaters)
+func (i *InstanceRepository) Test(ctx context.Context, instanceId string, paramaters secrets.OperationParameters) (*secrets.Instance, error) {
+	return updateOperation(ctx, i.db, i.secretId, instanceId, secrets.Test, paramaters)
 }
 
-func updateOperation(ctx context.Context, db *sql.DB, secretId string, instanceId string, operationName secret.OperationName, paramaters secret.OperationParameters) (*secret.Instance, error) {
+func updateOperation(ctx context.Context, db *sql.DB, secretId string, instanceId string, operationName secrets.OperationName, paramaters secrets.OperationParameters) (*secrets.Instance, error) {
 	tx, commit, rollback, err := beginTx(db)
 	if err != nil {
 		return nil, err
@@ -318,7 +319,7 @@ func updateOperation(ctx context.Context, db *sql.DB, secretId string, instanceI
 
 	var secretBytes []byte
 	var activeInstanceId *string
-	var previousOperation secret.Operation
+	var previousOperation secrets.Operation
 	err = tx.QueryRowContext(ctx, `
 		SELECT
 			i.secret,
@@ -341,7 +342,7 @@ func updateOperation(ctx context.Context, db *sql.DB, secretId string, instanceI
 	if err != nil {
 		return nil, err
 	}
-	var secretPlan secret.Secret
+	var secretPlan secrets.Secret
 	err = json.Unmarshal(secretBytes, &secretPlan)
 	if err != nil {
 		return nil, err
@@ -351,9 +352,9 @@ func updateOperation(ctx context.Context, db *sql.DB, secretId string, instanceI
 
 	if previousOperation.CompletedAt == nil && operationName != previousOperation.Name {
 		msg = fmt.Sprintf("%s when previous %s has not succeeded", operationName, previousOperation.Name)
-	} else if operationName == secret.Activate && activeInstanceId != nil {
+	} else if operationName == secrets.Activate && activeInstanceId != nil {
 		msg = fmt.Sprintf("%s when instance %s is active", operationName, *activeInstanceId)
-	} else if (operationName == secret.Test || operationName == secret.Deactivate) && (activeInstanceId == nil || *activeInstanceId != instanceId) {
+	} else if (operationName == secrets.Test || operationName == secrets.Deactivate) && (activeInstanceId == nil || *activeInstanceId != instanceId) {
 		msg = fmt.Sprintf("%s when instance is not active", operationName)
 	}
 
@@ -376,7 +377,7 @@ func updateOperation(ctx context.Context, db *sql.DB, secretId string, instanceI
 		return nil, err
 	}
 
-	instance := &secret.Instance{
+	instance := &secrets.Instance{
 		Id:     instanceId,
 		Status: operation.Status,
 		Secret: secretPlan,
@@ -386,11 +387,11 @@ func updateOperation(ctx context.Context, db *sql.DB, secretId string, instanceI
 	return instance, err
 }
 
-func startOperation(ctx context.Context, tx *sql.Tx, secretId string, instanceId string, operationName secret.OperationName, paramaters secret.OperationParameters) (secret.Operation, error) {
-	operation := secret.Operation{
+func startOperation(ctx context.Context, tx *sql.Tx, secretId string, instanceId string, operationName secrets.OperationName, paramaters secrets.OperationParameters) (secrets.Operation, error) {
+	operation := secrets.Operation{
 		SecretId:   secretId,
 		InstanceId: instanceId,
-		Status: secret.Status{
+		Status: secrets.Status{
 			Name:      operationName,
 			Forced:    paramaters.Forced,
 			Reason:    paramaters.Reason,
@@ -405,7 +406,7 @@ func startOperation(ctx context.Context, tx *sql.Tx, secretId string, instanceId
 	return operation, err
 }
 
-func completeOperation(ctx context.Context, db *sql.DB, secretId string, instance *secret.Instance, operation secret.Operation, parameters secret.OperationParameters) error {
+func completeOperation(ctx context.Context, db *sql.DB, secretId string, instance *secrets.Instance, operation secrets.Operation, parameters secrets.OperationParameters) error {
 	processErr := instance.Secret.Process(ctx, operation.Name, "", parameters)
 
 	tx, commit, rollback, err := beginTx(db)
@@ -415,7 +416,7 @@ func completeOperation(ctx context.Context, db *sql.DB, secretId string, instanc
 	defer rollback()
 
 	// always set active instance on attempt to activate
-	if operation.Name == secret.Activate {
+	if operation.Name == secrets.Activate {
 		tx.ExecContext(ctx, `
 			UPDATE secret SET activeInstanceId = ?
 			WHERE id = ?
@@ -434,7 +435,7 @@ func completeOperation(ctx context.Context, db *sql.DB, secretId string, instanc
 		}
 	} else {
 		// only unset active instance on successful deactivate
-		if operation.Name == secret.Deactivate {
+		if operation.Name == secrets.Deactivate {
 			tx.ExecContext(ctx, `
 				UPDATE secret SET activeInstanceId = NULL
 				WHERE id = ?
@@ -454,7 +455,7 @@ func completeOperation(ctx context.Context, db *sql.DB, secretId string, instanc
 	return commit()
 }
 
-func (i *InstanceRepository) History(ctx context.Context, instanceId string, startAt int, endAt int) (operations []*secret.Operation, err error) {
+func (i *InstanceRepository) History(ctx context.Context, instanceId string, startAt int, endAt int) (operations []*secrets.Operation, err error) {
 	var rows *sql.Rows
 	rows, err = i.db.QueryContext(ctx, `
 		SELECT
@@ -473,7 +474,7 @@ func (i *InstanceRepository) History(ctx context.Context, instanceId string, sta
 		LIMIT ? OFFSET ?
 	`, instanceId, endAt-startAt, startAt)
 	for err == nil && rows.Next() {
-		operation := &secret.Operation{}
+		operation := &secrets.Operation{}
 		operations = append(operations, operation)
 		err = rows.Scan(&operation.Id, &operation.SecretId, &operation.InstanceId, &operation.Name, &operation.Forced, &operation.Reason, &operation.StartedBy, &operation.StartedAt, &operation.CompletedAt, &operation.FailedAt)
 	}

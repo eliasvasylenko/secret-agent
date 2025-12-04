@@ -1,0 +1,1 @@
+{ nixosModules, ... }: nixosModules.secret-agent

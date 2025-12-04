@@ -2,12 +2,15 @@ package main
 
 import (
 	"context"
-	"encoding/json"
+	"log"
 	"os"
 
 	"github.com/alecthomas/kong"
+	"github.com/eliasvasylenko/secret-agent/internal/cli"
 	com "github.com/eliasvasylenko/secret-agent/internal/command"
-	sec "github.com/eliasvasylenko/secret-agent/internal/secret"
+	"github.com/eliasvasylenko/secret-agent/internal/marshal"
+	sec "github.com/eliasvasylenko/secret-agent/internal/secrets"
+	"github.com/eliasvasylenko/secret-agent/internal/server"
 	ser "github.com/eliasvasylenko/secret-agent/internal/server"
 	"github.com/eliasvasylenko/secret-agent/internal/store"
 )
@@ -19,23 +22,24 @@ func main() {
 }
 
 type CLI struct {
-	ClientSocket string          `short:"c"`
-	SecretsFile  string          `short:"s"`
-	DbFile       string          `short:"D"`
-	Debug        bool            `short:"d"`
-	Pretty       bool            `short:"p"`
-	Secrets      Secrets         `cmd:"" help:"List secrets"`
-	Secret       Secret          `cmd:"" help:"Show a secret"`
-	Instances    Instances       `cmd:"" help:"List instances of a secret"`
-	Instance     Instance        `cmd:"" help:"Show an instance of a secret"`
-	Active       Secret          `cmd:"" help:"Show the active instance of a secret"`
-	History      History         `cmd:"" help:"Show the operation history of a secret"`
-	Create       SecretCommand   `cmd:"" help:"Create an instance of a secret"`
-	Destroy      InstanceCommand `cmd:"" help:"Destroy an instance of a secret"`
-	Activate     InstanceCommand `cmd:"" help:"Activate an instance of a secret"`
-	Deactivate   InstanceCommand `cmd:"" help:"Deactivate an instance of a secret"`
-	Test         InstanceCommand `cmd:"" help:"Test an instance of a secret"`
-	Serve        Serve           `cmd:"" help:"Serve the secret agent API"`
+	SecretsFile     string          `short:"S" env:"SECRETS_FILE"`
+	PermissionsFile string          `short:"P" env:"PERMISSIONS_FILE"`
+	DbFile          string          `short:"D" env:"DB_FILE"`
+	ClientSocket    string          `short:"c" env:"CLIENT_SOCKET"`
+	Debug           bool            `short:"d" env:"DEBUG"`
+	Pretty          bool            `short:"p" env:"PRETTY"`
+	Secrets         Secrets         `cmd:"" help:"List secrets"`
+	Secret          Secret          `cmd:"" help:"Show a secret"`
+	Instances       Instances       `cmd:"" help:"List instances of a secret"`
+	Instance        Instance        `cmd:"" help:"Show an instance of a secret"`
+	Active          Secret          `cmd:"" help:"Show the active instance of a secret"`
+	History         History         `cmd:"" help:"Show the operation history of a secret"`
+	Create          SecretCommand   `cmd:"" help:"Create an instance of a secret"`
+	Destroy         InstanceCommand `cmd:"" help:"Destroy an instance of a secret"`
+	Activate        InstanceCommand `cmd:"" help:"Activate an instance of a secret"`
+	Deactivate      InstanceCommand `cmd:"" help:"Deactivate an instance of a secret"`
+	Test            InstanceCommand `cmd:"" help:"Test an instance of a secret"`
+	Serve           Serve           `cmd:"" help:"Serve the secret agent API"`
 
 	ctx         *kong.Context
 	secretStore store.Secrets
@@ -45,13 +49,12 @@ func NewCLI(ctx context.Context) *CLI {
 	var c CLI
 	c.ctx = kong.Parse(&c)
 
+	if c.Debug {
+		log.Default().Printf("cli %v", c)
+	}
+
 	var err error
-	c.secretStore, err = store.New(ctx, store.Config{
-		Socket:      c.ClientSocket,
-		SecretsFile: c.SecretsFile,
-		DbFile:      c.DbFile,
-		Debug:       c.Debug,
-	})
+	c.secretStore, err = cli.NewStore(ctx, c.ClientSocket, c.SecretsFile, c.DbFile, c.Debug)
 	c.ctx.FatalIfErrorf(err)
 	return &c
 }
@@ -69,7 +72,7 @@ func (c *CLI) Run(ctx context.Context) {
 	case "instance <secret-id> <instance-id>":
 		result, err = c.secretStore.Instances(c.Instance.SecretID).Get(ctx, c.Instance.InstanceID)
 	case "active <secret-id>":
-		result, err = c.secretStore.GetActive(ctx, c.Instances.SecretID)
+		result, err = c.secretStore.Instances(c.Instance.SecretID).GetActive(ctx)
 	case "history <secret-id>":
 		result, err = c.secretStore.History(ctx, c.History.SecretID, c.History.From, c.History.To)
 	case "history <secret-id> <instance-id>":
@@ -85,11 +88,10 @@ func (c *CLI) Run(ctx context.Context) {
 	case "test <secret-id> <instance-id>":
 		result, err = c.secretStore.Instances(c.Test.SecretID).Test(ctx, c.Test.InstanceID, c.Test.parameters())
 	case "serve":
-		var server *ser.Server
-		server, err = ser.New(c.Serve.ServerSocket, c.secretStore, c.Debug)
-		if err == nil {
-			err = server.Serve()
-		}
+		permissionsConfig, err := server.LoadPermissions(c.PermissionsFile)
+		c.ctx.FatalIfErrorf(err)
+		server := ser.New(c.Serve.ServerSocket, c.secretStore, permissionsConfig)
+		err = server.Serve()
 	default:
 		panic(c.ctx.Command())
 	}
@@ -98,9 +100,9 @@ func (c *CLI) Run(ctx context.Context) {
 
 	var bytes []byte
 	if c.Pretty {
-		bytes, err = json.MarshalIndent(result, "", "  ")
+		bytes, err = marshal.JSONIndent(result)
 	} else {
-		bytes, err = json.Marshal(result)
+		bytes, err = marshal.JSON(result)
 	}
 	c.ctx.FatalIfErrorf(err)
 
@@ -162,5 +164,5 @@ func (c *Command) parameters() sec.OperationParameters {
 }
 
 type Serve struct {
-	ServerSocket string `short:"S"`
+	ServerSocket string `short:"s"`
 }
