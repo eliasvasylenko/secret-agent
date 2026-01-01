@@ -1,6 +1,6 @@
 { self, pkgs, ... }:
 pkgs.testers.runNixOSTest {
-  name = "list multiple secrets";
+  name = "List no instances of a secret";
 
   nodes.machine =
     { config, pkgs, ... }:
@@ -10,7 +10,7 @@ pkgs.testers.runNixOSTest {
       services.secret-agent = {
         enable = true;
         secrets.db-creds = {
-          create = "echo hello, world > /etc/message";
+          create = "echo created > /etc/creds";
         };
         secrets.extra-creds = {
           create = "init-creds";
@@ -21,18 +21,18 @@ pkgs.testers.runNixOSTest {
     };
 
   testScript = ''
+    from json import loads, dumps
+
+    # setup
     start_all()
     machine.wait_for_unit("sockets.target")
-    output = machine.succeed("secret-agent secrets")
-    ${(pkgs.callPackage ./helpers { }).matchJson "output" [
-      {
-        id = "db-creds";
-        create = "echo hello, world > /etc/message";
-      }
-      {
-        id = "extra-creds";
-        create = "init-creds";
-      }
-    ]}
+
+    # run test
+    output = machine.succeed("secret-agent instances db-creds")
+
+    # asserts
+    value = loads(output)
+    expected = loads("[]")
+    assert value == expected, f"value '{dumps(value)}' does not match expected '{dumps(expected)}'"
   '';
 }

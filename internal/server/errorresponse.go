@@ -10,14 +10,18 @@ type ErrorResponse struct {
 }
 
 type httpError struct {
-	Message string `json:"message"`
 	Code    int    `json:"status"`
+	Message string `json:"message"`
 }
 
-func NewErrorResponse(err error, code int) *ErrorResponse {
-	return &ErrorResponse{HttpError: &httpError{Message: err.Error(), Code: code}}
+func NewErrorResponse(code int, err error) *ErrorResponse {
+	return &ErrorResponse{HttpError: &httpError{Code: code, Message: err.Error()}}
 }
 
 func (r *ErrorResponse) Error() string {
-	return fmt.Sprintf("%s (%v) - %s", http.StatusText(r.HttpError.Code), r.HttpError.Code, r.HttpError.Message)
+	if r.HttpError.Message == "" {
+		return fmt.Sprintf("%v %s", r.HttpError.Code, http.StatusText(r.HttpError.Code))
+	} else {
+		return fmt.Sprintf("%v %s - %s", r.HttpError.Code, http.StatusText(r.HttpError.Code), r.HttpError.Message)
+	}
 }

@@ -1,1 +1,5 @@
-{ self, system, ... }: self.devShells.${system}.codium
+{ pkgs, ... }:
+with pkgs;
+mkShell {
+  buildInputs = [ go ];
+}

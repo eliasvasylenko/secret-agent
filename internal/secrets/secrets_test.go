@@ -14,22 +14,22 @@ import (
 
 func TestLoadPlans(t *testing.T) {
 	friend := &Secret{
-		Id:     "friend",
+		Name:   "friend",
 		Create: command.New("echo hello friend", nil, ""),
 	}
 	dbCreds := &Secret{
-		Id:     "db-creds",
+		Name:   "db-creds",
 		Create: command.New("openssl rand -base64 32", nil, ""),
 		Derive: Secrets{
 			"service": &Secret{
-				Id:         "service",
+				Name:       "service",
 				Create:     command.New("cat > /etc/enrypted-creds/$NAME/$ID.cred", nil, ""),
 				Destroy:    command.New("rm -f /etc/enrypted-creds/$NAME/$ID.cred", nil, ""),
 				Activate:   command.New("cp -f /etc/enrypted-creds/$NAME/$ID.cred /etc/enrypted-creds/service.cred", nil, ""),
 				Deactivate: command.New("rm -f /etc/enrypted-creds/service.cred", nil, ""),
 			},
 			"remote": &Secret{
-				Id:         "remote",
+				Name:       "remote",
 				Create:     command.New("ssh host -csecret-agent create $NAME $ID", nil, ""),
 				Destroy:    command.New("ssh host -csecret-agent destroy $NAME $ID", nil, ""),
 				Activate:   command.New("ssh host -csecret-agent activate $NAME $ID", nil, ""),

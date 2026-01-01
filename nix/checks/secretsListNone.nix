@@ -1,6 +1,6 @@
 { self, pkgs, ... }:
 pkgs.testers.runNixOSTest {
-  name = "list no secrets";
+  name = "List no secrets";
 
   nodes.machine =
     { config, pkgs, ... }:
@@ -15,9 +15,18 @@ pkgs.testers.runNixOSTest {
     };
 
   testScript = ''
+    from json import loads, dumps
+
+    # setup
     start_all()
     machine.wait_for_unit("sockets.target")
+
+    # run test
     output = machine.succeed("secret-agent secrets")
-    ${(pkgs.callPackage ./helpers { }).matchJson "output" [ ]}
+
+    # asserts
+    value = loads(output)
+    expected = loads("[]")
+    assert value == expected, f"value '{dumps(value)}' does not match expected '{dumps(expected)}'"
   '';
 }

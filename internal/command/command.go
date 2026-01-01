@@ -59,7 +59,7 @@ func (c *Command) MarshalJSON() ([]byte, error) {
 }
 
 func (c *Command) Process(ctx context.Context, input string, environment Environment) (string, error) {
-	env := c.Environment.Merge(environment)
+	env := c.Environment.ExpandWith(environment)
 
 	shell, args, err := BuildShellExec(c.Script, c.Shell)
 	if err != nil {
@@ -67,7 +67,7 @@ func (c *Command) Process(ctx context.Context, input string, environment Environ
 	}
 
 	subProcess := (*c.exec)(ctx, shell, args...)
-	subProcess.Env = append(subProcess.Env, env.Render([]string{})...)
+	subProcess.Env = append(subProcess.Env, env.Render()...)
 	stdin, err := subProcess.StdinPipe()
 	if err != nil {
 		return "", fmt.Errorf("resource could not be created '%v'", c)
@@ -79,7 +79,7 @@ func (c *Command) Process(ctx context.Context, input string, environment Environ
 
 	output, err := subProcess.Output()
 	if err != nil {
-		return "", fmt.Errorf("process failed '%v'", c)
+		return "", fmt.Errorf("process failed '%v' - %s", c, err.Error())
 	}
 
 	return string(output), err

@@ -195,17 +195,17 @@ func (f *fakeCommand) testExec(t *testing.T, name string, test func(t *testing.T
 
 		bytes, err := io.ReadAll(os.Stdin)
 		if err != nil {
-			fmt.Printf("error reading input %v", err)
+			fmt.Printf("error reading input %v\n", err)
 		} else if f.expectedInput != string(bytes) {
-			fmt.Printf("expected input '%v', got '%v'", f.expectedInput, string(bytes))
+			fmt.Printf("expected input '%v', got '%v'\n", f.expectedInput, string(bytes))
 		}
 		commandLine := os.Args[3:]
 		if !reflect.DeepEqual(f.expectedCommand, commandLine) {
-			fmt.Printf("expected command '%v', got '%v'", f.expectedCommand, commandLine)
+			fmt.Printf("expected command '%v', got '%v'\n", f.expectedCommand, commandLine)
 		}
 		for key, value := range f.expectedEnvironment {
 			if value != os.Getenv(key) {
-				fmt.Printf("expected env %v = '%v'", key, value)
+				fmt.Printf("expected env %v = '%v', got '%v'\n", key, value, os.Getenv(key))
 			}
 		}
 

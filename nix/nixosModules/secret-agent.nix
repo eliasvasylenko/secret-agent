@@ -1,7 +1,4 @@
-{
-  packages,
-  ...
-}:
+{ packages, ... }:
 {
   config,
   lib,
@@ -65,11 +62,17 @@ let
 
   # Make the options for provisioning a secret
   secretOptions = name: {
+    environment = lib.mkOption {
+      description = "The environment variables to surface to the secret commands";
+      default = { };
+      type = with lib.types; attrsOf str;
+    };
     create = mkCommandOptions "create the secret";
     destroy = mkCommandOptions "destroy the secret";
     activate = mkCommandOptions "activate the secret";
     deactivate = mkCommandOptions "deactivate the secret";
     test = mkCommandOptions "test the activated secret";
+
     derive = lib.mkOption {
       description = "Plans that derive from the secret";
       default = { };
@@ -77,9 +80,9 @@ let
         with lib.types;
         attrsOf (
           submodule (
-            { ... }:
+            { name, ... }:
             {
-              options = secretOptions;
+              options = secretOptions name;
             }
           )
         );
@@ -127,9 +130,9 @@ let
   # Options for the secret agent service
   secret-agent = {
     enable = lib.mkEnableOption "secret agent";
-    package = lib.mkPackageOption {
-      secret-agent = packages.${pkgs.system}.secret-agent;
-    } "secret-agent" { };
+    package = lib.mkPackageOption packages.${pkgs.system} "secret-agent" {
+      default = "default";
+    };
     roles = lib.mkOption {
       description = "Roles and their permissions";
       type =
@@ -180,10 +183,11 @@ let
   # Map the nix secrets config into a service secrets config
   makeSecretsConfig =
     secrets:
-    lib.lists.sortOn ({ id, ... }: id) (
-      lib.attrsets.mapAttrsToList (id: secret: {
-        inherit id;
+    lib.lists.sortOn ({ name, ... }: name) (
+      lib.attrsets.mapAttrsToList (name: secret: {
+        inherit name;
         inherit (secret)
+          environment
           create
           destroy
           activate

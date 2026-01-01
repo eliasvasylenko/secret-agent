@@ -1,6 +1,6 @@
 { self, pkgs, ... }:
 pkgs.testers.runNixOSTest {
-  name = "list a single secret";
+  name = "Create an instance of a secret";
 
   nodes.machine =
     { config, pkgs, ... }:
@@ -10,7 +10,7 @@ pkgs.testers.runNixOSTest {
       services.secret-agent = {
         enable = true;
         secrets.db-creds = {
-          create = "echo hello, world > /etc/message";
+          create = "echo created > /etc/creds";
         };
       };
 
@@ -18,14 +18,16 @@ pkgs.testers.runNixOSTest {
     };
 
   testScript = ''
+    # setup
     start_all()
     machine.wait_for_unit("sockets.target")
-    output = machine.succeed("secret-agent secrets")
-    ${(pkgs.callPackage ./helpers { }).matchJson "output" [
-      {
-        id = "db-creds";
-        create = "echo hello, world > /etc/message";
-      }
-    ]}
+
+    # run test
+    machine.succeed("secret-agent create db-creds")
+    output = machine.succeed("cat /etc/creds")
+
+    # asserts
+    expected = "created\n"
+    assert output == expected, f"value '{output}' does not match expected '{expected}'"
   '';
 }

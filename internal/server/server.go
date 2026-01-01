@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 
@@ -34,13 +35,13 @@ func (s *Server) Handler() http.Handler {
 			connection := r.Context().Value(connectionKey{}).(net.Conn)
 			identity, err := s.permissions.Claims.ClaimRoles(r, connection)
 			if err != nil {
-				writeError(w, NewErrorResponse(err, http.StatusUnauthorized))
+				writeError(w, NewErrorResponse(http.StatusUnauthorized, err))
 				return
 			}
 
 			err = s.permissions.Roles.AssertPermission(identity, roles.Permissions{subject: action})
 			if err != nil {
-				writeError(w, NewErrorResponse(err, http.StatusForbidden))
+				writeError(w, NewErrorResponse(http.StatusForbidden, err))
 				return
 			}
 
@@ -58,16 +59,9 @@ func (s *Server) Handler() http.Handler {
 		func(w http.ResponseWriter, r *http.Request) (any, int, error) {
 			secs, err := s.secretStore.List(r.Context())
 			if err != nil {
-				return nil, 0, NewErrorResponse(err, http.StatusBadRequest)
+				return nil, 0, NewErrorResponse(http.StatusBadRequest, err)
 			}
-			result := struct {
-				Items []*secrets.Secret `json:"items"`
-			}{}
-			for _, secret := range secs {
-				result.Items = append(result.Items, secret)
-			}
-
-			return result, http.StatusOK, nil
+			return ItemsResponse[secrets.Secrets]{secs}, http.StatusOK, nil
 		})
 
 	handle("GET /secrets/{secretId}", roles.Secrets, roles.Read,
@@ -75,9 +69,21 @@ func (s *Server) Handler() http.Handler {
 			secretId := r.PathValue("secretId")
 			secret, err := s.secretStore.Get(r.Context(), secretId)
 			if err != nil {
-				return nil, 0, NewErrorResponse(err, http.StatusBadRequest)
+				return nil, 0, NewErrorResponse(http.StatusBadRequest, err)
 			}
 			return secret, http.StatusOK, nil
+		})
+
+	handle("GET /secrets/{secretId}/instances", roles.Instances, roles.Read,
+		func(w http.ResponseWriter, r *http.Request) (any, int, error) {
+			secretId := r.PathValue("secretId")
+			instances := s.secretStore.Instances(secretId)
+			from, to, err := parseRange(*r.URL)
+			insts, err := instances.List(r.Context(), from, to)
+			if err != nil {
+				return nil, 0, err
+			}
+			return ItemsResponse[secrets.Instances]{insts}, http.StatusOK, nil
 		})
 
 	handle("POST /secrets/{secretId}/instances", roles.Instances, roles.Write,
@@ -118,8 +124,9 @@ func (s *Server) Handler() http.Handler {
 		func(w http.ResponseWriter, r *http.Request) (any, int, error) {
 			secretId := r.PathValue("secretId")
 			instanceId := r.PathValue("instanceId")
+			from, to, err := parseRange(*r.URL)
 			instances := s.secretStore.Instances(secretId)
-			operations, err := instances.History(r.Context(), instanceId, 0, 100)
+			operations, err := instances.History(r.Context(), instanceId, int(from), int(to))
 			if err != nil {
 				return nil, 0, err
 			}
@@ -154,7 +161,7 @@ func (s *Server) Handler() http.Handler {
 			case secrets.Test:
 				instance, err = instances.Test(r.Context(), instanceId, parameters)
 			default:
-				return nil, 0, NewErrorResponse(fmt.Errorf("Cannot post operation %s", operation.Name), http.StatusBadRequest)
+				return nil, 0, NewErrorResponse(http.StatusBadRequest, fmt.Errorf("Cannot post operation %s", operation.Name))
 			}
 			if err != nil {
 				return nil, 0, err
@@ -220,7 +227,7 @@ func readBody(r *http.Request, v any) error {
 		err = json.Unmarshal(bytes, v)
 	}
 	if err != nil {
-		return NewErrorResponse(err, http.StatusBadRequest)
+		return NewErrorResponse(http.StatusBadRequest, err)
 	}
 	return nil
 }
@@ -241,8 +248,31 @@ func writeResult(w http.ResponseWriter, value any, statusCode int) error {
 func writeError(w http.ResponseWriter, err error) error {
 	var response *ErrorResponse
 	if !errors.As(err, &response) {
-		response.HttpError.Code = http.StatusInternalServerError
-		response.HttpError.Message = err.Error()
+		response = NewErrorResponse(
+			http.StatusInternalServerError,
+			err,
+		)
 	}
 	return writeResult(w, response, response.HttpError.Code)
+}
+
+func parseRange(url url.URL) (int, int, error) {
+	from, err := parseInt(url, "from", 32)
+	if err != nil {
+		return from, 0, err
+	}
+	to, err := parseInt(url, "to", 32)
+	return from, to, err
+}
+
+func parseInt(url url.URL, name string, defaultValue int) (int, error) {
+	numString := url.Query().Get(name)
+	if numString == "" {
+		return defaultValue, nil
+	}
+	num, err := strconv.ParseInt(numString, 10, 32)
+	if err != nil {
+		return 0, NewErrorResponse(http.StatusBadRequest, fmt.Errorf("failed to parse '%s' - %w", name, err))
+	}
+	return int(num), nil
 }

@@ -13,7 +13,7 @@ import (
 // A plan for the provisioning of a secret
 type Secret struct {
 	// The name of the secret
-	Id string `json:"id"`
+	Name string `json:"name"`
 
 	// The environment variables for the secret plan
 	Environment command.Environment `json:"environment,omitempty"`
@@ -42,13 +42,13 @@ type Secrets map[string]*Secret
 func New(secretList []*Secret) (Secrets, error) {
 	secrets := map[string]*Secret{}
 	for _, secret := range secretList {
-		if secret.Id == "" {
-			return nil, fmt.Errorf("Secret ID must not be empty")
+		if secret.Name == "" {
+			return nil, fmt.Errorf("Secret name must not be empty")
 		}
-		if _, ok := secrets[secret.Id]; ok {
-			return nil, fmt.Errorf("Secret ID '%s' must be unique", secret.Id)
+		if _, ok := secrets[secret.Name]; ok {
+			return nil, fmt.Errorf("Secret name '%s' must be unique", secret.Name)
 		}
-		secrets[secret.Id] = secret
+		secrets[secret.Name] = secret
 	}
 	return secrets, nil
 }
@@ -88,21 +88,23 @@ func (s *Secret) Command(operation OperationName) *command.Command {
 	}
 }
 
-func (s *Secret) Process(ctx context.Context, operation OperationName, input string, parameters OperationParameters) error {
+func (s *Secret) Process(ctx context.Context, operation OperationName, input string, parameters OperationParameters, instanceId string) error {
 	var output string
-	env := parameters.Env
 
-	path := s.Id
-	if parent, ok := env["PATH"]; ok {
-		path = fmt.Sprintf("%s/%s/", parent, path)
+	qname := s.Name
+	if parent, ok := parameters.Env["QNAME"]; ok {
+		qname = fmt.Sprintf("%s/%s", parent, qname)
 	}
-	env = command.Environment{
-		"PATH":       path,
-		"ID":         s.Id,
+	qid := fmt.Sprintf("%s/%s", qname, instanceId)
+	env := s.Environment.ExpandAndMergeWith(command.Environment{
+		"ID":         instanceId,
+		"NAME":       s.Name,
+		"QID":        qid,
+		"QNAME":      qname,
 		"FORCE":      strconv.FormatBool(parameters.Forced),
 		"REASON":     parameters.Reason,
 		"STARTED_BY": parameters.StartedBy,
-	}.Merge(env)
+	}).ExpandWith(parameters.Env)
 
 	command := s.Command(operation)
 	if command != nil {
@@ -120,12 +122,12 @@ func (s *Secret) Process(ctx context.Context, operation OperationName, input str
 		Forced:    parameters.Forced,
 		Reason:    parameters.Reason,
 		StartedBy: parameters.StartedBy,
-	})
+	}, instanceId)
 }
 
-func (s *Secret) processSubsteps(ctx context.Context, operation OperationName, input string, parameters OperationParameters) error {
+func (s *Secret) processSubsteps(ctx context.Context, operation OperationName, input string, parameters OperationParameters, instanceId string) error {
 	for _, secret := range s.Derive {
-		if err := secret.Process(ctx, operation, input, parameters); err != nil {
+		if err := secret.Process(ctx, operation, input, parameters, instanceId); err != nil {
 			return err
 		}
 	}

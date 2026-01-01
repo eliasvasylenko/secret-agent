@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -71,22 +72,25 @@ func Do[T any](client http.Client, req *http.Request, err error) (T, error) {
 		return body, &errorResponse
 	}
 
+	if response.StatusCode >= 300 {
+		return body, server.NewErrorResponse(response.StatusCode, nil)
+	}
+
 	err = json.Unmarshal(bodyBytes, &body)
+	if err != nil {
+		err = fmt.Errorf("failed to parse response, %w - '%s'", err, string(bodyBytes))
+	}
 
 	return body, err
 }
 
-type items struct {
-	Items []*secrets.Secret `json:"items"`
-}
-
 func (c *SecretClient) List(ctx context.Context) (secrets.Secrets, error) {
 	req, err := BuildRequest(ctx, http.MethodGet, "/secrets", nil)
-	items, err := Do[items](c.client, req, err)
+	items, err := Do[server.ItemsResponse[secrets.Secrets]](c.client, req, err)
 	if err != nil {
 		return nil, err
 	}
-	return secrets.New(items.Items)
+	return items.Items, nil
 }
 
 func (c *SecretClient) Get(ctx context.Context, secretId string) (*secrets.Secret, error) {
@@ -113,7 +117,11 @@ func (c *SecretClient) Instances(secretId string) *InstanceClient {
 
 func (c *InstanceClient) List(ctx context.Context, from int, to int) (secrets.Instances, error) {
 	req, err := BuildRequest(ctx, http.MethodGet, "/secrets/"+c.secretId+"/instances", nil)
-	return Do[secrets.Instances](c.client, req, err)
+	items, err := Do[server.ItemsResponse[secrets.Instances]](c.client, req, err)
+	if err != nil {
+		return nil, err
+	}
+	return items.Items, nil
 }
 
 func (c *InstanceClient) Get(ctx context.Context, instanceId string) (*secrets.Instance, error) {

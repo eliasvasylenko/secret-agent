@@ -407,7 +407,7 @@ func startOperation(ctx context.Context, tx *sql.Tx, secretId string, instanceId
 }
 
 func completeOperation(ctx context.Context, db *sql.DB, secretId string, instance *secrets.Instance, operation secrets.Operation, parameters secrets.OperationParameters) error {
-	processErr := instance.Secret.Process(ctx, operation.Name, "", parameters)
+	processErr := instance.Secret.Process(ctx, operation.Name, "", parameters, operation.InstanceId)
 
 	tx, commit, rollback, err := beginTx(db)
 	if err != nil {
