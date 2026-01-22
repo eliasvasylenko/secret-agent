@@ -50,7 +50,7 @@ func NewSecretRepository(ctx context.Context, dbFile string, secrets secrets.Sec
 			FOREIGN KEY(activeInstanceId) REFERENCES instance(id)
 		);
 		CREATE TABLE IF NOT EXISTS operation (
-			id INTEGER PRIMARY KEY,
+			id INTEGER NOT NULL PRIMARY KEY,
 			secretId TEXT NOT NULL,
 			instanceId TEXT NOT NULL,
 			name VARCHAR(32) NOT NULL,
@@ -160,6 +160,7 @@ func (i *InstanceRepository) List(ctx context.Context, from int, to int) (secret
 		) o
 		 	ON o.instanceId = i.id
 		WHERE i.secretId = ?
+		ORDER BY o.id DESC
 	`, i.secretId)
 	instances := secrets.Instances{}
 	for err == nil && rows.Next() {
@@ -399,8 +400,8 @@ func startOperation(ctx context.Context, tx *sql.Tx, secretId string, instanceId
 		},
 	}
 	err := tx.QueryRowContext(ctx, `
-		INSERT INTO operation (id, secretId, instanceId, name, forced, reason, startedBy, startedAt)
-			VALUES (NULL, ?, ?, ?, ?, ?, ?, DATETIME('now'))
+		INSERT INTO operation (secretId, instanceId, name, forced, reason, startedBy, startedAt)
+			VALUES (?, ?, ?, ?, ?, ?, DATETIME('now'))
 			RETURNING id, startedAt
 	`, secretId, instanceId, operation.Name, operation.Forced, operation.Reason, operation.StartedBy).Scan(&operation.Id, &operation.StartedAt)
 	return operation, err

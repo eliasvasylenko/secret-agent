@@ -1,4 +1,31 @@
 { self, pkgs, ... }:
+let
+  cred = {
+    environment = {
+      STAGING = "/etc/credstore/secret-agent";
+      STORE = "/etc/credstore";
+    };
+    create = ''
+      ${pkgs.coreutils}/bin/mkdir -p "$STAGING/$QNAME"
+      cat <&1 >$STAGING/$QNAME/$ID
+    '';
+    activate = ''
+      ${pkgs.coreutils}/bin/cp $STAGING/$QNAME/$ID $STORE/$\{QNAME//\//.}
+    '';
+    deactivate = ''
+      ${pkgs.coreutils}/bin/rm $STORE/$\{QNAME//\//.}
+    '';
+    destroy = ''
+      ${pkgs.coreutils}/bin/rm $STAGING/$QNAME/$ID
+    '';
+  };
+  credEncrypted = cred // {
+    environment = {
+      STAGING = "/etc/credstore.encrypted/secret-agent";
+      STORE = "/etc/credstore.encrypted";
+    };
+  };
+in
 pkgs.testers.runNixOSTest {
   name = "Create an instance of a systemd credential";
 
@@ -10,41 +37,15 @@ pkgs.testers.runNixOSTest {
       services.secret-agent = {
         enable = true;
 
-        secrets.root =
-          let
-            createCred = pkgs.writeShellApplication {
-              name = "createCred";
-              runtimeInputs = [ pkgs.coreutils ];
-              text = ''
-                mkdir "/etc/$QNAME"
-                printenv > "/etc/$QNAME/$ID.cred"
-              '';
-            };
-          in
-          {
-            environment = {
-              VAR1 = "$TEST1";
-              VAR2 = "var2";
-            };
-            create = "${createCred}/bin/createCred";
-            derive = {
-              child1 = {
-                environment = {
-                  VAR1 = "override-$VAR1";
-                  VAR2 = "override-$VAR2";
-                };
-                create = "${createCred}/bin/createCred";
-              };
-              child2 = {
-                environment = {
-                  VAR1 = "override-$VAR1";
-                  VAR3 = "var3";
-                  VAR4 = "$VAR2";
-                };
-                create = "${createCred}/bin/createCred";
-              };
-            };
-          };
+        secrets.simple = {
+          create = "echo password123";
+          derive.cred = cred;
+        };
+
+        secrets.encrypted = {
+          create = "echo password123";
+          derive.cred = credEncrypted;
+        };
       };
 
       system.stateVersion = "23.11";

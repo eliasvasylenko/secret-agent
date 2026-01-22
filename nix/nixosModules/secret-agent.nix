@@ -15,51 +15,6 @@ let
       default = null;
     };
 
-  # Make the options for provisioning an encrypted secret to be mounted by systemd-creds
-  serviceOptions = name: {
-    enable = lib.mkEnableOption "service credential";
-
-    suppressUnencrypted = lib.mkOption {
-      description = ''
-        Suppress existing unencrypted LoadCredential options.
-        This is sometimes needed in case of collision.
-      '';
-      default = false;
-      type = with lib.types; bool;
-    };
-
-    name = lib.mkOption {
-      description = "The name of the credential when encrypted with systemd-creds.";
-      default = name;
-      type = with lib.types; str;
-    };
-
-    bindPath = lib.mkOption {
-      description = ''
-        Path to mount the credential file privately to the service.
-        This is sometimes needed if the secret path is configured in a
-        context where we can't expand env vars or systemd specifiers.
-      '';
-      default = null;
-      type = with lib.types; nullOr str;
-    };
-  };
-
-  # Make the options for provisioning the secret remotely
-  remoteOptions = name: {
-    enable = lib.mkEnableOption "remote secret";
-
-    name = lib.mkOption {
-      description = "The name of the secret on the remote host.";
-      default = name;
-      type = with lib.types; str;
-    };
-
-    hostname = with lib.types; str;
-
-    # TODO Define plans for passing secrets to hosts via SSH
-  };
-
   # Make the options for provisioning a secret
   secretOptions = name: {
     environment = lib.mkOption {
@@ -83,36 +38,6 @@ let
             { name, ... }:
             {
               options = secretOptions name;
-            }
-          )
-        );
-    };
-
-    systemd = lib.mkOption {
-      description = "Systemd services which will use the secret";
-      default = { };
-      type =
-        with lib.types;
-        attrsOf (
-          submodule (
-            { name, ... }:
-            {
-              options = serviceOptions name;
-            }
-          )
-        );
-    };
-
-    remote = lib.mkOption {
-      description = "Remote secrets";
-      default = { };
-      type =
-        with lib.types;
-        attrsOf (
-          submodule (
-            { name, ... }:
-            {
-              options = remoteOptions name;
             }
           )
         );
@@ -221,45 +146,23 @@ in
   };
 
   config = lib.mkIf cfg.enable {
-    systemd.services =
-      (lib.attrsets.concatMapAttrs (
-        secret: secretCfg:
-        lib.attrsets.concatMapAttrs (service: serviceCfg: {
-          "${service}".serviceConfig = lib.mkIf serviceCfg.enable {
-            # Mount the decrypted credential on the bind path
-            BindPaths = lib.mkIf (serviceCfg.bindPath != null) [
-              "%d/${serviceCfg.name}:${serviceCfg.bindPath}${
-                if (builtins.match "$.*/^" serviceCfg.bindPath) != null then serviceCfg.name else ""
-              }"
-            ];
-            # Load the encrypted credential
-            LoadCredentialEncrypted = [
-              "${serviceCfg.name}:/etc/credstore.encrypted/secret-agent/${serviceCfg.name}.cred"
-            ];
-            # Suppress unencrypted credentials
-            LoadCredential = lib.mkIf serviceCfg.suppressUnencrypted (lib.mkForce [ ]);
-          };
-        }) secretCfg.systemd
-      ) cfg.secrets)
-      // {
-        "secret-agent" = {
-          enable = true;
-          description = "Secret agent service";
-          path = with pkgs; [
-            bash
-            jq
-            coreutils
-          ];
-          serviceConfig = {
-            Type = "simple";
-            Restart = "no";
-            ExecStart = "${cfg.package}/bin/secret-agent serve -S ${secretsFile} -P ${permissionsFile} -D ./dbfile";
-            NonBlocking = true;
-          };
-          requires = [ "secret-agent.socket" ];
-          after = [ "secret-agent.socket" ];
-        };
+    systemd.services.secret-agent = {
+      enable = true;
+      description = "Secret agent service";
+      path = with pkgs; [
+        bash
+        jq
+        coreutils
+      ];
+      serviceConfig = {
+        Type = "simple";
+        Restart = "no";
+        ExecStart = "${cfg.package}/bin/secret-agent serve -S ${secretsFile} -P ${permissionsFile} -D ./dbfile";
+        NonBlocking = true;
       };
+      requires = [ "secret-agent.socket" ];
+      after = [ "secret-agent.socket" ];
+    };
 
     environment.systemPackages = [
       (cfg.package.overrideAttrs (prevAttrs: {
