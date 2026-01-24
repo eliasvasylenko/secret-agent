@@ -50,7 +50,6 @@ pkgs.testers.runNixOSTest {
   testScript = ''
     from json import loads, dumps
 
-    # setup
     start_all()
     none.wait_for_unit("sockets.target")
     single.wait_for_unit("sockets.target")

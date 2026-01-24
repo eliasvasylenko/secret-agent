@@ -47,7 +47,6 @@ pkgs.testers.runNixOSTest {
     from json import loads
     from datetime import datetime, timezone
 
-    # setup
     start_all()
     machine.wait_for_unit("sockets.target")
     startTime = datetime.now(timezone.utc)
@@ -76,7 +75,7 @@ pkgs.testers.runNixOSTest {
       for item in value:
         startedAt = datetime.fromisoformat(item["status"].pop("startedAt"))
         completedAt = datetime.fromisoformat(item["status"].pop("completedAt"))
-        assert startTime <= startedAt <= completedAt <= endTime, "unexpected startedAt and completedAt times"
+        assert startTime <= startedAt <= completedAt <= endTime, f"unexpected startedAt and completedAt times; violated condition: {startTime} <= {startedAt} <= {completedAt} <= {endTime}"
 
     with subtest("list none"):
       testList("${writeJSON expectedInstances [ ]}")

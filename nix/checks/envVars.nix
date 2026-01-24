@@ -51,7 +51,6 @@ pkgs.testers.runNixOSTest {
     };
 
   testScript = ''
-    # setup
     start_all()
     machine.wait_for_unit("sockets.target")
     def parse(output):
@@ -65,49 +64,52 @@ pkgs.testers.runNixOSTest {
       del env["_"]
       return env
 
-    # run test
     machine.succeed("TEST1=test1 TEST2=test2 secret-agent create root -r reason")
-    rootOutput = parse(machine.succeed("cat /etc/root/*.cred"))
-    child1Output = parse(machine.succeed("cat /etc/root/child1/*.cred"))
-    child2Output = parse(machine.succeed("cat /etc/root/child2/*.cred"))
 
-    # asserts
-    rootExpected = {
-      "ID": rootOutput["ID"],
-      "NAME": "root",
-      "FORCE": "false",
-      "QID": f"root/{rootOutput["ID"]}",
-      "QNAME": "root",
-      "REASON": "reason",
-      "VAR1": "test1",
-      "VAR2": "var2",
-      "STARTED_BY": "user",
-    }
-    child1Expected = {
-      "ID": child1Output["ID"],
-      "NAME": "child1",
-      "FORCE": "false",
-      "QID": f"root/child1/{child1Output["ID"]}",
-      "QNAME": "root/child1",
-      "REASON": "reason",
-      "VAR1": "override-test1",
-      "VAR2": "override-var2",
-      "STARTED_BY": "user",
-    }
-    child2Expected = {
-      "ID": child2Output["ID"],
-      "NAME": "child2",
-      "FORCE": "false",
-      "QID": f"root/child2/{child2Output["ID"]}",
-      "QNAME": "root/child2",
-      "REASON": "reason",
-      "VAR1": "override-test1",
-      "VAR3": "var3",
-      "VAR4": "var2",
-      "STARTED_BY": "user",
-    }
-    assert rootOutput == rootExpected, f"value '{rootOutput}' does not match expected '{rootExpected}'"
-    assert child1Output == child1Expected, f"value '{child1Output}' does not match expected '{child1Expected}'"
-    assert child2Output == child2Expected, f"value '{child2Output}' does not match expected '{child2Expected}'"
+    with subtest("root env vars"):
+      rootOutput = parse(machine.succeed("cat /etc/root/*.cred"))
+      rootExpected = {
+        "ID": rootOutput["ID"],
+        "NAME": "root",
+        "FORCE": "false",
+        "QID": f"root/{rootOutput["ID"]}",
+        "QNAME": "root",
+        "REASON": "reason",
+        "VAR1": "test1",
+        "VAR2": "var2",
+        "STARTED_BY": "user",
+      }
+      assert rootOutput == rootExpected, f"value '{rootOutput}' does not match expected '{rootExpected}'"
+
+    with subtest("child env vars 1"):
+      child1Output = parse(machine.succeed("cat /etc/root/child1/*.cred"))
+      child1Expected = {
+        "ID": child1Output["ID"],
+        "NAME": "child1",
+        "FORCE": "false",
+        "QID": f"root/child1/{child1Output["ID"]}",
+        "QNAME": "root/child1",
+        "REASON": "reason",
+        "VAR1": "override-test1",
+        "VAR2": "override-var2",
+        "STARTED_BY": "user",
+      }
+      assert child1Output == child1Expected, f"value '{child1Output}' does not match expected '{child1Expected}'"
+
+    with subtest("child env vars 2"):
+      child2Output = parse(machine.succeed("cat /etc/root/child2/*.cred"))
+      child2Expected = {
+        "ID": child2Output["ID"],
+        "NAME": "child2",
+        "FORCE": "false",
+        "QID": f"root/child2/{child2Output["ID"]}",
+        "QNAME": "root/child2",
+        "REASON": "reason",
+        "VAR1": "override-test1",
+        "VAR3": "var3",
+        "VAR4": "var2",
+        "STARTED_BY": "user",
+      }
+      assert child2Output == child2Expected, f"value '{child2Output}' does not match expected '{child2Expected}'"
   '';
 }
