@@ -8,7 +8,6 @@ import (
 
 // The status of a secret instance at a point in time
 type Operation struct {
-	Id         int    `json:"id"`
 	SecretId   string `json:"secretId"`
 	InstanceId string `json:"instanceId"`
 	Status     `json:""`
@@ -25,13 +24,14 @@ type OperationParameters struct {
 type OperationName string
 
 type Status struct {
-	Name        OperationName `json:"name"`
-	Forced      bool          `json:"forced,omitzero"`
-	Reason      string        `json:"reason,omitzero"`
-	StartedBy   string        `json:"startedBy"`
-	StartedAt   time.Time     `json:"startedAt"`
-	CompletedAt *time.Time    `json:"completedAt,omitempty"`
-	FailedAt    *time.Time    `json:"failedAt,omitempty"`
+	OperationNumber int           `json:"operationNumber"`
+	Name            OperationName `json:"name"`
+	Forced          bool          `json:"forced,omitzero"`
+	Reason          string        `json:"reason,omitzero"`
+	StartedBy       string        `json:"startedBy"`
+	StartedAt       time.Time     `json:"startedAt"`
+	CompletedAt     *time.Time    `json:"completedAt,omitempty"`
+	FailedAt        *time.Time    `json:"failedAt,omitempty"`
 }
 
 const (

@@ -1,8 +1,10 @@
 package secrets
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
+	"slices"
 
 	"github.com/eliasvasylenko/secret-agent/internal/marshal"
 )
@@ -36,11 +38,11 @@ func NewInstances(instanceList []*Instance) (Instances, error) {
 }
 
 func (i *Instances) UnmarshalJSON(p []byte) error {
-	instanceMap := make([]*Instance, 0)
-	if err := json.Unmarshal(p, &instanceMap); err != nil {
+	instanceList := make([]*Instance, 0)
+	if err := json.Unmarshal(p, &instanceList); err != nil {
 		return err
 	}
-	instances, err := NewInstances(instanceMap)
+	instances, err := NewInstances(instanceList)
 	*i = instances
 	return err
 }
@@ -50,5 +52,8 @@ func (i Instances) MarshalJSON() ([]byte, error) {
 	for _, instance := range i {
 		instances = append(instances, instance)
 	}
+	slices.SortFunc(instances, func(a *Instance, b *Instance) int {
+		return cmp.Compare(b.Status.OperationNumber, a.Status.OperationNumber)
+	})
 	return marshal.JSON(instances)
 }

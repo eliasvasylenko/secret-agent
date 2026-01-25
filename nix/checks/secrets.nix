@@ -1,6 +1,6 @@
 { self, pkgs, ... }:
 pkgs.testers.runNixOSTest {
-  name = "List multiple secrets";
+  name = "Secrets";
 
   nodes.none =
     { config, pkgs, ... }:

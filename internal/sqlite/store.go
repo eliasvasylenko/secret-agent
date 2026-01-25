@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"time"
 
 	"database/sql"
 
@@ -126,7 +127,7 @@ func (s *SecretRespository) History(ctx context.Context, secretId string, startA
 	for err == nil && rows.Next() {
 		operation := &secrets.Operation{}
 		operations = append(operations, operation)
-		err = rows.Scan(&operation.Id, &operation.SecretId, &operation.InstanceId, &operation.Name, &operation.Forced, &operation.Reason, &operation.StartedBy, &operation.StartedAt, &operation.CompletedAt, &operation.FailedAt)
+		err = rows.Scan(&operation.OperationNumber, &operation.SecretId, &operation.InstanceId, &operation.Name, &operation.Forced, &operation.Reason, &operation.StartedBy, &operation.StartedAt, &operation.CompletedAt, &operation.FailedAt)
 	}
 	return operations, err
 }
@@ -145,6 +146,7 @@ func (i *InstanceRepository) List(ctx context.Context, from int, to int) (secret
 		SELECT
 			i.id,
 			i.secret,
+			o.id,
 			o.name,
 			o.forced,
 			o.reason,
@@ -160,13 +162,12 @@ func (i *InstanceRepository) List(ctx context.Context, from int, to int) (secret
 		) o
 		 	ON o.instanceId = i.id
 		WHERE i.secretId = ?
-		ORDER BY o.id DESC
 	`, i.secretId)
 	instances := secrets.Instances{}
 	for err == nil && rows.Next() {
 		instance := &secrets.Instance{}
 		var secretBytes []byte
-		err = rows.Scan(&instance.Id, &secretBytes, &instance.Status.Name, &instance.Status.Forced, &instance.Status.Reason, &instance.Status.StartedBy, &instance.Status.StartedAt, &instance.Status.CompletedAt, &instance.Status.FailedAt)
+		err = rows.Scan(&instance.Id, &secretBytes, &instance.Status.OperationNumber, &instance.Status.Name, &instance.Status.Forced, &instance.Status.Reason, &instance.Status.StartedBy, &instance.Status.StartedAt, &instance.Status.CompletedAt, &instance.Status.FailedAt)
 		if err != nil {
 			break
 		}
@@ -184,6 +185,7 @@ func (i *InstanceRepository) Get(ctx context.Context, instanceId string) (*secre
 	err := i.db.QueryRowContext(ctx, `
 		SELECT
 			i.secret,
+			o.id,
 			o.name,
 			o.forced,
 			o.reason,
@@ -199,7 +201,7 @@ func (i *InstanceRepository) Get(ctx context.Context, instanceId string) (*secre
 		) o
 		 	ON o.instanceId = i.id
 		WHERE i.id = ?
-	`, instanceId).Scan(&secretBytes, &instance.Status.Name, &instance.Status.Forced, &instance.Status.Reason, &instance.Status.StartedBy, &instance.Status.StartedAt, &instance.Status.CompletedAt, &instance.Status.FailedAt)
+	`, instanceId).Scan(&secretBytes, &instance.Status.OperationNumber, &instance.Status.Name, &instance.Status.Forced, &instance.Status.Reason, &instance.Status.StartedBy, &instance.Status.StartedAt, &instance.Status.CompletedAt, &instance.Status.FailedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -212,6 +214,7 @@ func (i *InstanceRepository) GetActive(ctx context.Context) (*secrets.Instance, 
 		SELECT
 			i.id,
 			i.secret,
+			o.id,
 			o.name,
 			o.forced,
 			o.reason,
@@ -236,7 +239,7 @@ func (i *InstanceRepository) GetActive(ctx context.Context) (*secrets.Instance, 
 
 	var secretBytes []byte
 	var instance = &secrets.Instance{}
-	err = rows.Scan(&instance.Id, &secretBytes, &instance.Status.Name, &instance.Status.Forced, &instance.Status.Reason, &instance.Status.StartedBy, &instance.Status.StartedAt, &instance.Status.CompletedAt, &instance.Status.FailedAt)
+	err = rows.Scan(&instance.Id, &secretBytes, &instance.Status.OperationNumber, &instance.Status.Name, &instance.Status.Forced, &instance.Status.Reason, &instance.Status.StartedBy, &instance.Status.StartedAt, &instance.Status.CompletedAt, &instance.Status.FailedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -325,6 +328,7 @@ func updateOperation(ctx context.Context, db *sql.DB, secretId string, instanceI
 		SELECT
 			i.secret,
 			s.activeInstanceId,
+			o.id,
 			o.name,
 			o.startedAt,
 			o.completedAt,
@@ -339,7 +343,7 @@ func updateOperation(ctx context.Context, db *sql.DB, secretId string, instanceI
 		) o
 		 	ON o.instanceId = i.id
 		WHERE i.id = ?
-	`, instanceId).Scan(&secretBytes, &activeInstanceId, &previousOperation.Name, &previousOperation.StartedAt, &previousOperation.CompletedAt, &previousOperation.FailedAt)
+	`, instanceId).Scan(&secretBytes, &activeInstanceId, &previousOperation.OperationNumber, &previousOperation.Name, &previousOperation.StartedAt, &previousOperation.CompletedAt, &previousOperation.FailedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -401,9 +405,9 @@ func startOperation(ctx context.Context, tx *sql.Tx, secretId string, instanceId
 	}
 	err := tx.QueryRowContext(ctx, `
 		INSERT INTO operation (secretId, instanceId, name, forced, reason, startedBy, startedAt)
-			VALUES (?, ?, ?, ?, ?, ?, DATETIME('now'))
+			VALUES (?, ?, ?, ?, ?, ?, ?)
 			RETURNING id, startedAt
-	`, secretId, instanceId, operation.Name, operation.Forced, operation.Reason, operation.StartedBy).Scan(&operation.Id, &operation.StartedAt)
+	`, secretId, instanceId, operation.Name, operation.Forced, operation.Reason, operation.StartedBy, time.Now()).Scan(&operation.OperationNumber, &operation.StartedAt)
 	return operation, err
 }
 
@@ -427,10 +431,10 @@ func completeOperation(ctx context.Context, db *sql.DB, secretId string, instanc
 	err = processErr
 	if err != nil {
 		commitErr := tx.QueryRowContext(ctx, `
-			UPDATE operation SET failedAt = DATETIME('now')
+			UPDATE operation SET failedAt = ?
 			WHERE id = ?
 			RETURNING failedAt
-		`, operation.Id).Scan(&instance.Status.FailedAt)
+		`, time.Now(), operation.OperationNumber).Scan(&instance.Status.FailedAt)
 		if commitErr != nil {
 			err = commitErr
 		}
@@ -444,10 +448,10 @@ func completeOperation(ctx context.Context, db *sql.DB, secretId string, instanc
 		}
 
 		err = tx.QueryRowContext(ctx, `
-			UPDATE operation SET completedAt = DATETIME('now') 
+			UPDATE operation SET completedAt = ?
 			WHERE id = ?
 			RETURNING completedAt
-		`, operation.Id).Scan(&instance.Status.CompletedAt)
+		`, time.Now(), operation.OperationNumber).Scan(&instance.Status.CompletedAt)
 	}
 	if err != nil {
 		return err
@@ -477,7 +481,7 @@ func (i *InstanceRepository) History(ctx context.Context, instanceId string, sta
 	for err == nil && rows.Next() {
 		operation := &secrets.Operation{}
 		operations = append(operations, operation)
-		err = rows.Scan(&operation.Id, &operation.SecretId, &operation.InstanceId, &operation.Name, &operation.Forced, &operation.Reason, &operation.StartedBy, &operation.StartedAt, &operation.CompletedAt, &operation.FailedAt)
+		err = rows.Scan(&operation.OperationNumber, &operation.SecretId, &operation.InstanceId, &operation.Name, &operation.Forced, &operation.Reason, &operation.StartedBy, &operation.StartedAt, &operation.CompletedAt, &operation.FailedAt)
 	}
 	return
 }

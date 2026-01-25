@@ -27,15 +27,12 @@ let
     };
     create = ''
       ${pkgs.coreutils}/bin/mkdir -p "$STAGING/$QNAME"
-      ${pkgs.systemd}/bin/systemd-creds encrypt \
-        --name ''${QNAME//\//.} \
-        /dev/stdin \
-        $STAGING/$QNAME/$ID
+      ${pkgs.systemd}/bin/systemd-creds encrypt --name ''${QNAME//\//.} /dev/stdin $STAGING/$QNAME/$ID
     '';
   };
 in
 pkgs.testers.runNixOSTest {
-  name = "Create an instance of a systemd credential";
+  name = "Set up systemd credentials";
 
   nodes.machine =
     { config, pkgs, ... }:

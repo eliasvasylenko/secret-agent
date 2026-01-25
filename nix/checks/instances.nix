@@ -1,6 +1,6 @@
 { self, pkgs, ... }:
 let
-  expectedInstance = action: {
+  expectedInstance = action: number: {
     secret = {
       name = "db-creds";
       create = "echo done create > /etc/creds";
@@ -10,15 +10,20 @@ let
       test = "echo done test > /etc/creds";
     };
     status = {
+      operationNumber = number;
       name = action;
       startedBy = "user";
     };
   };
-  expectedInstances = builtins.map expectedInstance;
-  writeJSON = function: argument: pkgs.writeText "expected" (builtins.toJSON (function argument));
+  writeJSON =
+    item:
+    if builtins.isFunction item then
+      argument: writeJSON (item argument)
+    else
+      pkgs.writeText "expected" (builtins.toJSON item);
 in
 pkgs.testers.runNixOSTest {
-  name = "Activate an instance of a secret";
+  name = "Secret instances";
 
   nodes.machine =
     { config, pkgs, ... }:
@@ -45,11 +50,22 @@ pkgs.testers.runNixOSTest {
 
   testScript = ''
     from json import loads
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     start_all()
     machine.wait_for_unit("sockets.target")
-    startTime = datetime.now(timezone.utc)
+
+    def date():
+      return datetime.fromisoformat(machine.succeed("date '+%Y-%m-%dT%H:%M:%S.%6NZ'").strip())
+
+    startTime = date()
+
+    def testTimes(values):
+      endTime = date()
+      for value in values:
+        startedAt = datetime.fromisoformat(value["status"].pop("startedAt"))
+        completedAt = datetime.fromisoformat(value["status"].pop("completedAt"))
+        assert startTime <= startedAt <= completedAt <= endTime, f"unexpected startedAt and completedAt times; violated condition: {startTime} <= {startedAt} <= {completedAt} <= {endTime}"
 
     def testAction(action, expected, id = ""):
       output = machine.succeed(f"""
@@ -60,10 +76,10 @@ pkgs.testers.runNixOSTest {
           <(echo $output | jq --sort-keys 'del(.id, .status.startedAt, .status.completedAt)')
       """)
       machine.succeed(f"diff /etc/creds <(echo done {action})")
+      testTimes([loads(output)])
       return output
 
     def testList(expected):
-      endTime = datetime.now(timezone.utc)
       output = machine.succeed(f"""
         output=$(secret-agent instances db-creds)
         echo $output
@@ -71,43 +87,40 @@ pkgs.testers.runNixOSTest {
           <(jq --sort-keys '.' {expected}) \
           <(echo $output | jq --sort-keys 'del(.[].id, .[].status.startedAt, .[].status.completedAt)')
       """)
-      value = loads(output)
-      for item in value:
-        startedAt = datetime.fromisoformat(item["status"].pop("startedAt"))
-        completedAt = datetime.fromisoformat(item["status"].pop("completedAt"))
-        assert startTime <= startedAt <= completedAt <= endTime, f"unexpected startedAt and completedAt times; violated condition: {startTime} <= {startedAt} <= {completedAt} <= {endTime}"
+      testTimes(loads(output))
+      return output
 
     with subtest("list none"):
-      testList("${writeJSON expectedInstances [ ]}")
+      testList("${writeJSON []}")
 
     with subtest("create"):
-      instance = testAction("create", "${writeJSON expectedInstance "create"}")
+      instance = testAction("create", "${writeJSON expectedInstance "create" 1}")
       id = loads(instance)["id"]
 
     with subtest("activate"):
-      testAction("activate", "${writeJSON expectedInstance "activate"}", id)
+      testAction("activate", "${writeJSON expectedInstance "activate" 2}", id)
 
     with subtest("test"):
-      testAction("test", "${writeJSON expectedInstance "test"}", id)
+      testAction("test", "${writeJSON expectedInstance "test" 3}", id)
 
     with subtest("deactivate"):
-      testAction("deactivate", "${writeJSON expectedInstance "deactivate"}", id)
+      testAction("deactivate", "${writeJSON expectedInstance "deactivate" 4}", id)
 
     with subtest("list single"):
-      testList("${writeJSON expectedInstances [ "deactivate" ]}")
+      testList("${writeJSON [ (expectedInstance "deactivate" 4) ]}")
 
     with subtest("list multiple"):
       instance = machine.succeed("secret-agent create db-creds")
       id2 = loads(instance)["id"]
       testList("${
-        writeJSON expectedInstances [
-          "create"
-          "deactivate"
+        writeJSON [
+          (expectedInstance "create" 5)
+          (expectedInstance "deactivate" 4)
         ]
       }")
 
     with subtest("destroy"):
-      testAction("destroy", "${writeJSON expectedInstance "destroy"}", id)
-      testAction("destroy", "${writeJSON expectedInstance "destroy"}", id2)
+      testAction("destroy", "${writeJSON expectedInstance "destroy" 6}", id)
+      testAction("destroy", "${writeJSON expectedInstance "destroy" 7}", id2)
   '';
 }
