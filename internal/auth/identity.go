@@ -1,6 +1,6 @@
 //go:build linux
 
-package roles
+package auth
 
 import (
 	"encoding/json"
@@ -11,15 +11,20 @@ import (
 	"github.com/eliasvasylenko/secret-agent/internal/marshal"
 )
 
+type Identity struct {
+	Principal string
+	Roles     ClaimedRoles
+}
+
 type Claims struct {
 	PlatformClaims `json:""`
 }
 
-type ClaimedRoles []RoleName
-
-func (c *Claims) ClaimRoles(request *http.Request, connection net.Conn) (ClaimedRoles, error) {
-	return c.PlatformClaims.ClaimRoles(request, connection)
+func (c *Claims) ClaimIdentity(request *http.Request, connection net.Conn) (*Identity, error) {
+	return c.PlatformClaims.ClaimIdentity(request, connection)
 }
+
+type ClaimedRoles []RoleName
 
 func (c *ClaimedRoles) UnmarshalJSON(p []byte) error {
 	var claimedRole RoleName

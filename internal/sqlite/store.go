@@ -17,26 +17,19 @@ import (
 
 // An instance store implementation backed by sqlite
 type SecretRespository struct {
-	db      *sql.DB
-	secrets secrets.Secrets
+	db           *sql.DB
+	secrets      secrets.Secrets
+	maxReasonLen int
 }
 
 type InstanceRepository struct {
-	db       *sql.DB
-	secretId string
-	secret   *secrets.Secret
+	db           *sql.DB
+	secretId     string
+	secret       *secrets.Secret
+	maxReasonLen int
 }
 
-// The lifecycle status of an instance
-type instanceStatus string
-
-const (
-	created    instanceStatus = "created"
-	creating   instanceStatus = "creating"
-	destroying instanceStatus = "destroying"
-)
-
-func NewSecretRepository(ctx context.Context, dbFile string, secrets secrets.Secrets, debug bool) (*SecretRespository, error) {
+func NewSecretRepository(ctx context.Context, dbFile string, secrets secrets.Secrets, debug bool, maxReasonLen int) (*SecretRespository, error) {
 	db, err := sql.Open("sqlite3", dbFile)
 	_, err = db.ExecContext(ctx, `
 		CREATE TABLE IF NOT EXISTS instance (
@@ -67,7 +60,7 @@ func NewSecretRepository(ctx context.Context, dbFile string, secrets secrets.Sec
 		CREATE INDEX IF NOT EXISTS instance_operation ON operation (instanceId, id DESC);
 		CREATE INDEX IF NOT EXISTS secret_operation ON operation (secretId, id DESC);
 	`)
-	return &SecretRespository{db, secrets}, err
+	return &SecretRespository{db: db, secrets: secrets, maxReasonLen: maxReasonLen}, err
 }
 
 func (s *SecretRespository) Close() {
@@ -135,9 +128,10 @@ func (s *SecretRespository) History(ctx context.Context, secretId string, startA
 func (s *SecretRespository) Instances(secretId string) *InstanceRepository {
 	secret := s.secrets[secretId]
 	return &InstanceRepository{
-		db:       s.db,
-		secretId: secretId,
-		secret:   secret,
+		db:           s.db,
+		secretId:     secretId,
+		secret:       secret,
+		maxReasonLen: s.maxReasonLen,
 	}
 }
 
@@ -247,6 +241,10 @@ func (i *InstanceRepository) GetActive(ctx context.Context) (*secrets.Instance, 
 }
 
 func (i *InstanceRepository) Create(ctx context.Context, paramaters secrets.OperationParameters) (*secrets.Instance, error) {
+	if err := paramaters.Validate(i.maxReasonLen); err != nil {
+		return nil, err
+	}
+
 	if i.secret == nil {
 		return nil, fmt.Errorf("Secret plan does not exist %s", i.secretId)
 	}
@@ -299,22 +297,26 @@ func (i *InstanceRepository) Create(ctx context.Context, paramaters secrets.Oper
 }
 
 func (i *InstanceRepository) Destroy(ctx context.Context, instanceId string, paramaters secrets.OperationParameters) (*secrets.Instance, error) {
-	return updateOperation(ctx, i.db, i.secretId, instanceId, secrets.Destroy, paramaters)
+	return updateOperation(ctx, i.db, i.secretId, instanceId, secrets.Destroy, paramaters, i.maxReasonLen)
 }
 
 func (i *InstanceRepository) Activate(ctx context.Context, instanceId string, paramaters secrets.OperationParameters) (*secrets.Instance, error) {
-	return updateOperation(ctx, i.db, i.secretId, instanceId, secrets.Activate, paramaters)
+	return updateOperation(ctx, i.db, i.secretId, instanceId, secrets.Activate, paramaters, i.maxReasonLen)
 }
 
 func (i *InstanceRepository) Deactivate(ctx context.Context, instanceId string, paramaters secrets.OperationParameters) (*secrets.Instance, error) {
-	return updateOperation(ctx, i.db, i.secretId, instanceId, secrets.Deactivate, paramaters)
+	return updateOperation(ctx, i.db, i.secretId, instanceId, secrets.Deactivate, paramaters, i.maxReasonLen)
 }
 
 func (i *InstanceRepository) Test(ctx context.Context, instanceId string, paramaters secrets.OperationParameters) (*secrets.Instance, error) {
-	return updateOperation(ctx, i.db, i.secretId, instanceId, secrets.Test, paramaters)
+	return updateOperation(ctx, i.db, i.secretId, instanceId, secrets.Test, paramaters, i.maxReasonLen)
 }
 
-func updateOperation(ctx context.Context, db *sql.DB, secretId string, instanceId string, operationName secrets.OperationName, paramaters secrets.OperationParameters) (*secrets.Instance, error) {
+func updateOperation(ctx context.Context, db *sql.DB, secretId string, instanceId string, operationName secrets.OperationName, paramaters secrets.OperationParameters, maxReasonLen int) (*secrets.Instance, error) {
+	if err := paramaters.Validate(maxReasonLen); err != nil {
+		return nil, err
+	}
+
 	tx, commit, rollback, err := beginTx(db)
 	if err != nil {
 		return nil, err

@@ -22,12 +22,13 @@ func main() {
 }
 
 type CLI struct {
-	SecretsFile     string          `short:"S" env:"SECRETS_FILE"`
-	PermissionsFile string          `short:"P" env:"PERMISSIONS_FILE"`
-	DbFile          string          `short:"D" env:"DB_FILE"`
-	ClientSocket    string          `short:"c" env:"CLIENT_SOCKET"`
-	Debug           bool            `short:"d" env:"DEBUG"`
-	Pretty          bool            `short:"p" env:"PRETTY"`
+	SecretsFile     string          `short:"S" env:"SECRETS_FILE" help:"Path to secrets configuration file"`
+	PermissionsFile string          `short:"P" env:"PERMISSIONS_FILE" help:"Path to permissions (roles/claims) configuration file"`
+	DbFile          string          `short:"D" env:"DB_FILE" help:"Path to sqlite database file"`
+	ClientSocket    string          `short:"c" env:"CLIENT_SOCKET" help:"Unix socket for connecting to a running secret-agent server"`
+	MaxReasonLen    int             `short:"R" env:"MAX_REASON_LENGTH" default:"4096" help:"Max length of audit reason strings"`
+	Debug           bool            `short:"d" env:"DEBUG" help:"Enable debug logging"`
+	Pretty          bool            `short:"p" env:"PRETTY" help:"Pretty-print JSON output"`
 	Secrets         Secrets         `cmd:"" help:"List secrets"`
 	Secret          Secret          `cmd:"" help:"Show a secret"`
 	Instances       Instances       `cmd:"" help:"List instances of a secret"`
@@ -54,7 +55,7 @@ func NewCLI(ctx context.Context) *CLI {
 	}
 
 	var err error
-	c.secretStore, err = cli.NewStore(ctx, c.ClientSocket, c.SecretsFile, c.DbFile, c.Debug)
+	c.secretStore, err = cli.NewStore(ctx, c.ClientSocket, c.SecretsFile, c.DbFile, c.Debug, c.MaxReasonLen)
 	c.ctx.FatalIfErrorf(err)
 	return &c
 }
@@ -114,44 +115,44 @@ func (c *CLI) Run(ctx context.Context) {
 type Secrets struct{}
 
 type Secret struct {
-	SecretID string `arg:""`
+	SecretID string `arg:"" help:"ID of the secret"`
 }
 
 type Instances struct {
-	SecretID string `arg:""`
+	SecretID string `arg:"" help:"ID of the secret"`
 	Bounds
 }
 
 type Instance struct {
-	SecretID   string `arg:""`
-	InstanceID string `arg:""`
+	SecretID   string `arg:"" help:"ID of the secret"`
+	InstanceID string `arg:"" help:"ID of the instance"`
 }
 
 type History struct {
-	SecretID   string `arg:""`
-	InstanceID string `arg:"" optional:""`
+	SecretID   string `arg:"" help:"ID of the secret"`
+	InstanceID string `arg:"" optional:"" help:"Optional ID of the instance"`
 	Bounds
 }
 
 type Bounds struct {
-	From int `short:"l" default:"0"`
-	To   int `short:"u" default:"10"`
+	From int `short:"l" default:"0" help:"Lower bound (inclusive) for collection listing"`
+	To   int `short:"u" default:"10" help:"Upper bound (exclusive) for collection listing"`
 }
 
 type SecretCommand struct {
-	SecretID string `arg:""`
+	SecretID string `arg:"" help:"ID of the secret"`
 	Command
 }
 
 type InstanceCommand struct {
-	SecretID   string `arg:""`
-	InstanceID string `arg:""`
+	SecretID   string `arg:"" help:"ID of the secret"`
+	InstanceID string `arg:"" help:"ID of the instance"`
 	Command
 }
 
 type Command struct {
-	Force  bool   `short:"f"`
-	Reason string `short:"r"`
+	Force  bool   `short:"f" help:"Force the operation, overriding safety checks where allowed"`
+	Reason string `short:"r" help:"Audit reason for the operation"`
 }
 
 func (c *Command) parameters() sec.OperationParameters {
@@ -164,5 +165,5 @@ func (c *Command) parameters() sec.OperationParameters {
 }
 
 type Serve struct {
-	ServerSocket string `short:"s"`
+	ServerSocket string `short:"s" help:"Unix socket path for serving the HTTP API"`
 }

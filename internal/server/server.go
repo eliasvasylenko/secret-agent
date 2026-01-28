@@ -11,39 +11,48 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"time"
 
-	"github.com/eliasvasylenko/secret-agent/internal/roles"
+	"github.com/eliasvasylenko/secret-agent/internal/auth"
 	"github.com/eliasvasylenko/secret-agent/internal/secrets"
 	"github.com/eliasvasylenko/secret-agent/internal/store"
 )
 
 type Server struct {
-	socket      string
+	config      ServerConfig
 	secretStore store.Secrets
 	permissions *Permissions
 }
 
-func New(socket string, secretStore store.Secrets, permissions *Permissions) *Server {
-	return &Server{socket, secretStore, permissions}
+type ServerConfig struct {
+	Socket        string
+	RequestLimit  int
+	RequestWindow time.Duration
+}
+
+func New(config ServerConfig, secretStore store.Secrets, permissions *Permissions) *Server {
+	return &Server{config, secretStore, permissions}
 }
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
-	handle := func(pattern string, subject roles.Subject, action roles.Action, handle func(w http.ResponseWriter, r *http.Request) (any, int, error)) {
+	handle := func(pattern string, subject auth.Subject, action auth.Action, handle func(w http.ResponseWriter, r *http.Request) (any, int, error)) {
 		mux.Handle(pattern, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			connection := r.Context().Value(connectionKey{}).(net.Conn)
-			identity, err := s.permissions.Claims.ClaimRoles(r, connection)
+			identity, err := s.permissions.Claims.ClaimIdentity(r, connection)
 			if err != nil {
 				writeError(w, NewErrorResponse(http.StatusUnauthorized, err))
 				return
 			}
 
-			err = s.permissions.Roles.AssertPermission(identity, roles.Permissions{subject: action})
+			err = s.permissions.Roles.AssertPermission(identity.Roles, auth.Permissions{subject: action})
 			if err != nil {
 				writeError(w, NewErrorResponse(http.StatusForbidden, err))
 				return
 			}
+
+			r = r.WithContext(context.WithValue(r.Context(), identityKey{}, identity))
 
 			result, code, err := handle(w, r)
 			if err != nil {
@@ -55,7 +64,7 @@ func (s *Server) Handler() http.Handler {
 		}))
 	}
 
-	handle("GET /secrets", roles.Secrets, roles.List,
+	handle("GET /secrets", auth.Secrets, auth.List,
 		func(w http.ResponseWriter, r *http.Request) (any, int, error) {
 			secs, err := s.secretStore.List(r.Context())
 			if err != nil {
@@ -64,7 +73,7 @@ func (s *Server) Handler() http.Handler {
 			return ItemsResponse[secrets.Secrets]{secs}, http.StatusOK, nil
 		})
 
-	handle("GET /secrets/{secretId}", roles.Secrets, roles.Read,
+	handle("GET /secrets/{secretId}", auth.Secrets, auth.Read,
 		func(w http.ResponseWriter, r *http.Request) (any, int, error) {
 			secretId := r.PathValue("secretId")
 			secret, err := s.secretStore.Get(r.Context(), secretId)
@@ -74,7 +83,7 @@ func (s *Server) Handler() http.Handler {
 			return secret, http.StatusOK, nil
 		})
 
-	handle("GET /secrets/{secretId}/instances", roles.Instances, roles.Read,
+	handle("GET /secrets/{secretId}/instances", auth.Instances, auth.Read,
 		func(w http.ResponseWriter, r *http.Request) (any, int, error) {
 			secretId := r.PathValue("secretId")
 			instances := s.secretStore.Instances(secretId)
@@ -86,20 +95,24 @@ func (s *Server) Handler() http.Handler {
 			return ItemsResponse[secrets.Instances]{insts}, http.StatusOK, nil
 		})
 
-	handle("POST /secrets/{secretId}/instances", roles.Instances, roles.Write,
+	handle("POST /secrets/{secretId}/instances", auth.Instances, auth.Write,
 		func(w http.ResponseWriter, r *http.Request) (any, int, error) {
 			secretId := r.PathValue("secretId")
 			instances := s.secretStore.Instances(secretId)
-			var operation OperationCreate
+			var operation OperationParameters
 			err := readBody(r, &operation)
 			if err != nil {
 				return nil, 0, err
+			}
+			identity := identityFromContext(r.Context())
+			if identity == nil {
+				return nil, 0, NewErrorResponse(http.StatusInternalServerError, fmt.Errorf("identity not found in context"))
 			}
 			parameters := secrets.OperationParameters{
 				Env:       operation.Env,
 				Forced:    operation.Forced,
 				Reason:    operation.Reason,
-				StartedBy: operation.StartedBy,
+				StartedBy: identity.Principal,
 			}
 			instance, err := instances.Create(r.Context(), parameters)
 			if err != nil {
@@ -108,7 +121,7 @@ func (s *Server) Handler() http.Handler {
 			return instance, http.StatusOK, nil
 		})
 
-	handle("GET /secrets/{secretId}/instances/{instanceId}", roles.Instances, roles.Read,
+	handle("GET /secrets/{secretId}/instances/{instanceId}", auth.Instances, auth.Read,
 		func(w http.ResponseWriter, r *http.Request) (any, int, error) {
 			secretId := r.PathValue("secretId")
 			instanceId := r.PathValue("instanceId")
@@ -120,7 +133,7 @@ func (s *Server) Handler() http.Handler {
 			return instance, http.StatusOK, nil
 		})
 
-	handle("GET /secrets/{secretId}/instances/{instanceId}/operations", roles.Instances, roles.Read,
+	handle("GET /secrets/{secretId}/instances/{instanceId}/operations", auth.Instances, auth.Read,
 		func(w http.ResponseWriter, r *http.Request) (any, int, error) {
 			secretId := r.PathValue("secretId")
 			instanceId := r.PathValue("instanceId")
@@ -133,21 +146,25 @@ func (s *Server) Handler() http.Handler {
 			return operations, http.StatusOK, nil
 		})
 
-	handle("POST /secrets/{secretId}/instances/{instanceId}/operations", roles.Instances, roles.Write,
+	handle("POST /secrets/{secretId}/instances/{instanceId}/operations", auth.Instances, auth.Write,
 		func(w http.ResponseWriter, r *http.Request) (any, int, error) {
 			secretId := r.PathValue("secretId")
 			instanceId := r.PathValue("instanceId")
-			var operation OperationCreate
+			var operation CreateOperationParameters
 			err := readBody(r, &operation)
 			if err != nil {
 				return nil, 0, err
 			}
 
+			identity := identityFromContext(r.Context())
+			if identity == nil {
+				return nil, 0, NewErrorResponse(http.StatusInternalServerError, fmt.Errorf("identity not found in context"))
+			}
 			parameters := secrets.OperationParameters{
 				Env:       operation.Env,
 				Forced:    operation.Forced,
 				Reason:    operation.Reason,
-				StartedBy: operation.StartedBy,
+				StartedBy: identity.Principal,
 			}
 			instances := s.secretStore.Instances(secretId)
 			var instance *secrets.Instance
@@ -173,16 +190,25 @@ func (s *Server) Handler() http.Handler {
 }
 
 type connectionKey struct{}
+type identityKey struct{}
+
+func identityFromContext(ctx context.Context) *auth.Identity {
+	identity, ok := ctx.Value(identityKey{}).(*auth.Identity)
+	if !ok {
+		return nil
+	}
+	return identity
+}
 
 func (s *Server) Serve() error {
 	var listener net.Listener
 	var err error
-	if s.socket != "" {
+	if s.config.Socket != "" {
 		// socket option given for manual execution
 
 		// resolve socket
 		var addr *net.UnixAddr
-		addr, err = net.ResolveUnixAddr("unix", s.socket)
+		addr, err = net.ResolveUnixAddr("unix", s.config.Socket)
 		if err != nil {
 			return err
 		}

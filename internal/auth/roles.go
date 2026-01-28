@@ -1,4 +1,4 @@
-package roles
+package auth
 
 import (
 	"encoding/json"
@@ -106,13 +106,17 @@ func (r Roles) AssertPermission(claims ClaimedRoles, permissions Permissions) er
 func (r Roles) CheckPermission(claims ClaimedRoles, permissions Permissions) bool {
 	for _, roleName := range claims {
 		role := r[roleName]
+		allPermitted := true
 		for subject, action := range permissions {
 			permittedAction, ok := role.Permissions[subject]
 			if !ok || permittedAction != action {
-				continue
+				allPermitted = false
+				break
 			}
 		}
-		return true
+		if allPermitted {
+			return true
+		}
 	}
 	return false
 }

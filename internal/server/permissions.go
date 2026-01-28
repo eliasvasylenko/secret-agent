@@ -5,12 +5,12 @@ import (
 	"io"
 	"os"
 
-	"github.com/eliasvasylenko/secret-agent/internal/roles"
+	"github.com/eliasvasylenko/secret-agent/internal/auth"
 )
 
 type Permissions struct {
-	Roles  roles.Roles  `json:"roles"`
-	Claims roles.Claims `json:"claims"`
+	Roles  auth.Roles  `json:"roles"`
+	Claims auth.Claims `json:"claims"`
 }
 
 func LoadPermissions(permissionsFileName string) (*Permissions, error) {
