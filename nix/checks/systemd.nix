@@ -1,3 +1,8 @@
+# Integration test for systemd credential import. A service can ImportCredential
+# from paths where secret-agent writes activated creds.
+# We verify:
+# - consumer starts only when creds exist
+# - plain and systemd-encrypted creds are passed through
 { self, pkgs, ... }:
 let
   cred = {

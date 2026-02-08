@@ -1,8 +1,11 @@
-# Integration test for claim identity (auth): the server derives identity from
-# Unix socket peer credentials and applies role mappings from the claims config.
-# We verify: user claims; group claims from peer cred gid, primary group, and
-# supplementary groups (including when peer cred gid differs from user primary); limited
-# roles; and 403 when unmapped.
+# Integration test for linux auth. The server derives identity from Unix socket
+# peer credentials and applies role mappings from the claims config.
+# We verify:
+# - user claims
+# - group claims from peer cred gid
+# - group claims from user groups
+# - limited roles
+# - 403 when unmapped
 { self, pkgs, ... }:
 pkgs.testers.runNixOSTest {
   name = "Claim identity auth";

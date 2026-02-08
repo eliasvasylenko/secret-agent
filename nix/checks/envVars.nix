@@ -1,3 +1,8 @@
+# Integration test for passing environment variables into secrets. Create
+# scripts receive env from config and from the caller.
+# We verify:
+# - root secret gets configured env and caller overrides
+# - derived secrets get overrides and expansion from parent env
 { self, pkgs, ... }:
 pkgs.testers.runNixOSTest {
   name = "Passing environment variables into a secret";
@@ -33,7 +38,13 @@ pkgs.testers.runNixOSTest {
                   VAR1 = "override-$VAR1";
                   VAR2 = "override-$VAR2";
                 };
-                create = "${createCred}/bin/createCred";
+                create = {
+                  script = "${createCred}/bin/createCred";
+                  environment = {
+                    VAR1 = "override-$VAR1";
+                    VAR3 = "var3";
+                  };
+                };
               };
               child2 = {
                 environment = {
@@ -90,8 +101,9 @@ pkgs.testers.runNixOSTest {
         "QID": f"root/child1/{child1Output["ID"]}",
         "QNAME": "root/child1",
         "REASON": "reason",
-        "VAR1": "override-test1",
+        "VAR1": "override-override-test1",
         "VAR2": "override-var2",
+        "VAR3": "var3",
         "STARTED_BY": "linux:root/0",
       }
       assert child1Output == child1Expected, f"value '{child1Output}' does not match expected '{child1Expected}'"

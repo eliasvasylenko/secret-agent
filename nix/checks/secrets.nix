@@ -1,3 +1,7 @@
+# Integration test for secrets listing. The server exposes the configured
+# secrets.
+# We verify:
+# - none / single / multiple configs produce the expected list
 { self, pkgs, ... }:
 pkgs.testers.runNixOSTest {
   name = "Secrets";

@@ -1,3 +1,9 @@
+# Integration test for command credentials. Operation commands can run
+# as a specific uid/gid and supplementary groups when the command config sets
+# credential.
+# We verify:
+# - create with credential runs as that user and groups
+# - create without credential runs as root
 { self, pkgs, ... }:
 pkgs.testers.runNixOSTest {
   name = "Command credentials";

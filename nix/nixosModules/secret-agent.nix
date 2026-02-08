@@ -155,6 +155,9 @@ let
       {
         script = command.script;
       }
+      // lib.optionalAttrs (command ? environment && command.environment != null) {
+        environment = command.environment;
+      }
       // lib.optionalAttrs (command ? credential && command.credential != null) {
         credential = lib.filterAttrs (n: v: v != null) command.credential;
       };

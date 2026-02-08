@@ -1,3 +1,9 @@
+# Integration test for secret instances. Create, activate, test, deactivate,
+# destroy lifecycle and instance listing.
+# We verify:
+# - operations run in order and update state
+# - list reflects current instances and operation history
+# - startedAt / completedAt and operation numbers
 { self, pkgs, ... }:
 let
   expectedInstance = action: number: {
