@@ -6,7 +6,8 @@ import (
 )
 
 type ErrorResponse struct {
-	HttpError *httpError `json:"error,omitempty"`
+	HttpError *httpError        `json:"error,omitempty"`
+	Headers   map[string]string `json:"-"`
 }
 
 type httpError struct {
@@ -15,7 +16,7 @@ type httpError struct {
 }
 
 func NewErrorResponse(code int, err error) *ErrorResponse {
-	return &ErrorResponse{HttpError: &httpError{Code: code, Message: err.Error()}}
+	return &ErrorResponse{HttpError: &httpError{Code: code, Message: err.Error()}, Headers: make(map[string]string)}
 }
 
 func (r *ErrorResponse) Error() string {

@@ -373,8 +373,6 @@ func updateOperation(ctx context.Context, db *sql.DB, secretId string, instanceI
 		}
 	}
 
-	println(secretId, instanceId, operationName, previousOperation.Name, activeInstanceId, string(secretBytes), msg)
-
 	operation, err := startOperation(ctx, tx, secretId, instanceId, operationName, paramaters)
 	if err != nil {
 		return nil, err

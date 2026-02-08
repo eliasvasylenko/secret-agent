@@ -12,7 +12,7 @@ let
     status = {
       operationNumber = number;
       name = action;
-      startedBy = "user";
+      startedBy = "linux:root/0";
     };
   };
   writeJSON =

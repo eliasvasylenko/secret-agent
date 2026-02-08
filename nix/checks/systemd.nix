@@ -7,17 +7,17 @@ let
     };
     create = ''
       ${pkgs.coreutils}/bin/mkdir -p "$STAGING/$QNAME"
-      ${pkgs.coreutils}/bin/cat < /dev/stdin > $STAGING/$QNAME/$ID
+      ${pkgs.coreutils}/bin/cat < /dev/stdin > "$STAGING/$QNAME/$ID"
     '';
     activate = ''
       ${pkgs.coreutils}/bin/mkdir -p "$STORE"
-      ${pkgs.coreutils}/bin/cp $STAGING/$QNAME/$ID $STORE/''${QNAME//\//.}
+      ${pkgs.coreutils}/bin/cp "$STAGING/$QNAME/$ID" "$STORE/''${QNAME//\//.}"
     '';
     deactivate = ''
-      ${pkgs.coreutils}/bin/rm $STORE/''${QNAME//\//.}
+      ${pkgs.coreutils}/bin/rm "$STORE/''${QNAME//\//.}"
     '';
     destroy = ''
-      ${pkgs.coreutils}/bin/rm $STAGING/$QNAME/$ID
+      ${pkgs.coreutils}/bin/rm "$STAGING/$QNAME/$ID"
     '';
   };
   credEncrypted = cred // {
@@ -27,7 +27,7 @@ let
     };
     create = ''
       ${pkgs.coreutils}/bin/mkdir -p "$STAGING/$QNAME"
-      ${pkgs.systemd}/bin/systemd-creds encrypt --name ''${QNAME//\//.} /dev/stdin $STAGING/$QNAME/$ID
+      ${pkgs.systemd}/bin/systemd-creds encrypt --name "''${QNAME//\//.}" /dev/stdin "$STAGING/$QNAME/$ID"
     '';
   };
 in

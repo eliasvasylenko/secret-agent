@@ -18,10 +18,11 @@ var execCommand = exec.CommandContext
 // A command to execute.
 // A command consists of the name of the program to run, the arguments to pass to the program, and the environment to supply to the program.
 type Command struct {
-	Script      string      `json:"script"`
-	Environment Environment `json:"environment"`
-	Shell       string      `json:"shell"`
-	exec        *func(ctx context.Context, name string, arg ...string) *exec.Cmd
+	Script         string      `json:"script"`
+	Environment    Environment `json:"environment"`
+	Shell          string      `json:"shell"`
+	CommandOptions `json:",omitempty"`
+	exec           *func(ctx context.Context, name string, arg ...string) *exec.Cmd
 }
 
 func New(script string, environment Environment, shell string) *Command {
@@ -59,7 +60,7 @@ func (c *Command) MarshalJSON() ([]byte, error) {
 }
 
 func (c *Command) Process(ctx context.Context, input string, environment Environment) (string, error) {
-	env := c.Environment.ExpandWith(environment)
+	env := c.Environment.ExpandAndMergeWith(environment)
 
 	shell, args, err := BuildShellExec(c.Script, c.Shell)
 	if err != nil {
@@ -68,6 +69,7 @@ func (c *Command) Process(ctx context.Context, input string, environment Environ
 
 	subProcess := (*c.exec)(ctx, shell, args...)
 	subProcess.Env = append(subProcess.Env, env.Render()...)
+	c.CommandOptions.Apply(subProcess)
 	stdin, err := subProcess.StdinPipe()
 	if err != nil {
 		return "", fmt.Errorf("resource could not be created '%v'", c)

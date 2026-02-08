@@ -12,6 +12,7 @@ import (
 // Roles keyed by name
 type Roles map[RoleName]Role
 
+// RoleName is a name for a role.
 type RoleName string
 
 // A role and its permissions
@@ -27,19 +28,26 @@ type Permissions map[Subject]Action
 type Subject string
 
 const (
-	Everything Subject = "everything"
-	Secrets    Subject = "secrets"
-	Instances  Subject = "instances"
+	// All subjects
+	All Subject = "all"
+	// Secrets subject
+	Secrets Subject = "secrets"
+	// Instances subject
+	Instances Subject = "instances"
 )
 
 // Actions which can be performed upon subjects
 type Action string
 
 const (
-	Anything Action = "anything"
-	List     Action = "list"
-	Read     Action = "read"
-	Write    Action = "write"
+	// Any action
+	Any Action = "any"
+	// List action
+	List Action = "list"
+	// Read action
+	Read Action = "read"
+	// Write action
+	Write Action = "write"
 )
 
 func Load(rolesFileName string) (Roles, error) {
@@ -94,22 +102,23 @@ func (r Roles) MarshalJSON() ([]byte, error) {
 	return marshal.JSON(rolePermissions)
 }
 
+// AssertPermission checks if the given claims have the given permissions.
 func (r Roles) AssertPermission(claims ClaimedRoles, permissions Permissions) error {
 	ok := r.CheckPermission(claims, permissions)
 	if !ok {
-		return fmt.Errorf("Permissions %v are not permitted with provided identity %v", permissions, claims)
+		return fmt.Errorf("operation not permitted with claimed roles %v", claims)
 	}
 
 	return nil
 }
 
+// CheckPermission checks if the given claims have the given permissions.
 func (r Roles) CheckPermission(claims ClaimedRoles, permissions Permissions) bool {
 	for _, roleName := range claims {
 		role := r[roleName]
 		allPermitted := true
 		for subject, action := range permissions {
-			permittedAction, ok := role.Permissions[subject]
-			if !ok || permittedAction != action {
+			if !role.CheckPermission(subject, action) && !role.CheckPermission(All, action) {
 				allPermitted = false
 				break
 			}
@@ -119,4 +128,10 @@ func (r Roles) CheckPermission(claims ClaimedRoles, permissions Permissions) boo
 		}
 	}
 	return false
+}
+
+// CheckPermission checks if the given role has the given permission.
+func (r Role) CheckPermission(subject Subject, action Action) bool {
+	permittedAction, ok := r.Permissions[subject]
+	return ok && (permittedAction == action || permittedAction == Any)
 }

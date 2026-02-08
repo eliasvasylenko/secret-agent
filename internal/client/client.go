@@ -135,44 +135,64 @@ func (c *InstanceClient) GetActive(ctx context.Context) (*secrets.Instance, erro
 }
 
 func (c *InstanceClient) Create(ctx context.Context, parameters secrets.OperationParameters) (*secrets.Instance, error) {
-	instance := server.OperationCreate{
-		OperationParameters: parameters,
+	instance := server.CreateOperationParameters{
+		OperationParameters: server.OperationParameters{
+			Env:    parameters.Env,
+			Forced: parameters.Forced,
+			Reason: parameters.Reason,
+		},
 	}
 	req, err := BuildRequest(ctx, http.MethodPost, "/secrets/"+c.secretId+"/instances", instance)
 	return Do[*secrets.Instance](c.client, req, err)
 }
 
 func (c *InstanceClient) Destroy(ctx context.Context, instanceId string, parameters secrets.OperationParameters) (*secrets.Instance, error) {
-	instance := server.OperationCreate{
-		Name:                secrets.Destroy,
-		OperationParameters: parameters,
+	instance := server.CreateOperationParameters{
+		Name: secrets.Destroy,
+		OperationParameters: server.OperationParameters{
+			Env:    parameters.Env,
+			Forced: parameters.Forced,
+			Reason: parameters.Reason,
+		},
 	}
 	req, err := BuildRequest(ctx, http.MethodPost, "/secrets/"+c.secretId+"/instances/"+instanceId+"/operations", instance)
 	return Do[*secrets.Instance](c.client, req, err)
 }
 
 func (c *InstanceClient) Activate(ctx context.Context, instanceId string, parameters secrets.OperationParameters) (*secrets.Instance, error) {
-	instance := server.OperationCreate{
-		Name:                secrets.Activate,
-		OperationParameters: parameters,
+	instance := server.CreateOperationParameters{
+		Name: secrets.Activate,
+		OperationParameters: server.OperationParameters{
+			Env:    parameters.Env,
+			Forced: parameters.Forced,
+			Reason: parameters.Reason,
+		},
 	}
 	req, err := BuildRequest(ctx, http.MethodPost, "/secrets/"+c.secretId+"/instances/"+instanceId+"/operations", instance)
 	return Do[*secrets.Instance](c.client, req, err)
 }
 
 func (c *InstanceClient) Deactivate(ctx context.Context, instanceId string, parameters secrets.OperationParameters) (*secrets.Instance, error) {
-	instance := server.OperationCreate{
-		Name:                secrets.Deactivate,
-		OperationParameters: parameters,
+	instance := server.CreateOperationParameters{
+		Name: secrets.Deactivate,
+		OperationParameters: server.OperationParameters{
+			Env:    parameters.Env,
+			Forced: parameters.Forced,
+			Reason: parameters.Reason,
+		},
 	}
 	req, err := BuildRequest(ctx, http.MethodPost, "/secrets/"+c.secretId+"/instances/"+instanceId+"/operations", instance)
 	return Do[*secrets.Instance](c.client, req, err)
 }
 
 func (c *InstanceClient) Test(ctx context.Context, instanceId string, parameters secrets.OperationParameters) (*secrets.Instance, error) {
-	instance := server.OperationCreate{
-		Name:                secrets.Test,
-		OperationParameters: parameters,
+	instance := server.CreateOperationParameters{
+		Name: secrets.Test,
+		OperationParameters: server.OperationParameters{
+			Env:    parameters.Env,
+			Forced: parameters.Forced,
+			Reason: parameters.Reason,
+		},
 	}
 	req, err := BuildRequest(ctx, http.MethodPost, "/secrets/"+c.secretId+"/instances/"+instanceId+"/operations", instance)
 	return Do[*secrets.Instance](c.client, req, err)

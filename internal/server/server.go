@@ -22,16 +22,23 @@ type Server struct {
 	config      ServerConfig
 	secretStore store.Secrets
 	permissions *Permissions
+	limiter     *Limiter
 }
 
 type ServerConfig struct {
 	Socket        string
-	RequestLimit  int
+	RequestLimit  uint32
 	RequestWindow time.Duration
 }
 
 func New(config ServerConfig, secretStore store.Secrets, permissions *Permissions) *Server {
-	return &Server{config, secretStore, permissions}
+	limiter := NewLimiter(config.RequestLimit, config.RequestWindow)
+	return &Server{
+		config:      config,
+		secretStore: secretStore,
+		permissions: permissions,
+		limiter:     limiter,
+	}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -49,6 +56,12 @@ func (s *Server) Handler() http.Handler {
 			err = s.permissions.Roles.AssertPermission(identity.Roles, auth.Permissions{subject: action})
 			if err != nil {
 				writeError(w, NewErrorResponse(http.StatusForbidden, err))
+				return
+			}
+
+			err = s.limiter.Allow(identity.Principal)
+			if err != nil {
+				writeError(w, err)
 				return
 			}
 
@@ -273,7 +286,9 @@ func writeResult(w http.ResponseWriter, value any, statusCode int) error {
 
 func writeError(w http.ResponseWriter, err error) error {
 	var response *ErrorResponse
-	if !errors.As(err, &response) {
+	if errors.As(err, &response) {
+		w.Header().Add("", "")
+	} else {
 		response = NewErrorResponse(
 			http.StatusInternalServerError,
 			err,

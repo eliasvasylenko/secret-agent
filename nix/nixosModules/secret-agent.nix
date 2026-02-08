@@ -6,12 +6,52 @@
   ...
 }:
 let
+  # Command can be either a string (simple) or an object with script and optional credential
+  commandType =
+    with lib.types;
+    either str (submodule {
+      options = {
+        script = lib.mkOption {
+          description = "Command script to execute";
+          type = str;
+        };
+        environment = lib.mkOption {
+          description = "Environment variables to set for the command";
+          type = nullOr (attrsOf str);
+          default = null;
+        };
+        credential = lib.mkOption {
+          description = "Credential to use for the command";
+          type = nullOr (submodule {
+            options = {
+              uid = lib.mkOption {
+                description = "User ID";
+                type = nullOr int;
+                default = null;
+              };
+              gid = lib.mkOption {
+                description = "Group ID";
+                type = nullOr int;
+                default = null;
+              };
+              groups = lib.mkOption {
+                description = "Supplementary group IDs";
+                type = nullOr (listOf int);
+                default = null;
+              };
+            };
+          });
+          default = null;
+        };
+      };
+    });
+
   # Make the options for a secret command
   mkCommandOptions =
     purpose:
     lib.mkOption {
       description = "Command to ${purpose}.";
-      type = with lib.types; nullOr str;
+      type = with lib.types; nullOr commandType;
       default = null;
     };
 
@@ -71,8 +111,7 @@ let
           };
         });
       default.admin.permissions = {
-        secrets = "all";
-        instances = "all";
+        all = "any";
       };
     };
     claims = {
@@ -105,22 +144,38 @@ let
 
   cfg = config.services.secret-agent;
 
+  # Convert a command (string or object) to JSON format
+  makeCommandConfig =
+    command:
+    if command == null then
+      null
+    else if builtins.isString command then
+      command
+    else
+      {
+        script = command.script;
+      }
+      // lib.optionalAttrs (command ? credential && command.credential != null) {
+        credential = lib.filterAttrs (n: v: v != null) command.credential;
+      };
+
   # Map the nix secrets config into a service secrets config
   makeSecretsConfig =
     secrets:
     lib.lists.sortOn ({ name, ... }: name) (
-      lib.attrsets.mapAttrsToList (name: secret: {
-        inherit name;
-        inherit (secret)
-          environment
-          create
-          destroy
-          activate
-          deactivate
-          test
-          ;
-        derive = makeSecretsConfig secret.derive;
-      }) secrets
+      lib.attrsets.mapAttrsToList (
+        name: secret:
+        lib.attrsets.filterAttrs (n: v: v != null) {
+          inherit name;
+          environment = secret.environment;
+          create = makeCommandConfig secret.create;
+          destroy = makeCommandConfig secret.destroy;
+          activate = makeCommandConfig secret.activate;
+          deactivate = makeCommandConfig secret.deactivate;
+          test = makeCommandConfig secret.test;
+          derive = makeSecretsConfig secret.derive;
+        }
+      ) secrets
     );
 
   # Write the permissions config file for the service backend

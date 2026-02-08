@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"os"
+	"time"
 
 	"github.com/alecthomas/kong"
 	"github.com/eliasvasylenko/secret-agent/internal/cli"
@@ -26,7 +27,7 @@ type CLI struct {
 	PermissionsFile string          `short:"P" env:"PERMISSIONS_FILE" help:"Path to permissions (roles/claims) configuration file"`
 	DbFile          string          `short:"D" env:"DB_FILE" help:"Path to sqlite database file"`
 	ClientSocket    string          `short:"c" env:"CLIENT_SOCKET" help:"Unix socket for connecting to a running secret-agent server"`
-	MaxReasonLen    int             `short:"R" env:"MAX_REASON_LENGTH" default:"4096" help:"Max length of audit reason strings"`
+	MaxReasonLength int             `short:"R" env:"MAX_REASON_LENGTH" default:"4096" help:"Max length of audit reason strings"`
 	Debug           bool            `short:"d" env:"DEBUG" help:"Enable debug logging"`
 	Pretty          bool            `short:"p" env:"PRETTY" help:"Pretty-print JSON output"`
 	Secrets         Secrets         `cmd:"" help:"List secrets"`
@@ -55,7 +56,7 @@ func NewCLI(ctx context.Context) *CLI {
 	}
 
 	var err error
-	c.secretStore, err = cli.NewStore(ctx, c.ClientSocket, c.SecretsFile, c.DbFile, c.Debug, c.MaxReasonLen)
+	c.secretStore, err = cli.NewStore(ctx, c.ClientSocket, c.SecretsFile, c.DbFile, c.Debug, c.MaxReasonLength)
 	c.ctx.FatalIfErrorf(err)
 	return &c
 }
@@ -91,7 +92,12 @@ func (c *CLI) Run(ctx context.Context) {
 	case "serve":
 		permissionsConfig, err := server.LoadPermissions(c.PermissionsFile)
 		c.ctx.FatalIfErrorf(err)
-		server := ser.New(c.Serve.ServerSocket, c.secretStore, permissionsConfig)
+		config := server.ServerConfig{
+			Socket:        c.Serve.ServerSocket,
+			RequestLimit:  c.Serve.RequestLimit,
+			RequestWindow: c.Serve.RequestWindow,
+		}
+		server := ser.New(config, c.secretStore, permissionsConfig)
 		err = server.Serve()
 	default:
 		panic(c.ctx.Command())
@@ -165,5 +171,7 @@ func (c *Command) parameters() sec.OperationParameters {
 }
 
 type Serve struct {
-	ServerSocket string `short:"s" help:"Unix socket path for serving the HTTP API"`
+	ServerSocket  string        `short:"s" help:"Unix socket path for serving the HTTP API"`
+	RequestLimit  uint32        `short:"L" default:"100" help:"Maximum number of requests per request window"`
+	RequestWindow time.Duration `short:"W" default:"1m" help:"Window of time over which the request limit is enforced"`
 }

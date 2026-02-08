@@ -77,7 +77,7 @@ pkgs.testers.runNixOSTest {
         "REASON": "reason",
         "VAR1": "test1",
         "VAR2": "var2",
-        "STARTED_BY": "user",
+        "STARTED_BY": "linux:root/0",
       }
       assert rootOutput == rootExpected, f"value '{rootOutput}' does not match expected '{rootExpected}'"
 
@@ -92,7 +92,7 @@ pkgs.testers.runNixOSTest {
         "REASON": "reason",
         "VAR1": "override-test1",
         "VAR2": "override-var2",
-        "STARTED_BY": "user",
+        "STARTED_BY": "linux:root/0",
       }
       assert child1Output == child1Expected, f"value '{child1Output}' does not match expected '{child1Expected}'"
 
@@ -108,7 +108,7 @@ pkgs.testers.runNixOSTest {
         "VAR1": "override-test1",
         "VAR3": "var3",
         "VAR4": "var2",
-        "STARTED_BY": "user",
+        "STARTED_BY": "linux:root/0",
       }
       assert child2Output == child2Expected, f"value '{child2Output}' does not match expected '{child2Expected}'"
   '';
