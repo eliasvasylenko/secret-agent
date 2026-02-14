@@ -1,30 +1,57 @@
 package mocks
 
-type MockStore struct {
+import (
+	"context"
+
+	"github.com/eliasvasylenko/secret-agent/internal/secrets"
+	"github.com/eliasvasylenko/secret-agent/internal/store"
+)
+
+type MockSecrets struct {
 	Mock
 }
 
-func (s *MockStore) Activate(name string, id string, force bool) (complete func() error, err error) {
-	return nextCall(&s.Mock, s.Activate)(name, id, force)
+func (s *MockSecrets) List(ctx context.Context) (secrets.Secrets, error) {
+	return nextCall(&s.Mock, s.List)(ctx)
 }
-func (s *MockStore) Deactivate(name string, id string, force bool) (complete func() error, err error) {
-	return nextCall(&s.Mock, s.Deactivate)(name, id, force)
+func (s *MockSecrets) Get(ctx context.Context, secretId string) (*secrets.Secret, error) {
+	return nextCall(&s.Mock, s.Get)(ctx, secretId)
 }
-func (s *MockStore) ReadActive(name string) (id *string, activating bool, deactivating bool, err error) {
-	return nextCall(&s.Mock, s.ReadActive)(name)
+func (s *MockSecrets) History(ctx context.Context, secretId string, from int, to int) ([]*secrets.Operation, error) {
+	return nextCall(&s.Mock, s.History)(ctx, secretId, from, to)
 }
-func (s *MockStore) Create(id string, plan []byte, name string) (complete func() error, err error) {
-	return nextCall(&s.Mock, s.Create)(id, plan, name)
+func (s *MockSecrets) Instances(secretId string) store.Instances {
+	return nextCall(&s.Mock, s.Instances)(secretId)
 }
-func (s *MockStore) Destroy(id string, force bool) (complete func() error, err error) {
-	return nextCall(&s.Mock, s.Destroy)(id, force)
+
+type MockInstances struct {
+	Mock
 }
-func (s *MockStore) Read(id string) (plan []byte, name string, creating bool, destroying bool, err error) {
-	return nextCall(&s.Mock, s.Read)(id)
+
+func (i *MockInstances) List(ctx context.Context, from int, to int) (secrets.Instances, error) {
+	return nextCall(&i.Mock, i.List)(ctx, from, to)
 }
-func (s *MockStore) List(name string) (ids []string, err error) {
-	return nextCall(&s.Mock, s.List)(name)
+func (i *MockInstances) Get(ctx context.Context, instanceId string) (*secrets.Instance, error) {
+	return nextCall(&i.Mock, i.Get)(ctx, instanceId)
 }
-func (s *MockStore) ListAll() (ids []string, err error) {
-	return nextCall(&s.Mock, s.ListAll)()
+func (i *MockInstances) GetActive(ctx context.Context) (*secrets.Instance, error) {
+	return nextCall(&i.Mock, i.GetActive)(ctx)
+}
+func (i *MockInstances) Create(ctx context.Context, parameters secrets.OperationParameters) (*secrets.Instance, error) {
+	return nextCall(&i.Mock, i.Create)(ctx, parameters)
+}
+func (i *MockInstances) Destroy(ctx context.Context, instanceId string, parameters secrets.OperationParameters) (*secrets.Instance, error) {
+	return nextCall(&i.Mock, i.Destroy)(ctx, instanceId, parameters)
+}
+func (i *MockInstances) Activate(ctx context.Context, instanceId string, parameters secrets.OperationParameters) (*secrets.Instance, error) {
+	return nextCall(&i.Mock, i.Activate)(ctx, instanceId, parameters)
+}
+func (i *MockInstances) Deactivate(ctx context.Context, instanceId string, parameters secrets.OperationParameters) (*secrets.Instance, error) {
+	return nextCall(&i.Mock, i.Deactivate)(ctx, instanceId, parameters)
+}
+func (i *MockInstances) Test(ctx context.Context, instanceId string, parameters secrets.OperationParameters) (*secrets.Instance, error) {
+	return nextCall(&i.Mock, i.Test)(ctx, instanceId, parameters)
+}
+func (i *MockInstances) History(ctx context.Context, instanceId string, from int, to int) ([]*secrets.Operation, error) {
+	return nextCall(&i.Mock, i.History)(ctx, instanceId, from, to)
 }

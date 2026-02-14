@@ -7,8 +7,9 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"reflect"
 	"testing"
+
+	"github.com/google/go-cmp/cmp"
 )
 
 const marshalObject = `{"script":"program -argument1 -argument2=$VAR1 $VAR2","environment":{"VAR1":"abc","VAR2":"xyz"},"shell":""}`
@@ -69,7 +70,6 @@ func TestUnmarshalJSON(t *testing.T) {
 					"VAR2": "xyz",
 				},
 				Script: "program -argument1 -argument2=$VAR1 $VAR2",
-				exec:   &execCommand,
 			},
 		},
 		{
@@ -77,7 +77,6 @@ func TestUnmarshalJSON(t *testing.T) {
 			json: marshalArray,
 			expected: Command{
 				Script: "program -argument1 -argument2=var1 var2",
-				exec:   &execCommand,
 			},
 		},
 	}
@@ -88,8 +87,8 @@ func TestUnmarshalJSON(t *testing.T) {
 			if err != nil {
 				t.Errorf("expected no error, got '%v'", err)
 			}
-			if !reflect.DeepEqual(command, tc.expected) {
-				t.Errorf("expected '%v', got '%v'", tc.expected, command)
+			if !cmp.Equal(command, tc.expected) {
+				t.Errorf("UnmarshalJSON mismatch:\n%s", cmp.Diff(tc.expected, command))
 			}
 		})
 	}
@@ -161,11 +160,13 @@ func TestProcess(t *testing.T) {
 
 	for _, tc := range tests {
 		tc.testExec(t, tc.script, func(t *testing.T, fakeExecCommand func(ctx context.Context, name string, arg ...string) *exec.Cmd) {
+			saved := execCommand
+			execCommand = fakeExecCommand
+			defer func() { execCommand = saved }()
 			command := Command{
 				Environment: tc.expectedEnvironment,
 				Script:      tc.script,
 				Shell:       tc.shell,
-				exec:        &fakeExecCommand,
 			}
 			output, err := command.Process(context.Background(), tc.expectedInput, Environment{})
 			if err != nil {
@@ -200,8 +201,8 @@ func (f *fakeCommand) testExec(t *testing.T, name string, test func(t *testing.T
 			fmt.Printf("expected input '%v', got '%v'\n", f.expectedInput, string(bytes))
 		}
 		commandLine := os.Args[3:]
-		if !reflect.DeepEqual(f.expectedCommand, commandLine) {
-			fmt.Printf("expected command '%v', got '%v'\n", f.expectedCommand, commandLine)
+		if !cmp.Equal(f.expectedCommand, commandLine) {
+			fmt.Printf("expected command mismatch:\n%s", cmp.Diff(f.expectedCommand, commandLine))
 		}
 		for key, value := range f.expectedEnvironment {
 			if value != os.Getenv(key) {

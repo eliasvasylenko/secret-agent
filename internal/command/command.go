@@ -12,7 +12,7 @@ import (
 	"github.com/eliasvasylenko/secret-agent/internal/marshal"
 )
 
-// Default function to execute a command
+// The function to execute a command
 var execCommand = exec.CommandContext
 
 // A command to execute.
@@ -21,8 +21,7 @@ type Command struct {
 	Script         string      `json:"script"`
 	Environment    Environment `json:"environment"`
 	Shell          string      `json:"shell"`
-	CommandOptions `json:",omitempty"`
-	exec           *func(ctx context.Context, name string, arg ...string) *exec.Cmd
+	CommandOptions `json:","`
 }
 
 func New(script string, environment Environment, shell string) *Command {
@@ -30,14 +29,12 @@ func New(script string, environment Environment, shell string) *Command {
 		Script:      script,
 		Environment: environment,
 		Shell:       shell,
-		exec:        &execCommand,
 	}
 }
 
 func (c *Command) UnmarshalJSON(p []byte) error {
 	err1 := json.Unmarshal(p, &c.Script)
 	if err1 == nil {
-		c.exec = &execCommand
 		return nil
 	}
 	type command Command
@@ -47,7 +44,6 @@ func (c *Command) UnmarshalJSON(p []byte) error {
 		return errors.Join(err1, err2)
 	}
 	*c = Command(temp)
-	c.exec = &execCommand
 	return nil
 }
 
@@ -67,7 +63,7 @@ func (c *Command) Process(ctx context.Context, input string, environment Environ
 		return "", err
 	}
 
-	subProcess := (*c.exec)(ctx, shell, args...)
+	subProcess := execCommand(ctx, shell, args...)
 	subProcess.Env = append(subProcess.Env, env.Render()...)
 	c.CommandOptions.Apply(subProcess)
 	stdin, err := subProcess.StdinPipe()

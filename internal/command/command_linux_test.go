@@ -4,9 +4,10 @@ package command
 
 import (
 	"os/exec"
-	"reflect"
 	"syscall"
 	"testing"
+
+	"github.com/google/go-cmp/cmp"
 )
 
 func TestCommandOptions_Apply(t *testing.T) {
@@ -69,8 +70,8 @@ func TestCommandOptions_Apply(t *testing.T) {
 				}
 
 				got := cmd.SysProcAttr.Credential
-				if !reflect.DeepEqual(got, tc.want) {
-					t.Errorf("Credential mismatch: got %v, want %v", got, tc.want)
+				if !cmp.Equal(got, tc.want) {
+					t.Errorf("Credential mismatch:\n%s", cmp.Diff(tc.want, got))
 				}
 			}
 		})

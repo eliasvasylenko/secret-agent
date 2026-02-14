@@ -10,6 +10,9 @@ import (
 	"github.com/eliasvasylenko/secret-agent/internal/marshal"
 )
 
+// The function to execute a command
+var processCommand = (*command.Command).Process
+
 // A plan for the provisioning of a secret
 type Secret struct {
 	// The name of the secret
@@ -96,7 +99,7 @@ func (s *Secret) Process(ctx context.Context, operation OperationName, input str
 		qname = fmt.Sprintf("%s/%s", parent, qname)
 	}
 	qid := fmt.Sprintf("%s/%s", qname, instanceId)
-	env := s.Environment.ExpandAndMergeWith(command.Environment{
+	env := s.Environment.ExpandAndMergeWith(map[string]string{
 		"ID":         instanceId,
 		"NAME":       s.Name,
 		"QID":        qid,
@@ -108,7 +111,7 @@ func (s *Secret) Process(ctx context.Context, operation OperationName, input str
 
 	command := s.Command(operation)
 	if command != nil {
-		commandOutput, err := command.Process(ctx, input, env)
+		commandOutput, err := processCommand(command, ctx, input, env)
 		if err != nil {
 			return err
 		}

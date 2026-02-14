@@ -16,17 +16,21 @@ import (
 
 type SecretClient struct {
 	socket string
-	client http.Client
+	client httpClient
 }
 
 type InstanceClient struct {
 	socket   string
-	client   http.Client
+	client   httpClient
 	secretId string
 }
 
+type httpClient interface {
+	Do(req *http.Request) (*http.Response, error)
+}
+
 func NewSecretStore(socket string) *SecretClient {
-	client := http.Client{
+	client := &http.Client{
 		Transport: &http.Transport{
 			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 				return (&net.Dialer{}).DialContext(ctx, "unix", socket)
@@ -54,7 +58,7 @@ func BuildRequest(ctx context.Context, method string, path string, body any) (*h
 	return http.NewRequestWithContext(ctx, method, "http://unix"+path, buffer)
 }
 
-func Do[T any](client http.Client, req *http.Request, err error) (T, error) {
+func Do[T any](client httpClient, req *http.Request, err error) (T, error) {
 	response, err := client.Do(req)
 	var body T
 	if err != nil {

@@ -3,6 +3,8 @@ package auth
 import (
 	"encoding/json"
 	"testing"
+
+	"github.com/google/go-cmp/cmp"
 )
 
 func TestRoleCheckPermission(t *testing.T) {
@@ -91,15 +93,8 @@ func TestClaimedRolesUnmarshalJSON(t *testing.T) {
 			t.Errorf("Unmarshal(%s): %v", tc.json, err)
 			continue
 		}
-		if len(got) != len(tc.want) {
-			t.Errorf("Unmarshal(%s): expected %v, got %v", tc.json, tc.want, got)
-		} else {
-			for i := range got {
-				if got[i] != tc.want[i] {
-					t.Errorf("Unmarshal(%s): expected %v, got %v", tc.json, tc.want, got)
-					break
-				}
-			}
+		if !cmp.Equal(got, tc.want) {
+			t.Errorf("Unmarshal(%s):\n%s", tc.json, cmp.Diff(tc.want, got))
 		}
 	}
 }

@@ -2,44 +2,173 @@ package cli
 
 import (
 	"context"
+	"log"
+	"os"
+	"time"
 
-	"github.com/eliasvasylenko/secret-agent/internal/client"
-	"github.com/eliasvasylenko/secret-agent/internal/config"
-	"github.com/eliasvasylenko/secret-agent/internal/sqlite"
+	"github.com/alecthomas/kong"
+	"github.com/eliasvasylenko/secret-agent/internal/command"
+	"github.com/eliasvasylenko/secret-agent/internal/marshal"
+	"github.com/eliasvasylenko/secret-agent/internal/secrets"
+	"github.com/eliasvasylenko/secret-agent/internal/server"
 	"github.com/eliasvasylenko/secret-agent/internal/store"
 )
 
-// It's plainly silly that Go requires these structs.
-type clientSecrets struct {
-	*client.SecretClient
+type CLI struct {
+	SecretsFile     string          `short:"S" env:"SECRETS_FILE" help:"Path to secrets configuration file"`
+	PermissionsFile string          `short:"P" env:"PERMISSIONS_FILE" help:"Path to permissions (roles/claims) configuration file"`
+	DbFile          string          `short:"D" env:"DB_FILE" help:"Path to sqlite database file"`
+	ClientSocket    string          `short:"c" env:"CLIENT_SOCKET" help:"Unix socket for connecting to a running secret-agent server"`
+	MaxReasonLength int             `short:"R" env:"MAX_REASON_LENGTH" default:"4096" help:"Max length of audit reason strings"`
+	Debug           bool            `short:"d" env:"DEBUG" help:"Enable debug logging"`
+	Pretty          bool            `short:"p" env:"PRETTY" help:"Pretty-print JSON output"`
+	Secrets         Secrets         `cmd:"" help:"List secrets"`
+	Secret          Secret          `cmd:"" help:"Show a secret"`
+	Instances       Instances       `cmd:"" help:"List instances of a secret"`
+	Instance        Instance        `cmd:"" help:"Show an instance of a secret"`
+	Active          Secret          `cmd:"" help:"Show the active instance of a secret"`
+	History         History         `cmd:"" help:"Show the operation history of a secret"`
+	Create          SecretCommand   `cmd:"" help:"Create an instance of a secret"`
+	Destroy         InstanceCommand `cmd:"" help:"Destroy an instance of a secret"`
+	Activate        InstanceCommand `cmd:"" help:"Activate an instance of a secret"`
+	Deactivate      InstanceCommand `cmd:"" help:"Deactivate an instance of a secret"`
+	Test            InstanceCommand `cmd:"" help:"Test an instance of a secret"`
+	Serve           Serve           `cmd:"" help:"Serve the secret agent API"`
+
+	ctx         kongContext
+	secretStore store.Secrets
 }
 
-func (s clientSecrets) Instances(secretId string) store.Instances {
-	return s.SecretClient.Instances(secretId)
+type kongContext interface {
+	Command() string
+	FatalIfErrorf(err error, args ...any)
 }
 
-type sqliteSecrets struct {
-	*sqlite.SecretRespository
-}
+func NewCLI(ctx context.Context) *CLI {
+	var c CLI
+	c.ctx = kong.Parse(&c)
 
-func (s sqliteSecrets) Instances(secretId string) store.Instances {
-	return s.SecretRespository.Instances(secretId)
-}
-
-func NewStore(ctx context.Context, socket string, secretsFile string, dbFile string, debug bool, maxReasonLen int) (store.Secrets, error) {
-	if socket != "" {
-		store := client.NewSecretStore(socket)
-		return clientSecrets{
-			SecretClient: store,
-		}, nil
-	} else {
-		secretsConfig, err := config.LoadSecretsConfig(secretsFile)
-		if err != nil {
-			return nil, err
-		}
-		store, err := sqlite.NewSecretRepository(ctx, dbFile, secretsConfig.Secrets, debug, maxReasonLen)
-		return sqliteSecrets{
-			SecretRespository: store,
-		}, err
+	if c.Debug {
+		log.Default().Printf("cli %v", c)
 	}
+
+	var err error
+	c.secretStore, err = NewStore(ctx, c.ClientSocket, c.SecretsFile, c.DbFile, c.Debug, c.MaxReasonLength)
+	c.ctx.FatalIfErrorf(err)
+	return &c
+}
+
+func (c *CLI) Run(ctx context.Context) {
+	var result any
+	var err error
+	switch c.ctx.Command() {
+	case "secrets":
+		result, err = c.secretStore.List(ctx)
+	case "secret <secret-id>":
+		result, err = c.secretStore.Get(ctx, c.Secret.SecretID)
+	case "instances <secret-id>":
+		result, err = c.secretStore.Instances(c.Instances.SecretID).List(ctx, c.Instances.From, c.Instances.To)
+	case "instance <secret-id> <instance-id>":
+		result, err = c.secretStore.Instances(c.Instance.SecretID).Get(ctx, c.Instance.InstanceID)
+	case "active <secret-id>":
+		result, err = c.secretStore.Instances(c.Instance.SecretID).GetActive(ctx)
+	case "history <secret-id>":
+		result, err = c.secretStore.History(ctx, c.History.SecretID, c.History.From, c.History.To)
+	case "history <secret-id> <instance-id>":
+		result, err = c.secretStore.Instances(c.Instance.SecretID).History(ctx, c.Instance.InstanceID, c.History.From, c.History.To)
+	case "create <secret-id>":
+		result, err = c.secretStore.Instances(c.Create.SecretID).Create(ctx, c.Create.parameters())
+	case "destroy <secret-id> <instance-id>":
+		result, err = c.secretStore.Instances(c.Destroy.SecretID).Destroy(ctx, c.Destroy.InstanceID, c.Destroy.parameters())
+	case "activate <secret-id> <instance-id>":
+		result, err = c.secretStore.Instances(c.Activate.SecretID).Activate(ctx, c.Activate.InstanceID, c.Activate.parameters())
+	case "deactivate <secret-id> <instance-id>":
+		result, err = c.secretStore.Instances(c.Deactivate.SecretID).Deactivate(ctx, c.Deactivate.InstanceID, c.Deactivate.parameters())
+	case "test <secret-id> <instance-id>":
+		result, err = c.secretStore.Instances(c.Test.SecretID).Test(ctx, c.Test.InstanceID, c.Test.parameters())
+	case "serve":
+		permissionsConfig, err := server.LoadPermissions(c.PermissionsFile)
+		c.ctx.FatalIfErrorf(err)
+		config := server.ServerConfig{
+			Socket:        c.Serve.ServerSocket,
+			RequestLimit:  c.Serve.RequestLimit,
+			RequestWindow: c.Serve.RequestWindow,
+		}
+		controller := server.NewController(config, c.secretStore, permissionsConfig)
+		err = controller.Serve()
+	default:
+		panic(c.ctx.Command())
+	}
+
+	c.ctx.FatalIfErrorf(err)
+
+	var bytes []byte
+	if c.Pretty {
+		bytes, err = marshal.JSONIndent(result)
+	} else {
+		bytes, err = marshal.JSON(result)
+	}
+	c.ctx.FatalIfErrorf(err)
+
+	_, err = os.Stdout.Write(bytes)
+
+	c.ctx.FatalIfErrorf(err)
+}
+
+type Secrets struct{}
+
+type Secret struct {
+	SecretID string `arg:"" help:"ID of the secret"`
+}
+
+type Instances struct {
+	SecretID string `arg:"" help:"ID of the secret"`
+	Bounds
+}
+
+type Instance struct {
+	SecretID   string `arg:"" help:"ID of the secret"`
+	InstanceID string `arg:"" help:"ID of the instance"`
+}
+
+type History struct {
+	SecretID   string `arg:"" help:"ID of the secret"`
+	InstanceID string `arg:"" optional:"" help:"Optional ID of the instance"`
+	Bounds
+}
+
+type Bounds struct {
+	From int `short:"l" default:"0" help:"Lower bound (inclusive) for collection listing"`
+	To   int `short:"u" default:"10" help:"Upper bound (exclusive) for collection listing"`
+}
+
+type SecretCommand struct {
+	SecretID string `arg:"" help:"ID of the secret"`
+	Command
+}
+
+type InstanceCommand struct {
+	SecretID   string `arg:"" help:"ID of the secret"`
+	InstanceID string `arg:"" help:"ID of the instance"`
+	Command
+}
+
+type Command struct {
+	Force  bool   `short:"f" help:"Force the operation, overriding safety checks where allowed"`
+	Reason string `short:"r" help:"Audit reason for the operation"`
+}
+
+func (c *Command) parameters() secrets.OperationParameters {
+	return secrets.OperationParameters{
+		Env:       command.NewEnvironment().Load(os.Environ()),
+		Forced:    c.Force,
+		Reason:    c.Reason,
+		StartedBy: "user",
+	}
+}
+
+type Serve struct {
+	ServerSocket  string        `short:"s" help:"Unix socket path for serving the HTTP API"`
+	RequestLimit  uint32        `short:"L" default:"100" help:"Maximum number of requests per request window"`
+	RequestWindow time.Duration `short:"W" default:"1m" help:"Window of time over which the request limit is enforced"`
 }
