@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"time"
@@ -94,10 +95,10 @@ func (c *CLI) Run(ctx context.Context) {
 			RequestLimit:  c.Serve.RequestLimit,
 			RequestWindow: c.Serve.RequestWindow,
 		}
-		controller := server.NewController(config, c.secretStore, permissionsConfig)
-		err = controller.Serve()
+		server := server.New(config, c.secretStore, permissionsConfig)
+		err = server.Serve()
 	default:
-		panic(c.ctx.Command())
+		panic(fmt.Errorf("unknown command: %s", c.ctx.Command()))
 	}
 
 	c.ctx.FatalIfErrorf(err)

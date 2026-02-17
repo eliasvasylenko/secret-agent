@@ -1,183 +1,229 @@
 package server
 
 import (
-	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"net"
+	"io"
 	"net/http"
-	"os"
+	"net/url"
 	"strconv"
-	"time"
 
 	"github.com/eliasvasylenko/secret-agent/internal/auth"
+	"github.com/eliasvasylenko/secret-agent/internal/secrets"
 	"github.com/eliasvasylenko/secret-agent/internal/store"
 )
 
 type Controller struct {
-	config      ServerConfig
-	service     *Service
-	permissions *Permissions
-	limiter     *Limiter
+	secretStore store.Secrets
+	middleware  func(perms auth.Permissions, next http.HandlerFunc) http.Handler
 }
 
-type ServerConfig struct {
-	Socket        string
-	RequestLimit  uint32
-	RequestWindow time.Duration
-}
-
-func NewController(config ServerConfig, secretStore store.Secrets, permissions *Permissions) *Controller {
-	limiter := NewLimiter(config.RequestLimit, config.RequestWindow)
+func NewController(secretStore store.Secrets, limiter limiter, permissions permissions) *Controller {
+	limiterKey := func(r *http.Request) string {
+		return identityFromContext(r.Context()).Principal
+	}
+	middleware := func(perms auth.Permissions, next http.HandlerFunc) http.Handler {
+		return limiter.Middleware(limiterKey, permissions.Middleware(perms, next))
+	}
 	return &Controller{
-		config:      config,
-		service:     &Service{secretStore},
-		permissions: permissions,
-		limiter:     limiter,
+		secretStore: secretStore,
+		middleware:  middleware,
 	}
 }
 
-// Context key for passing the underlying connection into the handler
-type connectionKey struct{}
+type limiter interface {
+	Middleware(keyFunc func(r *http.Request) string, next http.Handler) http.Handler
+}
 
-func (c *Controller) Serve() error {
-	var listener net.Listener
-	var err error
-	if c.config.Socket != "" {
-		// socket option given for manual execution
-
-		// resolve socket
-		var addr *net.UnixAddr
-		addr, err = net.ResolveUnixAddr("unix", c.config.Socket)
-		if err != nil {
-			return err
-		}
-
-		// listen on socket
-		listener, err = net.ListenUnix("unix", addr)
-
-	} else if os.Getenv("LISTEN_PID") == strconv.Itoa(os.Getpid()) {
-		// started as a systemd service
-
-		// open file descriptor
-		f := os.NewFile(3, "socket")
-
-		// listen on FD
-		listener, err = net.FileListener(f)
-
-	} else {
-		return fmt.Errorf("No server socket")
-	}
-
-	if err != nil {
-		return err
-	}
-
-	mux := http.NewServeMux()
-	c.buildHandler(mux.Handle)
-	srv := &http.Server{
-		Handler: mux,
-		ConnContext: func(ctx context.Context, connection net.Conn) context.Context {
-			return context.WithValue(ctx, connectionKey{}, connection)
-		},
-	}
-
-	// serve http over socket
-	if err := srv.Serve(listener); err != nil {
-		return err
-	}
-	return nil
+type permissions interface {
+	Middleware(perms auth.Permissions, next http.Handler) http.Handler
 }
 
 func (c *Controller) buildHandler(registerHandler func(pattern string, handler http.Handler)) {
-	registerHandler("GET /secrets", c.buildHandlerFunc(
+	registerHandler("GET /secrets", c.middleware(
 		auth.Permissions{auth.Secrets: auth.List},
-		c.service.listSecrets,
+		c.listSecrets,
 	))
-	registerHandler("GET /secrets/{secretId}", c.buildHandlerFunc(
+	registerHandler("GET /secrets/{secretId}", c.middleware(
 		auth.Permissions{auth.Secrets: auth.Read},
-		c.service.getSecret,
+		c.getSecret,
 	))
-	registerHandler("GET /secrets/{secretId}/instances", c.buildHandlerFunc(
+	registerHandler("GET /secrets/{secretId}/instances", c.middleware(
 		auth.Permissions{auth.Instances: auth.Read},
-		c.service.listInstances,
+		c.listInstances,
 	))
-	registerHandler("POST /secrets/{secretId}/instances", c.buildHandlerFunc(
+	registerHandler("POST /secrets/{secretId}/instances", c.middleware(
 		auth.Permissions{auth.Instances: auth.Write},
-		c.service.createInstance,
+		c.createInstance,
 	))
-	registerHandler("GET /secrets/{secretId}/instances/{instanceId}", c.buildHandlerFunc(
+	registerHandler("GET /secrets/{secretId}/instances/{instanceId}", c.middleware(
 		auth.Permissions{auth.Instances: auth.Read},
-		c.service.getInstance,
+		c.getInstance,
 	))
-
-	registerHandler("GET /secrets/{secretId}/instances/{instanceId}/operations", c.buildHandlerFunc(
+	registerHandler("GET /secrets/{secretId}/instances/{instanceId}/operations", c.middleware(
 		auth.Permissions{auth.Instances: auth.Read},
-		c.service.getOperations,
+		c.getOperations,
 	))
-
-	registerHandler("POST /secrets/{secretId}/instances/{instanceId}/operations", c.buildHandlerFunc(
+	registerHandler("POST /secrets/{secretId}/instances/{instanceId}/operations", c.middleware(
 		auth.Permissions{auth.Secrets: auth.Write, auth.Instances: auth.Write},
-		c.service.createOperation,
+		c.createOperation,
 	))
 }
 
-func (c *Controller) buildHandlerFunc(permissions auth.Permissions, handle func(w http.ResponseWriter, r *http.Request) (any, int, error)) http.HandlerFunc {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		connection := r.Context().Value(connectionKey{}).(net.Conn)
-		identity, err := c.permissions.Claims.ClaimIdentity(r, connection)
-		if err != nil {
-			writeError(w, NewErrorResponse(http.StatusUnauthorized, err))
-			return
-		}
-
-		err = c.permissions.Roles.AssertPermission(identity.Roles, permissions)
-		if err != nil {
-			writeError(w, NewErrorResponse(http.StatusForbidden, err))
-			return
-		}
-
-		err = c.limiter.Allow(identity.Principal)
-		if err != nil {
-			writeError(w, err)
-			return
-		}
-
-		r = r.WithContext(context.WithValue(r.Context(), identityKey{}, identity))
-
-		result, code, err := handle(w, r)
-		if err != nil {
-			writeError(w, err)
-			return
-		}
-
-		writeResult(w, result, code)
-	})
+func (s *Controller) listSecrets(w http.ResponseWriter, r *http.Request) {
+	secs, err := s.secretStore.List(r.Context())
+	if err != nil {
+		writeError(w, NewErrorResponse(http.StatusBadRequest, err))
+		return
+	}
+	writeResult(w, ItemsResponse[secrets.Secrets]{secs}, http.StatusOK)
 }
 
-func writeResult(w http.ResponseWriter, value any, statusCode int) error {
-	w.WriteHeader(statusCode)
-
-	encoder := json.NewEncoder(w)
-	encoder.SetEscapeHTML(false)
-	err := encoder.Encode(value)
+func (s *Controller) getSecret(w http.ResponseWriter, r *http.Request) {
+	secretId := r.PathValue("secretId")
+	secret, err := s.secretStore.Get(r.Context(), secretId)
 	if err != nil {
-		return err
+		writeError(w, NewErrorResponse(http.StatusBadRequest, err))
+		return
+	}
+	writeResult(w, secret, http.StatusOK)
+}
+
+func (s *Controller) listInstances(w http.ResponseWriter, r *http.Request) {
+	secretId := r.PathValue("secretId")
+	instances := s.secretStore.Instances(secretId)
+	from, to, err := parseRange(*r.URL)
+	insts, err := instances.List(r.Context(), from, to)
+	if err != nil {
+		writeError(w, NewErrorResponse(http.StatusBadRequest, err))
+		return
+	}
+	writeResult(w, ItemsResponse[secrets.Instances]{insts}, http.StatusOK)
+}
+
+func (s *Controller) createInstance(w http.ResponseWriter, r *http.Request) {
+	secretId := r.PathValue("secretId")
+	instances := s.secretStore.Instances(secretId)
+	var operation OperationParameters
+	err := readBody(r, &operation)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	identity := identityFromContext(r.Context())
+	if identity == nil {
+		writeError(w, NewErrorResponse(http.StatusInternalServerError, fmt.Errorf("identity not found in context")))
+		return
+	}
+	parameters := secrets.OperationParameters{
+		Env:       operation.Env,
+		Forced:    operation.Forced,
+		Reason:    operation.Reason,
+		StartedBy: identity.Principal,
+	}
+	instance, err := instances.Create(r.Context(), parameters)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeResult(w, instance, http.StatusOK)
+}
+
+func (s *Controller) getInstance(w http.ResponseWriter, r *http.Request) {
+	secretId := r.PathValue("secretId")
+	instanceId := r.PathValue("instanceId")
+	instances := s.secretStore.Instances(secretId)
+	instance, err := instances.Get(r.Context(), instanceId)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeResult(w, instance, http.StatusOK)
+}
+
+func (s *Controller) getOperations(w http.ResponseWriter, r *http.Request) {
+	secretId := r.PathValue("secretId")
+	instanceId := r.PathValue("instanceId")
+	from, to, err := parseRange(*r.URL)
+	instances := s.secretStore.Instances(secretId)
+	operations, err := instances.History(r.Context(), instanceId, int(from), int(to))
+	if err != nil {
+		writeError(w, err)
+	}
+	writeResult(w, operations, http.StatusOK)
+}
+
+func (s *Controller) createOperation(w http.ResponseWriter, r *http.Request) {
+	secretId := r.PathValue("secretId")
+	instanceId := r.PathValue("instanceId")
+	var operation CreateOperationParameters
+	err := readBody(r, &operation)
+	if err != nil {
+		writeError(w, err)
+		return
 	}
 
+	identity := identityFromContext(r.Context())
+	if identity == nil {
+		writeError(w, NewErrorResponse(http.StatusInternalServerError, fmt.Errorf("identity not found in context")))
+		return
+	}
+	parameters := secrets.OperationParameters{
+		Env:       operation.Env,
+		Forced:    operation.Forced,
+		Reason:    operation.Reason,
+		StartedBy: identity.Principal,
+	}
+	instances := s.secretStore.Instances(secretId)
+	var instance *secrets.Instance
+	switch operation.Name {
+	case secrets.Activate:
+		instance, err = instances.Activate(r.Context(), instanceId, parameters)
+	case secrets.Deactivate:
+		instance, err = instances.Deactivate(r.Context(), instanceId, parameters)
+	case secrets.Destroy:
+		instance, err = instances.Destroy(r.Context(), instanceId, parameters)
+	case secrets.Test:
+		instance, err = instances.Test(r.Context(), instanceId, parameters)
+	default:
+		writeError(w, NewErrorResponse(http.StatusBadRequest, fmt.Errorf("Cannot post operation %s", operation.Name)))
+		return
+	}
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeResult(w, instance, http.StatusOK)
+}
+
+func readBody(r *http.Request, v any) error {
+	bytes, err := io.ReadAll(r.Body)
+	if err == nil {
+		err = json.Unmarshal(bytes, v)
+	}
+	if err != nil {
+		return NewErrorResponse(http.StatusBadRequest, err)
+	}
 	return nil
 }
 
-func writeError(w http.ResponseWriter, err error) error {
-	var response *ErrorResponse
-	if errors.As(err, &response) {
-		w.Header().Add("", "")
-	} else {
-		response = NewErrorResponse(
-			http.StatusInternalServerError,
-			err,
-		)
+func parseRange(url url.URL) (int, int, error) {
+	from, err := parseInt(url, "from", 32)
+	if err != nil {
+		return from, 0, err
 	}
-	return writeResult(w, response, response.HttpError.Code)
+	to, err := parseInt(url, "to", 32)
+	return from, to, err
+}
+
+func parseInt(url url.URL, name string, defaultValue int) (int, error) {
+	numString := url.Query().Get(name)
+	if numString == "" {
+		return defaultValue, nil
+	}
+	num, err := strconv.ParseInt(numString, 10, 32)
+	if err != nil {
+		return 0, NewErrorResponse(http.StatusBadRequest, fmt.Errorf("failed to parse '%s' - %w", name, err))
+	}
+	return int(num), nil
 }

@@ -32,21 +32,35 @@ func NewLimiter(limit uint32, window time.Duration) *Limiter {
 	}
 }
 
-func (r *Limiter) Allow(key string) error {
-	if r.requestLimit <= 0 || r.requestWindow <= 0 {
-		return nil
-	}
-	return r.getCounter(key).Increment(r.requestWindow, r.requestLimit)
+func (l *Limiter) Middleware(keyFunc func(r *http.Request) string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		key := keyFunc(r)
+
+		err := l.Allow(key)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
 }
 
-func (r *Limiter) getCounter(key string) *Counter {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+func (l *Limiter) Allow(key string) error {
+	if l.requestLimit <= 0 || l.requestWindow <= 0 {
+		return nil
+	}
+	return l.getCounter(key).Increment(l.requestWindow, l.requestLimit)
+}
 
-	counter, ok := r.counters[key]
+func (l *Limiter) getCounter(key string) *Counter {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	counter, ok := l.counters[key]
 	if !ok {
 		counter = NewCounter()
-		r.counters[key] = counter
+		l.counters[key] = counter
 	}
 	return counter
 }
