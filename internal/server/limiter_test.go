@@ -8,50 +8,49 @@ import (
 	"time"
 )
 
-func TestLimiter_Allow_disabledWhenLimitZero(t *testing.T) {
-	l := NewLimiter(0, time.Minute)
-	for i := 0; i < 5; i++ {
-		if err := l.Allow("key"); err != nil {
-			t.Errorf("Allow() = %v, want nil (limit 0 disables limiting)", err)
-		}
+func TestLimiter_Allow(t *testing.T) {
+	tests := []struct {
+		name           string
+		numCalls       int
+		limit          uint32
+		window         time.Duration
+		wantRetryAfter string // empty if no error
+	}{
+		{"disabled when limit zero", 5, 0, time.Minute, ""},
+		{"disabled when window zero", 5, 2, 0, ""},
+		{"under limit", 3, 3, time.Minute, ""},
+		{"over limit", 3, 2, time.Minute, "60"},
 	}
-}
 
-func TestLimiter_Allow_disabledWhenWindowZero(t *testing.T) {
-	l := NewLimiter(2, 0)
-	for i := 0; i < 5; i++ {
-		if err := l.Allow("key"); err != nil {
-			t.Errorf("Allow() = %v, want nil (window 0 disables limiting)", err)
-		}
-	}
-}
-
-func TestLimiter_Allow_underLimit(t *testing.T) {
-	l := NewLimiter(3, time.Minute)
-	for i := 0; i < 3; i++ {
-		if err := l.Allow("user"); err != nil {
-			t.Errorf("Allow() call %d = %v, want nil", i+1, err)
-		}
-	}
-}
-
-func TestLimiter_Allow_overLimit(t *testing.T) {
-	l := NewLimiter(2, time.Minute)
-	_ = l.Allow("user")
-	_ = l.Allow("user")
-	err := l.Allow("user")
-	if err == nil {
-		t.Fatal("Allow() = nil, want rate limit error")
-	}
-	var respErr *ErrorResponse
-	if !errors.As(err, &respErr) {
-		t.Fatalf("Allow() = %T, want *ErrorResponse", err)
-	}
-	if respErr.HttpError.Code != http.StatusTooManyRequests {
-		t.Errorf("Code = %d, want %d", respErr.HttpError.Code, http.StatusTooManyRequests)
-	}
-	if retryAfter := respErr.Headers["Retry-After"]; retryAfter != "60" {
-		t.Errorf("Retry-After = %q, want \"60\" (window in seconds)", retryAfter)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			l := NewLimiter(tt.limit, tt.window)
+			var lastErr error
+			for i := 0; i < tt.numCalls; i++ {
+				if lastErr != nil {
+					t.Errorf("Allow() = %v, not finished yet, want nil", lastErr)
+					break
+				}
+				lastErr = l.Allow("key")
+			}
+			if tt.wantRetryAfter != "" {
+				if lastErr == nil {
+					t.Fatal("Allow() = nil, want rate limit error")
+				}
+				var respErr *ErrorResponse
+				if !errors.As(lastErr, &respErr) {
+					t.Fatalf("Allow() = %T, want *ErrorResponse", lastErr)
+				}
+				if respErr.HttpError.Code != http.StatusTooManyRequests {
+					t.Errorf("Code = %d, want %d", respErr.HttpError.Code, http.StatusTooManyRequests)
+				}
+				if got := respErr.Headers["Retry-After"]; got != tt.wantRetryAfter {
+					t.Errorf("Retry-After = %q, want %q", got, tt.wantRetryAfter)
+				}
+			} else if lastErr != nil {
+				t.Errorf("Allow() = %v, want nil", lastErr)
+			}
+		})
 	}
 }
 
