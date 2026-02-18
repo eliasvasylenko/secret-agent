@@ -116,6 +116,10 @@ func (s *SecretRespository) History(ctx context.Context, secretId string, startA
 		WHERE secretId = ?
 		LIMIT ? OFFSET ?
 	`, secretId, endAt-startAt, startAt)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
 	operations := []*secrets.Operation{}
 	for err == nil && rows.Next() {
 		operation := &secrets.Operation{}
@@ -157,6 +161,10 @@ func (i *InstanceRepository) List(ctx context.Context, from int, to int) (secret
 		 	ON o.instanceId = i.id
 		WHERE i.secretId = ?
 	`, i.secretId)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
 	instances := secrets.Instances{}
 	for err == nil && rows.Next() {
 		instance := &secrets.Instance{}
@@ -227,8 +235,12 @@ func (i *InstanceRepository) GetActive(ctx context.Context) (*secrets.Instance, 
 		 	ON o.instanceId = i.id
 		WHERE s.id = ?
 	`, i.secretId)
-	if err != nil || !rows.Next() {
+	if err != nil {
 		return nil, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return nil, nil
 	}
 
 	var secretBytes []byte
@@ -460,9 +472,8 @@ func completeOperation(ctx context.Context, db *sql.DB, secretId string, instanc
 	return commit()
 }
 
-func (i *InstanceRepository) History(ctx context.Context, instanceId string, startAt int, endAt int) (operations []*secrets.Operation, err error) {
-	var rows *sql.Rows
-	rows, err = i.db.QueryContext(ctx, `
+func (i *InstanceRepository) History(ctx context.Context, instanceId string, startAt int, endAt int) ([]*secrets.Operation, error) {
+	rows, err := i.db.QueryContext(ctx, `
 		SELECT
 			id,
 			secretId,
@@ -478,10 +489,15 @@ func (i *InstanceRepository) History(ctx context.Context, instanceId string, sta
 		WHERE instanceId = ?
 		LIMIT ? OFFSET ?
 	`, instanceId, endAt-startAt, startAt)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	operations := []*secrets.Operation{}
 	for err == nil && rows.Next() {
 		operation := &secrets.Operation{}
 		operations = append(operations, operation)
 		err = rows.Scan(&operation.OperationNumber, &operation.SecretId, &operation.InstanceId, &operation.Name, &operation.Forced, &operation.Reason, &operation.StartedBy, &operation.StartedAt, &operation.CompletedAt, &operation.FailedAt)
 	}
-	return
+	return operations, err
 }
