@@ -67,21 +67,6 @@ let
     activate = mkCommandOptions "activate the secret";
     deactivate = mkCommandOptions "deactivate the secret";
     test = mkCommandOptions "test the activated secret";
-
-    derive = lib.mkOption {
-      description = "Plans that derive from the secret";
-      default = { };
-      type =
-        with lib.types;
-        attrsOf (
-          submodule (
-            { name, ... }:
-            {
-              options = secretOptions name;
-            }
-          )
-        );
-    };
   };
 
   # One or more strings
@@ -176,7 +161,6 @@ let
           activate = makeCommandConfig secret.activate;
           deactivate = makeCommandConfig secret.deactivate;
           test = makeCommandConfig secret.test;
-          derive = makeSecretsConfig secret.derive;
         }
       ) secrets
     );

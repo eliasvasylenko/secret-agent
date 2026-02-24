@@ -31,14 +31,11 @@ pkgs.testers.runNixOSTest {
         enable = true;
         secrets = {
           test-secret = {
+            environment.PATH = pkgs.lib.makeBinPath (with pkgs; [ coreutils ]);
             create = {
-              script = "${pkgs.writeShellApplication {
-                name = "check-creds";
-                runtimeInputs = [ pkgs.coreutils ];
-                text = ''
-                  echo "UID=$(id -u) GID=$(id -g) GROUPS=$(id -G)" > /tmp/cred-check.txt
-                '';
-              }}/bin/check-creds";
+              script = ''
+                echo "UID=$(id -u) GID=$(id -g) GROUPS=$(id -G)" > /tmp/cred-check.txt
+              '';
               credential = {
                 uid = 1001;
                 gid = 1001;
@@ -47,13 +44,10 @@ pkgs.testers.runNixOSTest {
             };
           };
           test-secret-no-creds = {
-            create = "${pkgs.writeShellApplication {
-              name = "check-creds-default";
-              runtimeInputs = [ pkgs.coreutils ];
-              text = ''
-                echo "UID=$(id -u) GID=$(id -g) GROUPS=$(id -G)" > /tmp/cred-check-default.txt
-              '';
-            }}/bin/check-creds-default";
+            environment.PATH = pkgs.lib.makeBinPath (with pkgs; [ coreutils ]);
+            create = ''
+              echo "UID=$(id -u) GID=$(id -g) GROUPS=$(id -G)" > /tmp/cred-check-default.txt
+            '';
           };
         };
       };

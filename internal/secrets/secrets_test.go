@@ -97,7 +97,7 @@ func TestSecret_Process(t *testing.T) {
 	if call.Input != "" {
 		t.Errorf("processCommand called with Input = %q, want %q", call.Input, "")
 	}
-	wantEnv := map[string]string{"ID": "inst-1", "NAME": "test-secret", "QID": "test-secret/inst-1", "QNAME": "test-secret", "FORCE": "false", "REASON": "", "STARTED_BY": ""}
+	wantEnv := map[string]string{"ID": "inst-1", "NAME": "test-secret", "FORCE": "false", "REASON": "", "STARTED_BY": ""}
 	for k, v := range wantEnv {
 		if call.Env[k] != v {
 			t.Errorf("processCommand Env[%q] = %q, want %q", k, call.Env[k], v)
@@ -120,7 +120,6 @@ func TestSecret_Process_withEnv(t *testing.T) {
 		Create: command.New("create-script", nil, ""),
 	}
 	params := OperationParameters{
-		Env:       command.Environment{"QNAME": "parent"},
 		Reason:    "test",
 		StartedBy: "tests",
 	}
@@ -134,8 +133,8 @@ func TestSecret_Process_withEnv(t *testing.T) {
 	if call.Input != "stdin" {
 		t.Errorf("processCommand Input = %q, want stdin", call.Input)
 	}
-	if call.Env["QNAME"] != "parent/test-secret" {
-		t.Errorf("processCommand Env[QNAME] = %q, want parent/test-secret", call.Env["QNAME"])
+	if call.Env["NAME"] != "test-secret" {
+		t.Errorf("processCommand Env[NAME] = %q, want test-secret", call.Env["NAME"])
 	}
 	if call.Env["REASON"] != "test" || call.Env["STARTED_BY"] != "tests" {
 		t.Errorf("processCommand Env REASON=%q STARTED_BY=%q, want test, tests", call.Env["REASON"], call.Env["STARTED_BY"])
@@ -152,7 +151,7 @@ func TestSecret_Process_noCommandForOp(t *testing.T) {
 	}
 	defer func() { processCommand = saved }()
 
-	s := &Secret{Name: "no-cmds"} // no Create/Destroy/etc
+	s := &Secret{Name: "no-cmds"} // no command for Create
 	err := s.Process(ctx, Create, "", OperationParameters{}, "id")
 	if err != nil {
 		t.Fatalf("Process when no command for op should succeed (no-op): %v", err)
@@ -178,81 +177,12 @@ func TestSecret_Process_returnsCommandError(t *testing.T) {
 	}
 }
 
-func TestSecret_processSubsteps_noDerive(t *testing.T) {
+func TestSecret_Process_noCommand(t *testing.T) {
 	ctx := context.Background()
-	s := &Secret{Name: "leaf", Derive: nil}
-	err := s.processSubsteps(ctx, Create, "input", OperationParameters{}, "id")
+	s := &Secret{Name: "leaf"} // no Create command
+	err := s.Process(ctx, Create, "input", OperationParameters{}, "id")
 	if err != nil {
-		t.Errorf("processSubsteps with nil Derive: %v", err)
-	}
-}
-
-func TestSecret_Process_withDerivedSecrets(t *testing.T) {
-	ctx := context.Background()
-	var calls []processCommandCall
-	saved := processCommand
-	processCommand = func(cmd *command.Command, _ context.Context, input string, env command.Environment) (string, error) {
-		calls = append(calls, processCommandCall{Script: cmd.Script, Input: input, Env: env})
-		return fmt.Sprintf("%s-output", cmd.Script), nil
-	}
-	defer func() { processCommand = saved }()
-
-	parent := &Secret{
-		Name:   "parent",
-		Create: command.New("parent-create", nil, ""),
-		Derive: Secrets{
-			"child": {
-				Name:   "child",
-				Create: command.New("child-create", nil, ""),
-			},
-		},
-	}
-	err := parent.Process(ctx, Create, "initial-input", OperationParameters{}, "inst-1")
-	if err != nil {
-		t.Fatalf("Process: %v", err)
-	}
-
-	if len(calls) != 2 {
-		t.Fatalf("processCommand called %d times, want 2", len(calls))
-	}
-	// Parent runs first with the initial input
-	if calls[0].Script != "parent-create" || calls[0].Input != "initial-input" {
-		t.Errorf("first call: Script=%q Input=%q, want parent-create-output, initial-input", calls[0].Script, calls[0].Input)
-	}
-	if calls[0].Env["NAME"] != "parent" || calls[0].Env["QNAME"] != "parent" {
-		t.Errorf("first call env: NAME=%q QNAME=%q, want parent, parent", calls[0].Env["NAME"], calls[0].Env["QNAME"])
-	}
-	// Derived secret runs with parent's output as input
-	if calls[1].Script != "child-create" || calls[1].Input != "parent-create-output" {
-		t.Errorf("second call: Script=%q Input=%q, want child-create, parent-create-output", calls[1].Script, calls[1].Input)
-	}
-	if calls[1].Env["NAME"] != "child" || calls[1].Env["QNAME"] != "parent/child" {
-		t.Errorf("second call env: NAME=%q QNAME=%q, want child, parent/child", calls[1].Env["NAME"], calls[1].Env["QNAME"])
-	}
-}
-
-func TestSecret_Process_derivedSecretError(t *testing.T) {
-	ctx := context.Background()
-	wantErr := fmt.Errorf("derived command failed")
-	saved := processCommand
-	processCommand = func(cmd *command.Command, _ context.Context, input string, env command.Environment) (string, error) {
-		if cmd.Script == "child-create" {
-			return "", wantErr
-		}
-		return "parent-output", nil
-	}
-	defer func() { processCommand = saved }()
-
-	parent := &Secret{
-		Name:   "parent",
-		Create: command.New("parent-create", nil, ""),
-		Derive: Secrets{
-			"child": {Name: "child", Create: command.New("child-create", nil, "")},
-		},
-	}
-	err := parent.Process(ctx, Create, "", OperationParameters{}, "id")
-	if err != wantErr {
-		t.Errorf("Process err = %v, want %v", err, wantErr)
+		t.Errorf("Process with no command for op should succeed (no-op): %v", err)
 	}
 }
 
@@ -262,25 +192,12 @@ func TestLoadPlans(t *testing.T) {
 		Create: command.New("echo hello friend", nil, ""),
 	}
 	dbCreds := &Secret{
-		Name:   "db-creds",
-		Create: command.New("openssl rand -base64 32", nil, ""),
-		Derive: Secrets{
-			"service": &Secret{
-				Name:       "service",
-				Create:     command.New("cat > /etc/enrypted-creds/$NAME/$ID.cred", nil, ""),
-				Destroy:    command.New("rm -f /etc/enrypted-creds/$NAME/$ID.cred", nil, ""),
-				Activate:   command.New("cp -f /etc/enrypted-creds/$NAME/$ID.cred /etc/enrypted-creds/service.cred", nil, ""),
-				Deactivate: command.New("rm -f /etc/enrypted-creds/service.cred", nil, ""),
-			},
-			"remote": &Secret{
-				Name:       "remote",
-				Create:     command.New("ssh host -csecret-agent create $NAME $ID", nil, ""),
-				Destroy:    command.New("ssh host -csecret-agent destroy $NAME $ID", nil, ""),
-				Activate:   command.New("ssh host -csecret-agent activate $NAME $ID", nil, ""),
-				Deactivate: command.New("ssh host -csecret-agent deactivate $NAME $ID", nil, ""),
-				Test:       command.New("ssh host -csecret-agent test $NAME $ID", nil, ""),
-			},
-		},
+		Name:       "db-creds",
+		Create:     command.New("openssl rand -base64 32", nil, ""),
+		Destroy:    command.New("rm -f /etc/enrypted-creds/$NAME/$ID.cred", nil, ""),
+		Activate:   command.New("cp -f /etc/enrypted-creds/$NAME/$ID.cred /etc/enrypted-creds/service.cred", nil, ""),
+		Deactivate: command.New("rm -f /etc/enrypted-creds/service.cred", nil, ""),
+		Test:       command.New("ssh host -csecret-agent test $NAME $ID", nil, ""),
 	}
 	tests := []struct {
 		file            string

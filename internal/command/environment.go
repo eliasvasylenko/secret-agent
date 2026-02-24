@@ -31,12 +31,6 @@ func (e Environment) Render() []string {
 }
 
 func (e Environment) ExpandWith(env Environment) Environment {
-	if e == nil {
-		return env
-	}
-	if env == nil {
-		return e
-	}
 	merged := Environment{}
 	for key, value := range e {
 		merged[key] = env.Expand(value)

@@ -13,7 +13,9 @@ import (
 // The function to execute a command
 var processCommand = (*command.Command).Process
 
-// A plan for the provisioning of a secret
+type Secrets map[string]*Secret
+
+// A plan for the provisioning of a secret.
 type Secret struct {
 	// The name of the secret
 	Name string `json:"name"`
@@ -21,7 +23,7 @@ type Secret struct {
 	// The environment variables for the secret plan
 	Environment command.Environment `json:"environment,omitempty"`
 
-	// Create a new instance of the secret
+	// Create an instance of the secret
 	Create *command.Command `json:"create,omitempty"`
 
 	// Destroy an instance of the secret
@@ -33,14 +35,9 @@ type Secret struct {
 	// Deactivate an instance of the secret
 	Deactivate *command.Command `json:"deactivate,omitempty"`
 
-	// Test the active secret
+	// Test an instance of the secret
 	Test *command.Command `json:"test,omitempty"`
-
-	// Derive sub-secrets
-	Derive Secrets `json:"derive,omitempty"`
 }
-
-type Secrets map[string]*Secret
 
 func New(secretList []*Secret) (Secrets, error) {
 	secrets := map[string]*Secret{}
@@ -92,47 +89,18 @@ func (s *Secret) Command(operation OperationName) *command.Command {
 }
 
 func (s *Secret) Process(ctx context.Context, operation OperationName, input string, parameters OperationParameters, instanceId string) error {
-	var output string
-
-	qname := s.Name
-	if parent, ok := parameters.Env["QNAME"]; ok {
-		qname = fmt.Sprintf("%s/%s", parent, qname)
-	}
-	qid := fmt.Sprintf("%s/%s", qname, instanceId)
-	env := s.Environment.ExpandAndMergeWith(map[string]string{
+	parameters.Env = s.Environment.ExpandAndMergeWith(command.Environment{
 		"ID":         instanceId,
 		"NAME":       s.Name,
-		"QID":        qid,
-		"QNAME":      qname,
 		"FORCE":      strconv.FormatBool(parameters.Forced),
 		"REASON":     parameters.Reason,
 		"STARTED_BY": parameters.StartedBy,
 	}).ExpandWith(parameters.Env)
 
-	command := s.Command(operation)
-	if command != nil {
-		commandOutput, err := processCommand(command, ctx, input, env)
-		if err != nil {
-			return err
-		}
-		output = commandOutput
-	} else {
-		output = ""
-	}
-
-	return s.processSubsteps(ctx, operation, output, OperationParameters{
-		Env:       env,
-		Forced:    parameters.Forced,
-		Reason:    parameters.Reason,
-		StartedBy: parameters.StartedBy,
-	}, instanceId)
-}
-
-func (s *Secret) processSubsteps(ctx context.Context, operation OperationName, input string, parameters OperationParameters, instanceId string) error {
-	for _, secret := range s.Derive {
-		if err := secret.Process(ctx, operation, input, parameters, instanceId); err != nil {
-			return err
-		}
+	cmd := s.Command(operation)
+	if cmd != nil {
+		_, err := processCommand(cmd, ctx, input, parameters.Env)
+		return err
 	}
 	return nil
 }

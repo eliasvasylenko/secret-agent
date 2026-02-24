@@ -23,7 +23,8 @@ func NewController(secretStore store.Secrets, limiter limiter, permissions permi
 		return identityFromContext(r.Context()).Principal
 	}
 	middleware := func(perms auth.Permissions, next http.HandlerFunc) http.Handler {
-		return limiter.Middleware(limiterKey, permissions.Middleware(perms, next))
+		// Run permissions first so identity is in context before limiter uses it for the rate-limit key.
+		return permissions.Middleware(perms, limiter.Middleware(limiterKey, next))
 	}
 	return &Controller{
 		secretStore: secretStore,

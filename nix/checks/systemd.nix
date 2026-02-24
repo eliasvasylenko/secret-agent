@@ -5,34 +5,36 @@
 # - plain and systemd-encrypted creds are passed through
 { self, pkgs, ... }:
 let
-  cred = {
+  simpleSecret = {
     environment = {
       STAGING = "/etc/source";
       STORE = "/etc/credstore";
+      PATH = pkgs.lib.makeBinPath (with pkgs; [ coreutils ]);
     };
     create = ''
-      ${pkgs.coreutils}/bin/mkdir -p "$STAGING/$QNAME"
-      ${pkgs.coreutils}/bin/cat < /dev/stdin > "$STAGING/$QNAME/$ID"
+      mkdir -p "$STAGING/$NAME"
+      echo password123 > "$STAGING/$NAME/$ID"
     '';
     activate = ''
-      ${pkgs.coreutils}/bin/mkdir -p "$STORE"
-      ${pkgs.coreutils}/bin/cp "$STAGING/$QNAME/$ID" "$STORE/''${QNAME//\//.}"
+      mkdir -p "$STORE"
+      cp "$STAGING/$NAME/$ID" "$STORE/$NAME.cred"
     '';
     deactivate = ''
-      ${pkgs.coreutils}/bin/rm "$STORE/''${QNAME//\//.}"
+      rm "$STORE/$NAME.cred"
     '';
     destroy = ''
-      ${pkgs.coreutils}/bin/rm "$STAGING/$QNAME/$ID"
+      rm "$STAGING/$NAME/$ID"
     '';
   };
-  credEncrypted = cred // {
+  encryptedSecret = simpleSecret // {
     environment = {
       STAGING = "/etc/source";
       STORE = "/etc/credstore.encrypted";
+      PATH = pkgs.lib.makeBinPath (with pkgs; [ coreutils systemd ]);
     };
     create = ''
-      ${pkgs.coreutils}/bin/mkdir -p "$STAGING/$QNAME"
-      ${pkgs.systemd}/bin/systemd-creds encrypt --name "''${QNAME//\//.}" /dev/stdin "$STAGING/$QNAME/$ID"
+      mkdir -p "$STAGING/$NAME"
+      echo password123 | systemd-creds encrypt --name "$NAME.cred" - "$STAGING/$NAME/$ID"
     '';
   };
 in
@@ -47,15 +49,8 @@ pkgs.testers.runNixOSTest {
       services.secret-agent = {
         enable = true;
 
-        secrets.simple = {
-          create = "echo password123";
-          derive.cred = cred;
-        };
-
-        secrets.encrypted = {
-          create = "echo password123";
-          derive.cred = credEncrypted;
-        };
+        secrets.simple = simpleSecret;
+        secrets.encrypted = encryptedSecret;
       };
 
       systemd.services.credential-consumer = {
