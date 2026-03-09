@@ -1,7 +1,6 @@
 package secrets
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -63,126 +62,6 @@ func TestSecrets_MarshalJSON(t *testing.T) {
 	}
 	if !cmp.Equal(secrets, decoded, cmpopts.IgnoreUnexported(Secret{}, command.Command{})) {
 		t.Errorf("round-trip mismatch: %s", cmp.Diff(secrets, decoded, cmpopts.IgnoreUnexported(Secret{}, command.Command{})))
-	}
-}
-
-// processCommandCall records a single call to the processCommand mock.
-type processCommandCall struct {
-	Script string
-	Input  string
-	Env    command.Environment
-}
-
-func TestSecret_Process(t *testing.T) {
-	ctx := context.Background()
-	var call processCommandCall
-	saved := processCommand
-	processCommand = func(cmd *command.Command, _ context.Context, input string, env command.Environment) (string, error) {
-		call = processCommandCall{Script: cmd.Script, Input: input, Env: env}
-		return "mock-output", nil
-	}
-	defer func() { processCommand = saved }()
-
-	s := &Secret{
-		Name:   "test-secret",
-		Create: command.New("echo -n", nil, ""),
-	}
-	err := s.Process(ctx, Create, "", OperationParameters{}, "inst-1")
-	if err != nil {
-		t.Fatalf("Process: %v", err)
-	}
-	if call.Script != "echo -n" {
-		t.Errorf("processCommand called with Script = %q, want %q", call.Script, "echo -n")
-	}
-	if call.Input != "" {
-		t.Errorf("processCommand called with Input = %q, want %q", call.Input, "")
-	}
-	wantEnv := map[string]string{"ID": "inst-1", "NAME": "test-secret", "FORCE": "false", "REASON": "", "STARTED_BY": ""}
-	for k, v := range wantEnv {
-		if call.Env[k] != v {
-			t.Errorf("processCommand Env[%q] = %q, want %q", k, call.Env[k], v)
-		}
-	}
-}
-
-func TestSecret_Process_withEnv(t *testing.T) {
-	ctx := context.Background()
-	var call processCommandCall
-	saved := processCommand
-	processCommand = func(cmd *command.Command, _ context.Context, input string, env command.Environment) (string, error) {
-		call = processCommandCall{Script: cmd.Script, Input: input, Env: env}
-		return "", nil
-	}
-	defer func() { processCommand = saved }()
-
-	s := &Secret{
-		Name:   "test-secret",
-		Create: command.New("create-script", nil, ""),
-	}
-	params := OperationParameters{
-		Reason:    "test",
-		StartedBy: "tests",
-	}
-	err := s.Process(ctx, Create, "stdin", params, "inst-1")
-	if err != nil {
-		t.Fatalf("Process with env: %v", err)
-	}
-	if call.Script != "create-script" {
-		t.Errorf("processCommand Script = %q, want create-script", call.Script)
-	}
-	if call.Input != "stdin" {
-		t.Errorf("processCommand Input = %q, want stdin", call.Input)
-	}
-	if call.Env["NAME"] != "test-secret" {
-		t.Errorf("processCommand Env[NAME] = %q, want test-secret", call.Env["NAME"])
-	}
-	if call.Env["REASON"] != "test" || call.Env["STARTED_BY"] != "tests" {
-		t.Errorf("processCommand Env REASON=%q STARTED_BY=%q, want test, tests", call.Env["REASON"], call.Env["STARTED_BY"])
-	}
-}
-
-func TestSecret_Process_noCommandForOp(t *testing.T) {
-	ctx := context.Background()
-	var called bool
-	saved := processCommand
-	processCommand = func(*command.Command, context.Context, string, command.Environment) (string, error) {
-		called = true
-		return "", nil
-	}
-	defer func() { processCommand = saved }()
-
-	s := &Secret{Name: "no-cmds"} // no command for Create
-	err := s.Process(ctx, Create, "", OperationParameters{}, "id")
-	if err != nil {
-		t.Fatalf("Process when no command for op should succeed (no-op): %v", err)
-	}
-	if called {
-		t.Error("processCommand should not be called when secret has no command for operation")
-	}
-}
-
-func TestSecret_Process_returnsCommandError(t *testing.T) {
-	ctx := context.Background()
-	wantErr := fmt.Errorf("command failed")
-	saved := processCommand
-	processCommand = func(*command.Command, context.Context, string, command.Environment) (string, error) {
-		return "", wantErr
-	}
-	defer func() { processCommand = saved }()
-
-	s := &Secret{Name: "x", Create: command.New("script", nil, "")}
-	err := s.Process(ctx, Create, "", OperationParameters{}, "id")
-	if err != wantErr {
-		t.Errorf("Process err = %v, want %v", err, wantErr)
-	}
-}
-
-func TestSecret_Process_noCommand(t *testing.T) {
-	ctx := context.Background()
-	s := &Secret{Name: "leaf"} // no Create command
-	err := s.Process(ctx, Create, "input", OperationParameters{}, "id")
-	if err != nil {
-		t.Errorf("Process with no command for op should succeed (no-op): %v", err)
 	}
 }
 
@@ -312,23 +191,4 @@ func TestInstances_MarshalJSON(t *testing.T) {
 	if len(decoded) != 2 {
 		t.Errorf("expected 2 instances after round-trip, got %d", len(decoded))
 	}
-}
-
-func TestOperationParameters_Validate(t *testing.T) {
-	t.Run("valid", func(t *testing.T) {
-		p := OperationParameters{Reason: "any old reason"}
-		if err := p.Validate(0); err != nil {
-			t.Errorf("Validate(0): %v", err)
-		}
-		if err := p.Validate(14); err != nil {
-			t.Errorf("Validate(14): %v", err)
-		}
-		err := p.Validate(13)
-		if err == nil {
-			t.Fatal("expected error for long reason")
-		}
-		if fmt.Sprint(err) != "reason too long (14 exceeds max of 13 bytes)" {
-			t.Errorf("unexpected error: %v", err)
-		}
-	})
 }

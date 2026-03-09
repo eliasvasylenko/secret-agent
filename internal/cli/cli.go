@@ -9,8 +9,8 @@ import (
 
 	"github.com/alecthomas/kong"
 	"github.com/eliasvasylenko/secret-agent/internal/command"
+	"github.com/eliasvasylenko/secret-agent/internal/executor"
 	"github.com/eliasvasylenko/secret-agent/internal/marshal"
-	"github.com/eliasvasylenko/secret-agent/internal/secrets"
 	"github.com/eliasvasylenko/secret-agent/internal/server"
 	"github.com/eliasvasylenko/secret-agent/internal/store"
 )
@@ -159,8 +159,8 @@ type Command struct {
 	Reason string `short:"r" help:"Audit reason for the operation"`
 }
 
-func (c *Command) parameters() secrets.OperationParameters {
-	return secrets.OperationParameters{
+func (c *Command) parameters() executor.OperationParameters {
+	return executor.OperationParameters{
 		Env:       command.NewEnvironment().Load(os.Environ()),
 		Forced:    c.Force,
 		Reason:    c.Reason,

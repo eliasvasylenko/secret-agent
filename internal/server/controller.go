@@ -9,6 +9,7 @@ import (
 	"strconv"
 
 	"github.com/eliasvasylenko/secret-agent/internal/auth"
+	"github.com/eliasvasylenko/secret-agent/internal/executor"
 	"github.com/eliasvasylenko/secret-agent/internal/secrets"
 	"github.com/eliasvasylenko/secret-agent/internal/store"
 )
@@ -116,7 +117,7 @@ func (s *Controller) createInstance(w http.ResponseWriter, r *http.Request) {
 		writeError(w, NewErrorResponse(http.StatusInternalServerError, fmt.Errorf("identity not found in context")))
 		return
 	}
-	parameters := secrets.OperationParameters{
+	parameters := executor.OperationParameters{
 		Env:       operation.Env,
 		Forced:    operation.Forced,
 		Reason:    operation.Reason,
@@ -169,7 +170,7 @@ func (s *Controller) createOperation(w http.ResponseWriter, r *http.Request) {
 		writeError(w, NewErrorResponse(http.StatusInternalServerError, fmt.Errorf("identity not found in context")))
 		return
 	}
-	parameters := secrets.OperationParameters{
+	parameters := executor.OperationParameters{
 		Env:       operation.Env,
 		Forced:    operation.Forced,
 		Reason:    operation.Reason,

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/eliasvasylenko/secret-agent/internal/command"
+	"github.com/eliasvasylenko/secret-agent/internal/executor"
 	"github.com/eliasvasylenko/secret-agent/internal/secrets"
 	"github.com/eliasvasylenko/secret-agent/internal/server"
 	"github.com/google/go-cmp/cmp"
@@ -200,7 +201,7 @@ func TestInstanceClient_Create(t *testing.T) {
 	ctx := context.Background()
 	stub := &stubClient{resp: stubResponse(200, `{"id":"new-id","secret":{"name":"s1"},"status":{}}`)}
 	c := &InstanceClient{client: stub, secretId: "sid"}
-	params := secrets.OperationParameters{Reason: "test", StartedBy: "user"}
+	params := executor.OperationParameters{Reason: "test", StartedBy: "user"}
 	got, err := c.Create(ctx, params)
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -255,7 +256,7 @@ func TestInstanceClient_Destroy(t *testing.T) {
 	ctx := context.Background()
 	stub := &stubClient{resp: stubResponse(200, `{"id":"i1","secret":{"name":"s1"},"status":{}}`)}
 	c := &InstanceClient{client: stub, secretId: "sid"}
-	params := secrets.OperationParameters{Reason: "r", StartedBy: "user"}
+	params := executor.OperationParameters{Reason: "r", StartedBy: "user"}
 	got, err := c.Destroy(ctx, "i1", params)
 	if err != nil {
 		t.Fatalf("Destroy: %v", err)
@@ -274,7 +275,7 @@ func TestInstanceClient_Activate(t *testing.T) {
 	ctx := context.Background()
 	stub := &stubClient{resp: stubResponse(200, `{"id":"i1","secret":{"name":"s1"},"status":{}}`)}
 	c := &InstanceClient{client: stub, secretId: "sid"}
-	params := secrets.OperationParameters{Reason: "activate-reason", StartedBy: "user"}
+	params := executor.OperationParameters{Reason: "activate-reason", StartedBy: "user"}
 	got, err := c.Activate(ctx, "i1", params)
 	if err != nil {
 		t.Fatalf("Activate: %v", err)
@@ -293,7 +294,7 @@ func TestInstanceClient_Deactivate(t *testing.T) {
 	ctx := context.Background()
 	stub := &stubClient{resp: stubResponse(200, `{"id":"i1","secret":{"name":"s1"},"status":{}}`)}
 	c := &InstanceClient{client: stub, secretId: "sid"}
-	params := secrets.OperationParameters{Reason: "deact", StartedBy: "user"}
+	params := executor.OperationParameters{Reason: "deact", StartedBy: "user"}
 	got, err := c.Deactivate(ctx, "i1", params)
 	if err != nil {
 		t.Fatalf("Deactivate: %v", err)
@@ -312,7 +313,7 @@ func TestInstanceClient_Test(t *testing.T) {
 	ctx := context.Background()
 	stub := &stubClient{resp: stubResponse(200, `{"id":"i1","secret":{"name":"s1"},"status":{}}`)}
 	c := &InstanceClient{client: stub, secretId: "sid"}
-	params := secrets.OperationParameters{Reason: "test-run", StartedBy: "user"}
+	params := executor.OperationParameters{Reason: "test-run", StartedBy: "user"}
 	got, err := c.Test(ctx, "i1", params)
 	if err != nil {
 		t.Fatalf("Test: %v", err)

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/eliasvasylenko/secret-agent/internal/executor"
 	"github.com/eliasvasylenko/secret-agent/internal/secrets"
 	"github.com/eliasvasylenko/secret-agent/internal/server"
 )
@@ -138,7 +139,7 @@ func (c *InstanceClient) GetActive(ctx context.Context) (*secrets.Instance, erro
 	return Do[*secrets.Instance](c.client, req, err)
 }
 
-func (c *InstanceClient) Create(ctx context.Context, parameters secrets.OperationParameters) (*secrets.Instance, error) {
+func (c *InstanceClient) Create(ctx context.Context, parameters executor.OperationParameters) (*secrets.Instance, error) {
 	instance := server.CreateOperationParameters{
 		OperationParameters: server.OperationParameters{
 			Env:    parameters.Env,
@@ -150,7 +151,7 @@ func (c *InstanceClient) Create(ctx context.Context, parameters secrets.Operatio
 	return Do[*secrets.Instance](c.client, req, err)
 }
 
-func (c *InstanceClient) Destroy(ctx context.Context, instanceId string, parameters secrets.OperationParameters) (*secrets.Instance, error) {
+func (c *InstanceClient) Destroy(ctx context.Context, instanceId string, parameters executor.OperationParameters) (*secrets.Instance, error) {
 	instance := server.CreateOperationParameters{
 		Name: secrets.Destroy,
 		OperationParameters: server.OperationParameters{
@@ -163,7 +164,7 @@ func (c *InstanceClient) Destroy(ctx context.Context, instanceId string, paramet
 	return Do[*secrets.Instance](c.client, req, err)
 }
 
-func (c *InstanceClient) Activate(ctx context.Context, instanceId string, parameters secrets.OperationParameters) (*secrets.Instance, error) {
+func (c *InstanceClient) Activate(ctx context.Context, instanceId string, parameters executor.OperationParameters) (*secrets.Instance, error) {
 	instance := server.CreateOperationParameters{
 		Name: secrets.Activate,
 		OperationParameters: server.OperationParameters{
@@ -176,7 +177,7 @@ func (c *InstanceClient) Activate(ctx context.Context, instanceId string, parame
 	return Do[*secrets.Instance](c.client, req, err)
 }
 
-func (c *InstanceClient) Deactivate(ctx context.Context, instanceId string, parameters secrets.OperationParameters) (*secrets.Instance, error) {
+func (c *InstanceClient) Deactivate(ctx context.Context, instanceId string, parameters executor.OperationParameters) (*secrets.Instance, error) {
 	instance := server.CreateOperationParameters{
 		Name: secrets.Deactivate,
 		OperationParameters: server.OperationParameters{
@@ -189,7 +190,7 @@ func (c *InstanceClient) Deactivate(ctx context.Context, instanceId string, para
 	return Do[*secrets.Instance](c.client, req, err)
 }
 
-func (c *InstanceClient) Test(ctx context.Context, instanceId string, parameters secrets.OperationParameters) (*secrets.Instance, error) {
+func (c *InstanceClient) Test(ctx context.Context, instanceId string, parameters executor.OperationParameters) (*secrets.Instance, error) {
 	instance := server.CreateOperationParameters{
 		Name: secrets.Test,
 		OperationParameters: server.OperationParameters{

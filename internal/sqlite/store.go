@@ -9,6 +9,7 @@ import (
 
 	"database/sql"
 
+	"github.com/eliasvasylenko/secret-agent/internal/executor"
 	"github.com/eliasvasylenko/secret-agent/internal/marshal"
 	"github.com/eliasvasylenko/secret-agent/internal/secrets"
 	"github.com/google/uuid"
@@ -252,7 +253,7 @@ func (i *InstanceRepository) GetActive(ctx context.Context) (*secrets.Instance, 
 	return instance, json.Unmarshal(secretBytes, &instance.Secret)
 }
 
-func (i *InstanceRepository) Create(ctx context.Context, paramaters secrets.OperationParameters) (*secrets.Instance, error) {
+func (i *InstanceRepository) Create(ctx context.Context, paramaters executor.OperationParameters) (*secrets.Instance, error) {
 	if err := paramaters.Validate(i.maxReasonLen); err != nil {
 		return nil, err
 	}
@@ -308,23 +309,23 @@ func (i *InstanceRepository) Create(ctx context.Context, paramaters secrets.Oper
 	return instance, err
 }
 
-func (i *InstanceRepository) Destroy(ctx context.Context, instanceId string, paramaters secrets.OperationParameters) (*secrets.Instance, error) {
+func (i *InstanceRepository) Destroy(ctx context.Context, instanceId string, paramaters executor.OperationParameters) (*secrets.Instance, error) {
 	return updateOperation(ctx, i.db, i.secretId, instanceId, secrets.Destroy, paramaters, i.maxReasonLen)
 }
 
-func (i *InstanceRepository) Activate(ctx context.Context, instanceId string, paramaters secrets.OperationParameters) (*secrets.Instance, error) {
+func (i *InstanceRepository) Activate(ctx context.Context, instanceId string, paramaters executor.OperationParameters) (*secrets.Instance, error) {
 	return updateOperation(ctx, i.db, i.secretId, instanceId, secrets.Activate, paramaters, i.maxReasonLen)
 }
 
-func (i *InstanceRepository) Deactivate(ctx context.Context, instanceId string, paramaters secrets.OperationParameters) (*secrets.Instance, error) {
+func (i *InstanceRepository) Deactivate(ctx context.Context, instanceId string, paramaters executor.OperationParameters) (*secrets.Instance, error) {
 	return updateOperation(ctx, i.db, i.secretId, instanceId, secrets.Deactivate, paramaters, i.maxReasonLen)
 }
 
-func (i *InstanceRepository) Test(ctx context.Context, instanceId string, paramaters secrets.OperationParameters) (*secrets.Instance, error) {
+func (i *InstanceRepository) Test(ctx context.Context, instanceId string, paramaters executor.OperationParameters) (*secrets.Instance, error) {
 	return updateOperation(ctx, i.db, i.secretId, instanceId, secrets.Test, paramaters, i.maxReasonLen)
 }
 
-func updateOperation(ctx context.Context, db *sql.DB, secretId string, instanceId string, operationName secrets.OperationName, paramaters secrets.OperationParameters, maxReasonLen int) (*secrets.Instance, error) {
+func updateOperation(ctx context.Context, db *sql.DB, secretId string, instanceId string, operationName secrets.OperationName, paramaters executor.OperationParameters, maxReasonLen int) (*secrets.Instance, error) {
 	if err := paramaters.Validate(maxReasonLen); err != nil {
 		return nil, err
 	}
@@ -404,7 +405,7 @@ func updateOperation(ctx context.Context, db *sql.DB, secretId string, instanceI
 	return instance, err
 }
 
-func startOperation(ctx context.Context, tx *sql.Tx, secretId string, instanceId string, operationName secrets.OperationName, paramaters secrets.OperationParameters) (secrets.Operation, error) {
+func startOperation(ctx context.Context, tx *sql.Tx, secretId string, instanceId string, operationName secrets.OperationName, paramaters executor.OperationParameters) (secrets.Operation, error) {
 	operation := secrets.Operation{
 		SecretId:   secretId,
 		InstanceId: instanceId,
@@ -423,8 +424,8 @@ func startOperation(ctx context.Context, tx *sql.Tx, secretId string, instanceId
 	return operation, err
 }
 
-func completeOperation(ctx context.Context, db *sql.DB, secretId string, instance *secrets.Instance, operation secrets.Operation, parameters secrets.OperationParameters) error {
-	processErr := instance.Secret.Process(ctx, operation.Name, "", parameters, operation.InstanceId)
+func completeOperation(ctx context.Context, db *sql.DB, secretId string, instance *secrets.Instance, operation secrets.Operation, parameters executor.OperationParameters) error {
+	processErr := executor.Execute(ctx, &instance.Secret, operation.Name, "", parameters, operation.InstanceId)
 
 	tx, commit, rollback, err := beginTx(db)
 	if err != nil {

@@ -1,17 +1,12 @@
 package secrets
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
-	"strconv"
 
 	"github.com/eliasvasylenko/secret-agent/internal/command"
 	"github.com/eliasvasylenko/secret-agent/internal/marshal"
 )
-
-// The function to execute a command
-var processCommand = (*command.Command).Process
 
 type Secrets map[string]*Secret
 
@@ -86,21 +81,4 @@ func (s *Secret) Command(operation OperationName) *command.Command {
 	default:
 		return nil
 	}
-}
-
-func (s *Secret) Process(ctx context.Context, operation OperationName, input string, parameters OperationParameters, instanceId string) error {
-	parameters.Env = s.Environment.ExpandAndMergeWith(command.Environment{
-		"ID":         instanceId,
-		"NAME":       s.Name,
-		"FORCE":      strconv.FormatBool(parameters.Forced),
-		"REASON":     parameters.Reason,
-		"STARTED_BY": parameters.StartedBy,
-	}).ExpandWith(parameters.Env)
-
-	cmd := s.Command(operation)
-	if cmd != nil {
-		_, err := processCommand(cmd, ctx, input, parameters.Env)
-		return err
-	}
-	return nil
 }
