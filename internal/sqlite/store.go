@@ -370,7 +370,9 @@ func updateOperation(ctx context.Context, db *sql.DB, secretId string, instanceI
 
 	var msg string
 
-	if previousOperation.CompletedAt == nil && operationName != previousOperation.Name {
+	if paramaters.ExpectedOperationNumber != nil && previousOperation.OperationNumber != *paramaters.ExpectedOperationNumber {
+		msg = fmt.Sprintf("%s when previous operation %d does not match expected %d", operationName, previousOperation.OperationNumber, *paramaters.ExpectedOperationNumber)
+	} else if previousOperation.CompletedAt == nil && operationName != previousOperation.Name {
 		msg = fmt.Sprintf("%s when previous %s has not succeeded", operationName, previousOperation.Name)
 	} else if operationName == secrets.Activate && activeInstanceId != nil {
 		msg = fmt.Sprintf("%s when instance %s is active", operationName, *activeInstanceId)

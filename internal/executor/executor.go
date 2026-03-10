@@ -14,10 +14,11 @@ var processCommand = (*command.Command).Process
 
 // OperationParameters are the common parameters for an operation on a secret instance
 type OperationParameters struct {
-	Env       command.Environment `json:"env"`
-	Forced    bool                `json:"forced"`
-	Reason    string              `json:"reason"`
-	StartedBy string              `json:"startedBy"`
+	Env                     command.Environment `json:"env"`
+	Forced                  bool                `json:"forced"`
+	Reason                  string              `json:"reason"`
+	StartedBy               string              `json:"startedBy"`
+	ExpectedOperationNumber *int                `json:"expectedOperationNumber,omitempty"`
 }
 
 // Validate enforces basic constraints

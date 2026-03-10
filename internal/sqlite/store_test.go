@@ -238,6 +238,43 @@ func TestInstanceRepository_Activate_Deactivate(t *testing.T) {
 	}
 }
 
+func TestInstanceRepository_ExpectedOperationNumber(t *testing.T) {
+	repo := newTestRepo(t, nil)
+	ctx := context.Background()
+	instances := repo.Instances("s1")
+
+	created, err := instances.Create(ctx, executor.OperationParameters{Reason: "create", StartedBy: "user"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	_, err = instances.Activate(ctx, created.Id, executor.OperationParameters{Reason: "activate", StartedBy: "user"})
+	if err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
+	// Instance is now at operation 2 (Create=1, Activate=2). Deactivate requires current op 2.
+	expected := 2
+	_, err = instances.Deactivate(ctx, created.Id, executor.OperationParameters{Reason: "deact", StartedBy: "user", ExpectedOperationNumber: &expected})
+	if err != nil {
+		t.Fatalf("Deactivate with matching ExpectedOperationNumber: %v", err)
+	}
+
+	// Instance is now at operation 3. Try Activate with expected 1 (wrong) - should fail.
+	wrongExpected := 1
+	_, err = instances.Activate(ctx, created.Id, executor.OperationParameters{Reason: "act", StartedBy: "user", ExpectedOperationNumber: &wrongExpected})
+	if err == nil {
+		t.Fatal("Activate with mismatched ExpectedOperationNumber want error")
+	}
+	if err.Error() != "cannot activate when previous operation 3 does not match expected 1" {
+		t.Errorf("unexpected error: %v", err)
+	}
+
+	// Same but Forced - should succeed
+	_, err = instances.Activate(ctx, created.Id, executor.OperationParameters{Reason: "act", StartedBy: "user", ExpectedOperationNumber: &wrongExpected, Forced: true})
+	if err != nil {
+		t.Fatalf("Activate with Forced should ignore ExpectedOperationNumber mismatch: %v", err)
+	}
+}
+
 func TestInstanceRepository_Create_validateReason(t *testing.T) {
 	repo := newTestRepo(t, nil)
 	ctx := context.Background()
