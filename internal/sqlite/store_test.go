@@ -5,11 +5,12 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/eliasvasylenko/secret-agent/internal/executor"
 	"github.com/eliasvasylenko/secret-agent/internal/secrets"
 	"github.com/google/go-cmp/cmp"
 )
 
-// noOpSecret has no commands so Process is a no-op (used for store operations that run Process).
+// noOpSecret has no commands so Execute is a no-op (used for store operations that run Execute).
 var noOpSecret = &secrets.Secret{Name: "s1"}
 
 func newTestRepo(t *testing.T, s secrets.Secrets) *SecretRespository {
@@ -88,7 +89,7 @@ func TestSecretRepository_Instances_Create_unknownSecret(t *testing.T) {
 	ctx := context.Background()
 	instances := repo.Instances("nonexistent")
 
-	_, err := instances.Create(ctx, secrets.OperationParameters{Reason: "r", StartedBy: "u"})
+	_, err := instances.Create(ctx, executor.OperationParameters{Reason: "r", StartedBy: "u"})
 	if err == nil {
 		t.Fatal("Create = nil, want error")
 	}
@@ -99,7 +100,7 @@ func TestInstanceRepository_Create_List_Get(t *testing.T) {
 	ctx := context.Background()
 	instances := repo.Instances("s1")
 
-	created, err := instances.Create(ctx, secrets.OperationParameters{Reason: "create", StartedBy: "user"})
+	created, err := instances.Create(ctx, executor.OperationParameters{Reason: "create", StartedBy: "user"})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -159,11 +160,11 @@ func TestInstanceRepository_GetActive(t *testing.T) {
 		t.Errorf("GetActive = %v, want nil", active)
 	}
 
-	created, err := instances.Create(ctx, secrets.OperationParameters{Reason: "create", StartedBy: "user"})
+	created, err := instances.Create(ctx, executor.OperationParameters{Reason: "create", StartedBy: "user"})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	_, err = instances.Activate(ctx, created.Id, secrets.OperationParameters{Reason: "activate", StartedBy: "user"})
+	_, err = instances.Activate(ctx, created.Id, executor.OperationParameters{Reason: "activate", StartedBy: "user"})
 	if err != nil {
 		t.Fatalf("Activate: %v", err)
 	}
@@ -182,7 +183,7 @@ func TestInstanceRepository_History(t *testing.T) {
 	ctx := context.Background()
 	instances := repo.Instances("s1")
 
-	created, err := instances.Create(ctx, secrets.OperationParameters{Reason: "create", StartedBy: "user"})
+	created, err := instances.Create(ctx, executor.OperationParameters{Reason: "create", StartedBy: "user"})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -204,7 +205,7 @@ func TestInstanceRepository_Activate_Deactivate(t *testing.T) {
 	ctx := context.Background()
 	instances := repo.Instances("s1")
 
-	created, err := instances.Create(ctx, secrets.OperationParameters{Reason: "create", StartedBy: "user"})
+	created, err := instances.Create(ctx, executor.OperationParameters{Reason: "create", StartedBy: "user"})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -212,7 +213,7 @@ func TestInstanceRepository_Activate_Deactivate(t *testing.T) {
 		t.Errorf("Create returned instance with status %s, want %s", created.Status.Name, secrets.Create)
 	}
 
-	activated, err := instances.Activate(ctx, created.Id, secrets.OperationParameters{Reason: "activate", StartedBy: "user"})
+	activated, err := instances.Activate(ctx, created.Id, executor.OperationParameters{Reason: "activate", StartedBy: "user"})
 	if err != nil {
 		t.Fatalf("Activate: %v", err)
 	}
@@ -224,7 +225,7 @@ func TestInstanceRepository_Activate_Deactivate(t *testing.T) {
 		t.Errorf("Activate returned instance with status %s, want %s", activated.Status.Name, secrets.Activate)
 	}
 
-	deactivated, err := instances.Deactivate(ctx, created.Id, secrets.OperationParameters{Reason: "deactivate", StartedBy: "user"})
+	deactivated, err := instances.Deactivate(ctx, created.Id, executor.OperationParameters{Reason: "deactivate", StartedBy: "user"})
 	if err != nil {
 		t.Fatalf("Deactivate: %v", err)
 	}
@@ -242,14 +243,14 @@ func TestInstanceRepository_Create_validateReason(t *testing.T) {
 	ctx := context.Background()
 	instances := repo.Instances("s1")
 
-	_, err := instances.Create(ctx, secrets.OperationParameters{Reason: "ok", StartedBy: "user"})
+	_, err := instances.Create(ctx, executor.OperationParameters{Reason: "ok", StartedBy: "user"})
 	if err != nil {
 		t.Fatalf("Create (short reason): %v", err)
 	}
 
 	// maxReasonLen is 256 in newTestRepo
 	longReason := string(make([]byte, 257))
-	_, err = instances.Create(ctx, secrets.OperationParameters{Reason: longReason, StartedBy: "user"})
+	_, err = instances.Create(ctx, executor.OperationParameters{Reason: longReason, StartedBy: "user"})
 	if err == nil {
 		t.Fatal("Create with too-long reason = nil, want error")
 	}

@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 
+	"github.com/eliasvasylenko/secret-agent/internal/executor"
 	"github.com/eliasvasylenko/secret-agent/internal/secrets"
 )
 
@@ -31,19 +32,19 @@ type Instances interface {
 	GetActive(ctx context.Context) (*secrets.Instance, error)
 
 	// Start creating a new instance with the given plan and ID, returning a function to complete the operation
-	Create(ctx context.Context, parameters secrets.OperationParameters) (*secrets.Instance, error)
+	Create(ctx context.Context, parameters executor.OperationParameters) (*secrets.Instance, error)
 
 	// Start destroying the instance with the given ID, returning a function to complete the operation
-	Destroy(ctx context.Context, instanceId string, parameters secrets.OperationParameters) (*secrets.Instance, error)
+	Destroy(ctx context.Context, instanceId string, parameters executor.OperationParameters) (*secrets.Instance, error)
 
 	// Activate the instance with the given ID and secret name
-	Activate(ctx context.Context, instanceId string, parameters secrets.OperationParameters) (*secrets.Instance, error)
+	Activate(ctx context.Context, instanceId string, parameters executor.OperationParameters) (*secrets.Instance, error)
 
 	// Deactivate the instance with the given ID and secret name
-	Deactivate(ctx context.Context, instanceId string, parameters secrets.OperationParameters) (*secrets.Instance, error)
+	Deactivate(ctx context.Context, instanceId string, parameters executor.OperationParameters) (*secrets.Instance, error)
 
 	// Deactivate the instance with the given ID and secret name
-	Test(ctx context.Context, instanceId string, parameters secrets.OperationParameters) (*secrets.Instance, error)
+	Test(ctx context.Context, instanceId string, parameters executor.OperationParameters) (*secrets.Instance, error)
 
 	// Read the operation history of a secret instance, from the given inclusive index, to the given exclusive index
 	History(ctx context.Context, instanceId string, from int, to int) ([]*secrets.Operation, error)

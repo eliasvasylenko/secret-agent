@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/eliasvasylenko/secret-agent/internal/auth"
+	"github.com/eliasvasylenko/secret-agent/internal/executor"
 	"github.com/eliasvasylenko/secret-agent/internal/mocks"
 	"github.com/eliasvasylenko/secret-agent/internal/secrets"
 	"github.com/eliasvasylenko/secret-agent/internal/store"
@@ -172,7 +173,7 @@ func TestController_createInstance(t *testing.T) {
 	mocks.Expect(&mockStore.Mock, mockStore.Instances, func(secretId string) store.Instances {
 		return mockInstances
 	})
-	mocks.Expect(&mockInstances.Mock, mockInstances.Create, func(ctx context.Context, params secrets.OperationParameters) (*secrets.Instance, error) {
+	mocks.Expect(&mockInstances.Mock, mockInstances.Create, func(ctx context.Context, params executor.OperationParameters) (*secrets.Instance, error) {
 		if params.StartedBy != "test-user" {
 			t.Errorf("StartedBy = %q", params.StartedBy)
 		}
@@ -218,7 +219,7 @@ func TestController_createOperation(t *testing.T) {
 			opName: secrets.Activate,
 			reason: "act-reason",
 			expect: func(m *mocks.MockInstances, reason string) {
-				mocks.Expect(&m.Mock, m.Activate, func(ctx context.Context, instanceId string, params secrets.OperationParameters) (*secrets.Instance, error) {
+				mocks.Expect(&m.Mock, m.Activate, func(ctx context.Context, instanceId string, params executor.OperationParameters) (*secrets.Instance, error) {
 					if instanceId != "i1" {
 						t.Errorf("Activate instanceId = %q", instanceId)
 					}
@@ -234,7 +235,7 @@ func TestController_createOperation(t *testing.T) {
 			opName: secrets.Deactivate,
 			reason: "deact-reason",
 			expect: func(m *mocks.MockInstances, reason string) {
-				mocks.Expect(&m.Mock, m.Deactivate, func(ctx context.Context, instanceId string, params secrets.OperationParameters) (*secrets.Instance, error) {
+				mocks.Expect(&m.Mock, m.Deactivate, func(ctx context.Context, instanceId string, params executor.OperationParameters) (*secrets.Instance, error) {
 					if instanceId != "i1" {
 						t.Errorf("Deactivate instanceId = %q", instanceId)
 					}
@@ -250,7 +251,7 @@ func TestController_createOperation(t *testing.T) {
 			opName: secrets.Destroy,
 			reason: "destroy-reason",
 			expect: func(m *mocks.MockInstances, reason string) {
-				mocks.Expect(&m.Mock, m.Destroy, func(ctx context.Context, instanceId string, params secrets.OperationParameters) (*secrets.Instance, error) {
+				mocks.Expect(&m.Mock, m.Destroy, func(ctx context.Context, instanceId string, params executor.OperationParameters) (*secrets.Instance, error) {
 					if instanceId != "i1" {
 						t.Errorf("Destroy instanceId = %q", instanceId)
 					}
@@ -266,7 +267,7 @@ func TestController_createOperation(t *testing.T) {
 			opName: secrets.Test,
 			reason: "test-reason",
 			expect: func(m *mocks.MockInstances, reason string) {
-				mocks.Expect(&m.Mock, m.Test, func(ctx context.Context, instanceId string, params secrets.OperationParameters) (*secrets.Instance, error) {
+				mocks.Expect(&m.Mock, m.Test, func(ctx context.Context, instanceId string, params executor.OperationParameters) (*secrets.Instance, error) {
 					if instanceId != "i1" {
 						t.Errorf("Test instanceId = %q", instanceId)
 					}
