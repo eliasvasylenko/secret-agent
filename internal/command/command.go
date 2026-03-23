@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
+	"io"
 	"os/exec"
 	"strings"
 
@@ -22,6 +22,12 @@ type Command struct {
 	Environment    Environment `json:"environment"`
 	Shell          string      `json:"shell"`
 	CommandOptions `json:","`
+}
+
+type Stdio struct {
+	Stdin  string
+	Stdout io.Writer
+	Stderr io.Writer
 }
 
 func New(script string, environment Environment, shell string) *Command {
@@ -55,30 +61,26 @@ func (c *Command) MarshalJSON() ([]byte, error) {
 	return marshal.JSON(command(*c))
 }
 
-func (c *Command) Process(ctx context.Context, input string, environment Environment) (string, error) {
+func (c *Command) Process(ctx context.Context, stdio Stdio, environment Environment) error {
 	env := c.Environment.ExpandAndMergeWith(environment)
 
 	shell, args, err := BuildShellExec(c.Script, c.Shell)
 	if err != nil {
-		return "", err
+		return err
 	}
 
 	subProcess := execCommand(ctx, shell, args...)
 	subProcess.Env = append(subProcess.Env, env.Render()...)
 	c.CommandOptions.Apply(subProcess)
-	stdin, err := subProcess.StdinPipe()
-	if err != nil {
-		return "", fmt.Errorf("resource could not be created '%v'", c)
-	}
-	defer stdin.Close()
 
-	subProcess.Stdin = strings.NewReader(input)
-	subProcess.Stderr = os.Stderr
+	subProcess.Stdin = strings.NewReader(stdio.Stdin)
+	subProcess.Stdout = stdio.Stdout
+	subProcess.Stderr = stdio.Stderr
 
-	output, err := subProcess.Output()
+	err = subProcess.Run()
 	if err != nil {
-		return "", fmt.Errorf("process failed '%v' - %s", c, err.Error())
+		return fmt.Errorf("process failed '%v' - %s", c, err.Error())
 	}
 
-	return string(output), err
+	return nil
 }

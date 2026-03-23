@@ -46,6 +46,14 @@ type Instances interface {
 	// Deactivate the instance with the given ID and secret name
 	Test(ctx context.Context, instanceId string, parameters executor.OperationParameters) (*secrets.Instance, error)
 
+	// Wait for the instance to complete the given operation
+	Await(ctx context.Context, instanceId string, operationNumber int) (*secrets.Instance, error)
+
 	// Read the operation history of a secret instance, from the given inclusive index, to the given exclusive index
 	History(ctx context.Context, instanceId string, from int, to int) ([]*secrets.Operation, error)
+}
+
+type Update struct {
+	Instance *secrets.Instance
+	Complete func() (*secrets.Instance, error)
 }

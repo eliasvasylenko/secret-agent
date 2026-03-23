@@ -168,7 +168,7 @@ func TestProcess(t *testing.T) {
 				Script:      tc.script,
 				Shell:       tc.shell,
 			}
-			output, err := command.Process(context.Background(), tc.expectedInput, Environment{})
+			err := command.Process(context.Background(), tc.expectedInput, Environment{})
 			if err != nil {
 				t.Errorf("unexpected error '%v'", err)
 			}
