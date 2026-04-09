@@ -5,13 +5,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sync"
 	"time"
 
 	"database/sql"
 
+	"github.com/eliasvasylenko/secret-agent/internal/command"
 	"github.com/eliasvasylenko/secret-agent/internal/executor"
 	"github.com/eliasvasylenko/secret-agent/internal/marshal"
 	"github.com/eliasvasylenko/secret-agent/internal/secrets"
+	"github.com/eliasvasylenko/secret-agent/internal/store"
 	"github.com/google/uuid"
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -21,6 +24,14 @@ type SecretRespository struct {
 	db           *sql.DB
 	secrets      secrets.Secrets
 	maxReasonLen int
+
+	mu         sync.Mutex
+	operations map[int]*operationRuntime
+}
+
+// operationRuntime tracks a running async operation so Await can join it.
+type operationRuntime struct {
+	done chan struct{}
 }
 
 type InstanceRepository struct {
@@ -28,6 +39,7 @@ type InstanceRepository struct {
 	secretId     string
 	secret       *secrets.Secret
 	maxReasonLen int
+	tracker      *SecretRespository
 }
 
 func NewSecretRepository(ctx context.Context, dbFile string, secrets secrets.Secrets, debug bool, maxReasonLen int) (*SecretRespository, error) {
@@ -61,7 +73,12 @@ func NewSecretRepository(ctx context.Context, dbFile string, secrets secrets.Sec
 		CREATE INDEX IF NOT EXISTS instance_operation ON operation (instanceId, id DESC);
 		CREATE INDEX IF NOT EXISTS secret_operation ON operation (secretId, id DESC);
 	`)
-	return &SecretRespository{db: db, secrets: secrets, maxReasonLen: maxReasonLen}, err
+	return &SecretRespository{
+		db:           db,
+		secrets:      secrets,
+		maxReasonLen: maxReasonLen,
+		operations:   make(map[int]*operationRuntime),
+	}, err
 }
 
 func (s *SecretRespository) Close() {
@@ -137,6 +154,7 @@ func (s *SecretRespository) Instances(secretId string) *InstanceRepository {
 		secretId:     secretId,
 		secret:       secret,
 		maxReasonLen: s.maxReasonLen,
+		tracker:      s,
 	}
 }
 
@@ -253,8 +271,8 @@ func (i *InstanceRepository) GetActive(ctx context.Context) (*secrets.Instance, 
 	return instance, json.Unmarshal(secretBytes, &instance.Secret)
 }
 
-func (i *InstanceRepository) Create(ctx context.Context, paramaters executor.OperationParameters) (*secrets.Instance, error) {
-	if err := paramaters.Validate(i.maxReasonLen); err != nil {
+func (i *InstanceRepository) Create(ctx context.Context, parameters executor.OperationParameters, stdio command.Stdio) (*secrets.Instance, error) {
+	if err := parameters.Validate(i.maxReasonLen); err != nil {
 		return nil, err
 	}
 
@@ -290,7 +308,7 @@ func (i *InstanceRepository) Create(ctx context.Context, paramaters executor.Ope
 		return nil, err
 	}
 
-	operation, err := startOperation(ctx, tx, i.secretId, instanceId, secrets.Create, paramaters)
+	operation, err := startOperation(ctx, tx, i.secretId, instanceId, secrets.Create, parameters)
 	if err != nil {
 		return nil, err
 	}
@@ -305,32 +323,32 @@ func (i *InstanceRepository) Create(ctx context.Context, paramaters executor.Ope
 		Secret: *i.secret,
 	}
 
-	err = completeOperation(ctx, i.db, i.secretId, instance, operation, paramaters)
-	return instance, err
+	i.launchAsync(operation, instance, parameters, stdio)
+	return instance, nil
 }
 
-func (i *InstanceRepository) Destroy(ctx context.Context, instanceId string, paramaters executor.OperationParameters) (*secrets.Instance, error) {
-	return updateOperation(ctx, i.db, i.secretId, instanceId, secrets.Destroy, paramaters, i.maxReasonLen)
+func (i *InstanceRepository) Destroy(ctx context.Context, instanceId string, parameters executor.OperationParameters, stdio command.Stdio) (*secrets.Instance, error) {
+	return i.startUpdateOperation(ctx, instanceId, secrets.Destroy, parameters, stdio)
 }
 
-func (i *InstanceRepository) Activate(ctx context.Context, instanceId string, paramaters executor.OperationParameters) (*secrets.Instance, error) {
-	return updateOperation(ctx, i.db, i.secretId, instanceId, secrets.Activate, paramaters, i.maxReasonLen)
+func (i *InstanceRepository) Activate(ctx context.Context, instanceId string, parameters executor.OperationParameters, stdio command.Stdio) (*secrets.Instance, error) {
+	return i.startUpdateOperation(ctx, instanceId, secrets.Activate, parameters, stdio)
 }
 
-func (i *InstanceRepository) Deactivate(ctx context.Context, instanceId string, paramaters executor.OperationParameters) (*secrets.Instance, error) {
-	return updateOperation(ctx, i.db, i.secretId, instanceId, secrets.Deactivate, paramaters, i.maxReasonLen)
+func (i *InstanceRepository) Deactivate(ctx context.Context, instanceId string, parameters executor.OperationParameters, stdio command.Stdio) (*secrets.Instance, error) {
+	return i.startUpdateOperation(ctx, instanceId, secrets.Deactivate, parameters, stdio)
 }
 
-func (i *InstanceRepository) Test(ctx context.Context, instanceId string, paramaters executor.OperationParameters) (*secrets.Instance, error) {
-	return updateOperation(ctx, i.db, i.secretId, instanceId, secrets.Test, paramaters, i.maxReasonLen)
+func (i *InstanceRepository) Test(ctx context.Context, instanceId string, parameters executor.OperationParameters, stdio command.Stdio) (*secrets.Instance, error) {
+	return i.startUpdateOperation(ctx, instanceId, secrets.Test, parameters, stdio)
 }
 
-func updateOperation(ctx context.Context, db *sql.DB, secretId string, instanceId string, operationName secrets.OperationName, paramaters executor.OperationParameters, maxReasonLen int) (*secrets.Instance, error) {
-	if err := paramaters.Validate(maxReasonLen); err != nil {
+func (i *InstanceRepository) startUpdateOperation(ctx context.Context, instanceId string, operationName secrets.OperationName, parameters executor.OperationParameters, stdio command.Stdio) (*secrets.Instance, error) {
+	if err := parameters.Validate(i.maxReasonLen); err != nil {
 		return nil, err
 	}
 
-	tx, commit, rollback, err := beginTx(db)
+	tx, commit, rollback, err := beginTx(i.db)
 	if err != nil {
 		return nil, err
 	}
@@ -370,8 +388,8 @@ func updateOperation(ctx context.Context, db *sql.DB, secretId string, instanceI
 
 	var msg string
 
-	if paramaters.ExpectedOperationNumber != nil && previousOperation.OperationNumber != *paramaters.ExpectedOperationNumber {
-		msg = fmt.Sprintf("%s when previous operation %d does not match expected %d", operationName, previousOperation.OperationNumber, *paramaters.ExpectedOperationNumber)
+	if parameters.ExpectedOperationNumber != nil && previousOperation.OperationNumber != *parameters.ExpectedOperationNumber {
+		msg = fmt.Sprintf("%s when previous operation %d does not match expected %d", operationName, previousOperation.OperationNumber, *parameters.ExpectedOperationNumber)
 	} else if previousOperation.CompletedAt == nil && operationName != previousOperation.Name {
 		msg = fmt.Sprintf("%s when previous %s has not succeeded", operationName, previousOperation.Name)
 	} else if operationName == secrets.Activate && activeInstanceId != nil {
@@ -381,14 +399,14 @@ func updateOperation(ctx context.Context, db *sql.DB, secretId string, instanceI
 	}
 
 	if msg != "" {
-		if paramaters.Forced {
+		if parameters.Forced {
 			log.Default().Printf("forcing %s", msg)
 		} else {
 			return nil, fmt.Errorf("cannot %s", msg)
 		}
 	}
 
-	operation, err := startOperation(ctx, tx, secretId, instanceId, operationName, paramaters)
+	operation, err := startOperation(ctx, tx, i.secretId, instanceId, operationName, parameters)
 	if err != nil {
 		return nil, err
 	}
@@ -403,8 +421,55 @@ func updateOperation(ctx context.Context, db *sql.DB, secretId string, instanceI
 		Secret: secretPlan,
 	}
 
-	err = completeOperation(ctx, db, secretId, instance, operation, paramaters)
-	return instance, err
+	i.launchAsync(operation, instance, parameters, stdio)
+	return instance, nil
+}
+
+// launchAsync registers the operation and runs completeOperation in a background goroutine.
+func (i *InstanceRepository) launchAsync(operation secrets.Operation, instance *secrets.Instance, parameters executor.OperationParameters, stdio command.Stdio) {
+	rt := &operationRuntime{done: make(chan struct{})}
+	i.tracker.mu.Lock()
+	i.tracker.operations[operation.OperationNumber] = rt
+	i.tracker.mu.Unlock()
+
+	// Copy fields needed by the goroutine to avoid capturing the InstanceRepository.
+	db := i.db
+	secretId := i.secretId
+
+	go func() {
+		defer close(rt.done)
+		// Use a detached context so the operation outlives the originating request.
+		completeOperation(context.Background(), db, secretId, instance, operation, parameters, stdio)
+	}()
+}
+
+func (i *InstanceRepository) Await(ctx context.Context, instanceId string, operationNumber int) (*secrets.Instance, error) {
+	// Check for a tracked in-process operation and wait for it.
+	i.tracker.mu.Lock()
+	rt := i.tracker.operations[operationNumber]
+	i.tracker.mu.Unlock()
+
+	if rt != nil {
+		select {
+		case <-rt.done:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+
+	// Read the latest operation for this instance from the DB.
+	instance, err := i.Get(ctx, instanceId)
+	if err != nil {
+		return nil, err
+	}
+
+	if instance.Status.OperationNumber != operationNumber {
+		return instance, &store.StaleOperationError{
+			Expected: operationNumber,
+			Latest:   instance.Status.OperationNumber,
+		}
+	}
+	return instance, nil
 }
 
 func startOperation(ctx context.Context, tx *sql.Tx, secretId string, instanceId string, operationName secrets.OperationName, paramaters executor.OperationParameters) (secrets.Operation, error) {
@@ -426,8 +491,8 @@ func startOperation(ctx context.Context, tx *sql.Tx, secretId string, instanceId
 	return operation, err
 }
 
-func completeOperation(ctx context.Context, db *sql.DB, secretId string, instance *secrets.Instance, operation secrets.Operation, parameters executor.OperationParameters) error {
-	processErr := executor.Execute(ctx, &instance.Secret, operation.Name, "", parameters, operation.InstanceId)
+func completeOperation(ctx context.Context, db *sql.DB, secretId string, instance *secrets.Instance, operation secrets.Operation, parameters executor.OperationParameters, stdio command.Stdio) error {
+	processErr := executor.Execute(ctx, &instance.Secret, operation.Name, stdio, parameters, operation.InstanceId)
 
 	tx, commit, rollback, err := beginTx(db)
 	if err != nil {

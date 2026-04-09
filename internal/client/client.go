@@ -9,10 +9,13 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"sync"
 
+	"github.com/eliasvasylenko/secret-agent/internal/command"
 	"github.com/eliasvasylenko/secret-agent/internal/executor"
 	"github.com/eliasvasylenko/secret-agent/internal/secrets"
 	"github.com/eliasvasylenko/secret-agent/internal/server"
+	"github.com/eliasvasylenko/secret-agent/internal/store"
 )
 
 type SecretClient struct {
@@ -21,9 +24,9 @@ type SecretClient struct {
 }
 
 type InstanceClient struct {
-	socket   string
-	client   httpClient
+	parent   *SecretClient
 	secretId string
+	polls    sync.Map
 }
 
 type httpClient interface {
@@ -114,15 +117,14 @@ func (c *SecretClient) History(ctx context.Context, secretId string, from int, t
 
 func (c *SecretClient) Instances(secretId string) *InstanceClient {
 	return &InstanceClient{
-		socket:   c.socket,
-		client:   c.client,
+		parent:   c,
 		secretId: secretId,
 	}
 }
 
 func (c *InstanceClient) List(ctx context.Context, from int, to int) (secrets.Instances, error) {
 	req, err := BuildRequest(ctx, http.MethodGet, "/secrets/"+c.secretId+"/instances", nil)
-	items, err := Do[server.ItemsResponse[secrets.Instances]](c.client, req, err)
+	items, err := Do[server.ItemsResponse[secrets.Instances]](c.parent.client, req, err)
 	if err != nil {
 		return nil, err
 	}
@@ -131,76 +133,141 @@ func (c *InstanceClient) List(ctx context.Context, from int, to int) (secrets.In
 
 func (c *InstanceClient) Get(ctx context.Context, instanceId string) (*secrets.Instance, error) {
 	req, err := BuildRequest(ctx, http.MethodGet, "/secrets/"+c.secretId+"/instances/"+instanceId, nil)
-	return Do[*secrets.Instance](c.client, req, err)
+	return Do[*secrets.Instance](c.parent.client, req, err)
 }
 
 func (c *InstanceClient) GetActive(ctx context.Context) (*secrets.Instance, error) {
 	req, err := BuildRequest(ctx, http.MethodGet, "/secrets/"+c.secretId+"/active", nil)
-	return Do[*secrets.Instance](c.client, req, err)
+	return Do[*secrets.Instance](c.parent.client, req, err)
 }
 
-func (c *InstanceClient) Create(ctx context.Context, parameters executor.OperationParameters) (*secrets.Instance, error) {
-	instance := server.CreateOperationParameters{
+func (c *InstanceClient) Create(ctx context.Context, parameters executor.OperationParameters, stdio command.Stdio) (*secrets.Instance, error) {
+	body := server.CreateOperationParameters{
 		OperationParameters: server.OperationParameters{
 			Env:    parameters.Env,
 			Forced: parameters.Forced,
 			Reason: parameters.Reason,
+			Input:  stdio.Stdin,
 		},
 	}
-	req, err := BuildRequest(ctx, http.MethodPost, "/secrets/"+c.secretId+"/instances", instance)
-	return Do[*secrets.Instance](c.client, req, err)
+	req, err := BuildRequest(ctx, http.MethodPost, "/secrets/"+c.secretId+"/instances", body)
+	instance, err := Do[*secrets.Instance](c.parent.client, req, err)
+	if err != nil {
+		return nil, err
+	}
+	c.startPolling(instance, stdio.Stdout, stdio.Stderr)
+	return instance, nil
 }
 
-func (c *InstanceClient) Destroy(ctx context.Context, instanceId string, parameters executor.OperationParameters) (*secrets.Instance, error) {
-	instance := server.CreateOperationParameters{
-		Name: secrets.Destroy,
+func (c *InstanceClient) Destroy(ctx context.Context, instanceId string, parameters executor.OperationParameters, stdio command.Stdio) (*secrets.Instance, error) {
+	return c.startOperation(ctx, instanceId, secrets.Destroy, parameters, stdio)
+}
+
+func (c *InstanceClient) Activate(ctx context.Context, instanceId string, parameters executor.OperationParameters, stdio command.Stdio) (*secrets.Instance, error) {
+	return c.startOperation(ctx, instanceId, secrets.Activate, parameters, stdio)
+}
+
+func (c *InstanceClient) Deactivate(ctx context.Context, instanceId string, parameters executor.OperationParameters, stdio command.Stdio) (*secrets.Instance, error) {
+	return c.startOperation(ctx, instanceId, secrets.Deactivate, parameters, stdio)
+}
+
+func (c *InstanceClient) Test(ctx context.Context, instanceId string, parameters executor.OperationParameters, stdio command.Stdio) (*secrets.Instance, error) {
+	return c.startOperation(ctx, instanceId, secrets.Test, parameters, stdio)
+}
+
+func (c *InstanceClient) startOperation(ctx context.Context, instanceId string, name secrets.OperationName, parameters executor.OperationParameters, stdio command.Stdio) (*secrets.Instance, error) {
+	body := server.CreateOperationParameters{
+		Name: name,
 		OperationParameters: server.OperationParameters{
 			Env:    parameters.Env,
 			Forced: parameters.Forced,
 			Reason: parameters.Reason,
+			Input:  stdio.Stdin,
 		},
 	}
-	req, err := BuildRequest(ctx, http.MethodPost, "/secrets/"+c.secretId+"/instances/"+instanceId+"/operations", instance)
-	return Do[*secrets.Instance](c.client, req, err)
+	req, err := BuildRequest(ctx, http.MethodPost, "/secrets/"+c.secretId+"/instances/"+instanceId+"/operations", body)
+	instance, err := Do[*secrets.Instance](c.parent.client, req, err)
+	if err != nil {
+		return nil, err
+	}
+	c.startPolling(instance, stdio.Stdout, stdio.Stderr)
+	return instance, nil
 }
 
-func (c *InstanceClient) Activate(ctx context.Context, instanceId string, parameters executor.OperationParameters) (*secrets.Instance, error) {
-	instance := server.CreateOperationParameters{
-		Name: secrets.Activate,
-		OperationParameters: server.OperationParameters{
-			Env:    parameters.Env,
-			Forced: parameters.Forced,
-			Reason: parameters.Reason,
-		},
-	}
-	req, err := BuildRequest(ctx, http.MethodPost, "/secrets/"+c.secretId+"/instances/"+instanceId+"/operations", instance)
-	return Do[*secrets.Instance](c.client, req, err)
+// startPolling spawns goroutines to poll stdout and stderr for an operation,
+// and a cleanup goroutine that removes the WaitGroup from the map once both finish.
+func (c *InstanceClient) startPolling(instance *secrets.Instance, stdout, stderr io.Writer) {
+	opNumber := instance.Status.OperationNumber
+	wg := &sync.WaitGroup{}
+	c.polls.Store(opNumber, wg)
+	wg.Add(2)
+	go c.poll(wg, instance, stdout, "stdout")
+	go c.poll(wg, instance, stderr, "stderr")
+	go func() {
+		wg.Wait()
+		c.polls.Delete(opNumber)
+	}()
 }
 
-func (c *InstanceClient) Deactivate(ctx context.Context, instanceId string, parameters executor.OperationParameters) (*secrets.Instance, error) {
-	instance := server.CreateOperationParameters{
-		Name: secrets.Deactivate,
-		OperationParameters: server.OperationParameters{
-			Env:    parameters.Env,
-			Forced: parameters.Forced,
-			Reason: parameters.Reason,
-		},
+// poll polls a stream endpoint and forwards bytes to the writer until complete.
+func (c *InstanceClient) poll(wg *sync.WaitGroup, instance *secrets.Instance, w io.Writer, stream string) {
+	defer wg.Done()
+	path := fmt.Sprintf("/secrets/%s/instances/%s/operations/%d/%s",
+		c.secretId, instance.Id, instance.Status.OperationNumber, stream)
+	fromByte := 0
+	for {
+		req, err := BuildRequest(context.Background(), http.MethodGet, path, nil)
+		if err != nil {
+			return
+		}
+		query := req.URL.Query()
+		query.Set("fromByte", strconv.Itoa(fromByte))
+		query.Set("maxWait", "5s")
+		req.URL.RawQuery = query.Encode()
+
+		resp, err := Do[server.StreamResponse](c.parent.client, req, nil)
+		if err != nil {
+			return
+		}
+
+		if len(resp.Data) > 0 {
+			w.Write(resp.Data)
+			fromByte += len(resp.Data)
+		}
+
+		if resp.Complete {
+			return
+		}
 	}
-	req, err := BuildRequest(ctx, http.MethodPost, "/secrets/"+c.secretId+"/instances/"+instanceId+"/operations", instance)
-	return Do[*secrets.Instance](c.client, req, err)
 }
 
-func (c *InstanceClient) Test(ctx context.Context, instanceId string, parameters executor.OperationParameters) (*secrets.Instance, error) {
-	instance := server.CreateOperationParameters{
-		Name: secrets.Test,
-		OperationParameters: server.OperationParameters{
-			Env:    parameters.Env,
-			Forced: parameters.Forced,
-			Reason: parameters.Reason,
-		},
+func (c *InstanceClient) Await(ctx context.Context, instanceId string, operationNumber int) (*secrets.Instance, error) {
+	path := fmt.Sprintf("/secrets/%s/instances/%s/operations/%d/await",
+		c.secretId, instanceId, operationNumber)
+	req, err := BuildRequest(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return nil, err
 	}
-	req, err := BuildRequest(ctx, http.MethodPost, "/secrets/"+c.secretId+"/instances/"+instanceId+"/operations", instance)
-	return Do[*secrets.Instance](c.client, req, err)
+	instance, err := Do[*secrets.Instance](c.parent.client, req, nil)
+	if err != nil {
+		return nil, err
+	}
+	if instance.Status.OperationNumber < operationNumber {
+		return instance, &store.UnknkownOperationError{
+			Expected: operationNumber,
+			Latest:   instance.Status.OperationNumber,
+		}
+	}
+	if instance.Status.OperationNumber > operationNumber {
+		return instance, &store.StaleOperationError{
+			Expected: operationNumber,
+			Latest:   instance.Status.OperationNumber,
+		}
+	}
+	if wg, ok := c.polls.Load(operationNumber); ok {
+		wg.(*sync.WaitGroup).Wait()
+	}
+	return instance, nil
 }
 
 func (c *InstanceClient) History(ctx context.Context, instanceId string, from int, to int) (operations []*secrets.Operation, err error) {
@@ -209,5 +276,7 @@ func (c *InstanceClient) History(ctx context.Context, instanceId string, from in
 	query.Set("from", strconv.FormatInt(int64(from), 10))
 	query.Set("to", strconv.FormatInt(int64(to), 10))
 	req.URL.RawQuery = query.Encode()
-	return Do[[]*secrets.Operation](c.client, req, err)
+	return Do[[]*secrets.Operation](c.parent.client, req, err)
 }
+
+var _ store.Instances = (*InstanceClient)(nil)

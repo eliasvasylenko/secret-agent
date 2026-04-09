@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/eliasvasylenko/secret-agent/internal/command"
 	"github.com/eliasvasylenko/secret-agent/internal/executor"
 	"github.com/eliasvasylenko/secret-agent/internal/marshal"
+	"github.com/eliasvasylenko/secret-agent/internal/secrets"
 	"github.com/eliasvasylenko/secret-agent/internal/server"
 	"github.com/eliasvasylenko/secret-agent/internal/store"
 )
@@ -78,15 +80,15 @@ func (c *CLI) Run(ctx context.Context) {
 	case "history <secret-id> <instance-id>":
 		result, err = c.secretStore.Instances(c.Instance.SecretID).History(ctx, c.Instance.InstanceID, c.History.From, c.History.To)
 	case "create <secret-id>":
-		result, err = c.secretStore.Instances(c.Create.SecretID).Create(ctx, c.Create.parameters())
+		result, err = c.startSecretOperation(ctx, c.Create, store.Instances.Create)
 	case "destroy <secret-id> <instance-id>":
-		result, err = c.secretStore.Instances(c.Destroy.SecretID).Destroy(ctx, c.Destroy.InstanceID, c.Destroy.parameters())
+		result, err = c.startInstanceOperation(ctx, c.Destroy, store.Instances.Destroy)
 	case "activate <secret-id> <instance-id>":
-		result, err = c.secretStore.Instances(c.Activate.SecretID).Activate(ctx, c.Activate.InstanceID, c.Activate.parameters())
+		result, err = c.startInstanceOperation(ctx, c.Activate, store.Instances.Activate)
 	case "deactivate <secret-id> <instance-id>":
-		result, err = c.secretStore.Instances(c.Deactivate.SecretID).Deactivate(ctx, c.Deactivate.InstanceID, c.Deactivate.parameters())
+		result, err = c.startInstanceOperation(ctx, c.Deactivate, store.Instances.Deactivate)
 	case "test <secret-id> <instance-id>":
-		result, err = c.secretStore.Instances(c.Test.SecretID).Test(ctx, c.Test.InstanceID, c.Test.parameters())
+		result, err = c.startInstanceOperation(ctx, c.Test, store.Instances.Test)
 	case "serve":
 		permissionsConfig, err := server.LoadPermissions(c.PermissionsFile)
 		c.ctx.FatalIfErrorf(err)
@@ -94,6 +96,7 @@ func (c *CLI) Run(ctx context.Context) {
 			Socket:        c.Serve.ServerSocket,
 			RequestLimit:  c.Serve.RequestLimit,
 			RequestWindow: c.Serve.RequestWindow,
+			OutputTTL:     c.Serve.OutputTTL,
 		}
 		server := server.New(config, c.secretStore, permissionsConfig)
 		err = server.Serve()
@@ -114,6 +117,41 @@ func (c *CLI) Run(ctx context.Context) {
 	_, err = os.Stdout.Write(bytes)
 
 	c.ctx.FatalIfErrorf(err)
+}
+
+func readStdin() string {
+	info, err := os.Stdin.Stat()
+	if err != nil || info.Mode()&os.ModeCharDevice != 0 {
+		return ""
+	}
+	data, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		return ""
+	}
+	return string(data)
+}
+
+// startSecretOperation runs a mutation via the given function, then blocks on Await until the operation completes.
+func (c *CLI) startSecretOperation(ctx context.Context, operation SecretCommand, operationFunc func(_ store.Instances, ctx context.Context, parameters executor.OperationParameters, stdio command.Stdio) (*secrets.Instance, error)) (*secrets.Instance, error) {
+	instances := c.secretStore.Instances(operation.SecretID)
+	stdio := command.Stdio{Stdin: readStdin(), Stdout: os.Stdout, Stderr: os.Stderr}
+	started, err := operationFunc(instances, ctx, operation.parameters(), stdio)
+	return awaitOperation(ctx, instances, started, err)
+}
+
+// startInstanceOperation runs a mutation via the given function, then blocks on Await until the operation completes.
+func (c *CLI) startInstanceOperation(ctx context.Context, operation InstanceCommand, operationFunc func(_ store.Instances, ctx context.Context, instanceId string, parameters executor.OperationParameters, stdio command.Stdio) (*secrets.Instance, error)) (*secrets.Instance, error) {
+	instances := c.secretStore.Instances(operation.SecretID)
+	stdio := command.Stdio{Stdin: readStdin(), Stdout: os.Stdout, Stderr: os.Stderr}
+	started, err := operationFunc(instances, ctx, operation.InstanceID, operation.parameters(), stdio)
+	return awaitOperation(ctx, instances, started, err)
+}
+
+func awaitOperation(ctx context.Context, instances store.Instances, instance *secrets.Instance, err error) (*secrets.Instance, error) {
+	if err != nil {
+		return nil, err
+	}
+	return instances.Await(ctx, instance.Id, instance.Status.OperationNumber)
 }
 
 type Secrets struct{}
@@ -172,4 +210,5 @@ type Serve struct {
 	ServerSocket  string        `short:"s" help:"Unix socket path for serving the HTTP API"`
 	RequestLimit  uint32        `short:"L" default:"100" help:"Maximum number of requests per request window"`
 	RequestWindow time.Duration `short:"W" default:"1m" help:"Window of time over which the request limit is enforced"`
+	OutputTTL     time.Duration `short:"T" default:"5m" help:"How long to retain operation output after completion"`
 }

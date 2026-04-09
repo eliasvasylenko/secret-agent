@@ -3,6 +3,7 @@ package mocks
 import (
 	"context"
 
+	"github.com/eliasvasylenko/secret-agent/internal/command"
 	"github.com/eliasvasylenko/secret-agent/internal/executor"
 	"github.com/eliasvasylenko/secret-agent/internal/secrets"
 	"github.com/eliasvasylenko/secret-agent/internal/store"
@@ -38,20 +39,23 @@ func (i *MockInstances) Get(ctx context.Context, instanceId string) (*secrets.In
 func (i *MockInstances) GetActive(ctx context.Context) (*secrets.Instance, error) {
 	return nextCall(&i.Mock, i.GetActive)(ctx)
 }
-func (i *MockInstances) Create(ctx context.Context, parameters executor.OperationParameters) (*secrets.Instance, error) {
-	return nextCall(&i.Mock, i.Create)(ctx, parameters)
+func (i *MockInstances) Create(ctx context.Context, parameters executor.OperationParameters, stdio command.Stdio) (*secrets.Instance, error) {
+	return nextCall(&i.Mock, i.Create)(ctx, parameters, stdio)
 }
-func (i *MockInstances) Destroy(ctx context.Context, instanceId string, parameters executor.OperationParameters) (*secrets.Instance, error) {
-	return nextCall(&i.Mock, i.Destroy)(ctx, instanceId, parameters)
+func (i *MockInstances) Destroy(ctx context.Context, instanceId string, parameters executor.OperationParameters, stdio command.Stdio) (*secrets.Instance, error) {
+	return nextCall(&i.Mock, i.Destroy)(ctx, instanceId, parameters, stdio)
 }
-func (i *MockInstances) Activate(ctx context.Context, instanceId string, parameters executor.OperationParameters) (*secrets.Instance, error) {
-	return nextCall(&i.Mock, i.Activate)(ctx, instanceId, parameters)
+func (i *MockInstances) Activate(ctx context.Context, instanceId string, parameters executor.OperationParameters, stdio command.Stdio) (*secrets.Instance, error) {
+	return nextCall(&i.Mock, i.Activate)(ctx, instanceId, parameters, stdio)
 }
-func (i *MockInstances) Deactivate(ctx context.Context, instanceId string, parameters executor.OperationParameters) (*secrets.Instance, error) {
-	return nextCall(&i.Mock, i.Deactivate)(ctx, instanceId, parameters)
+func (i *MockInstances) Deactivate(ctx context.Context, instanceId string, parameters executor.OperationParameters, stdio command.Stdio) (*secrets.Instance, error) {
+	return nextCall(&i.Mock, i.Deactivate)(ctx, instanceId, parameters, stdio)
 }
-func (i *MockInstances) Test(ctx context.Context, instanceId string, parameters executor.OperationParameters) (*secrets.Instance, error) {
-	return nextCall(&i.Mock, i.Test)(ctx, instanceId, parameters)
+func (i *MockInstances) Test(ctx context.Context, instanceId string, parameters executor.OperationParameters, stdio command.Stdio) (*secrets.Instance, error) {
+	return nextCall(&i.Mock, i.Test)(ctx, instanceId, parameters, stdio)
+}
+func (i *MockInstances) Await(ctx context.Context, instanceId string, operationNumber int) (*secrets.Instance, error) {
+	return nextCall(&i.Mock, i.Await)(ctx, instanceId, operationNumber)
 }
 func (i *MockInstances) History(ctx context.Context, instanceId string, from int, to int) ([]*secrets.Operation, error) {
 	return nextCall(&i.Mock, i.History)(ctx, instanceId, from, to)

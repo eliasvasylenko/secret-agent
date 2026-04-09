@@ -2,11 +2,16 @@ package sqlite
 
 import (
 	"context"
+	"fmt"
+	"io"
+	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/eliasvasylenko/secret-agent/internal/command"
 	"github.com/eliasvasylenko/secret-agent/internal/executor"
 	"github.com/eliasvasylenko/secret-agent/internal/secrets"
+	"github.com/eliasvasylenko/secret-agent/internal/store"
 	"github.com/google/go-cmp/cmp"
 )
 
@@ -26,6 +31,38 @@ func newTestRepo(t *testing.T, s secrets.Secrets) *SecretRespository {
 	}
 	t.Cleanup(repo.Close)
 	return repo
+}
+
+// createInstance is a test helper that creates an instance and awaits completion.
+func createInstance(t *testing.T, instances *InstanceRepository, ctx context.Context, params executor.OperationParameters) *secrets.Instance {
+	t.Helper()
+	started, err := instances.Create(ctx, params, discardStdio())
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	completed, err := instances.Await(ctx, started.Id, started.Status.OperationNumber)
+	if err != nil {
+		t.Fatalf("Await after Create: %v", err)
+	}
+	return completed
+}
+
+func discardStdio() command.Stdio {
+	return command.Stdio{Stdout: io.Discard, Stderr: io.Discard}
+}
+
+// runOperation is a test helper that runs an operation and awaits completion.
+func runOperation(t *testing.T, instances *InstanceRepository, ctx context.Context, instanceId string, op func(context.Context, string, executor.OperationParameters, command.Stdio) (*secrets.Instance, error), params executor.OperationParameters) *secrets.Instance {
+	t.Helper()
+	started, err := op(ctx, instanceId, params, discardStdio())
+	if err != nil {
+		t.Fatalf("operation start: %v", err)
+	}
+	completed, err := instances.Await(ctx, started.Id, started.Status.OperationNumber)
+	if err != nil {
+		t.Fatalf("Await after operation: %v", err)
+	}
+	return completed
 }
 
 func TestNewSecretRepository(t *testing.T) {
@@ -89,9 +126,41 @@ func TestSecretRepository_Instances_Create_unknownSecret(t *testing.T) {
 	ctx := context.Background()
 	instances := repo.Instances("nonexistent")
 
-	_, err := instances.Create(ctx, executor.OperationParameters{Reason: "r", StartedBy: "u"})
+	_, err := instances.Create(ctx, executor.OperationParameters{Reason: "r", StartedBy: "u"}, discardStdio())
 	if err == nil {
 		t.Fatal("Create = nil, want error")
+	}
+}
+
+func TestInstanceRepository_Create_stdinReachesSubprocess(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "captured")
+	// Bash builtins only (no PATH); same idea as secrets that use echo in other tests.
+	script := fmt.Sprintf(`read -r _stdin || :; printf '%%s' "$_stdin" > %q`, out)
+	s := &secrets.Secret{
+		Name:   "s1",
+		Create: command.New(script, command.NewEnvironment(), ""),
+	}
+	repo := newTestRepo(t, secrets.Secrets{"s1": s})
+	ctx := context.Background()
+	instances := repo.Instances("s1")
+	started, err := instances.Create(ctx, executor.OperationParameters{Reason: "r", StartedBy: "user"}, command.Stdio{
+		Stdin:  "stdin-payload",
+		Stdout: io.Discard,
+		Stderr: io.Discard,
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	_, err = instances.Await(ctx, started.Id, started.Status.OperationNumber)
+	if err != nil {
+		t.Fatalf("Await: %v", err)
+	}
+	data, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatalf("read captured file: %v", err)
+	}
+	if string(data) != "stdin-payload" {
+		t.Fatalf("captured = %q, want stdin-payload", data)
 	}
 }
 
@@ -100,10 +169,7 @@ func TestInstanceRepository_Create_List_Get(t *testing.T) {
 	ctx := context.Background()
 	instances := repo.Instances("s1")
 
-	created, err := instances.Create(ctx, executor.OperationParameters{Reason: "create", StartedBy: "user"})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
+	created := createInstance(t, instances, ctx, executor.OperationParameters{Reason: "create", StartedBy: "user"})
 	if created.Id == "" {
 		t.Error("Create returned instance with empty Id")
 	}
@@ -151,7 +217,6 @@ func TestInstanceRepository_GetActive(t *testing.T) {
 	ctx := context.Background()
 	instances := repo.Instances("s1")
 
-	// No active instance initially
 	active, err := instances.GetActive(ctx)
 	if err != nil {
 		t.Fatalf("GetActive (no active): %v", err)
@@ -160,14 +225,8 @@ func TestInstanceRepository_GetActive(t *testing.T) {
 		t.Errorf("GetActive = %v, want nil", active)
 	}
 
-	created, err := instances.Create(ctx, executor.OperationParameters{Reason: "create", StartedBy: "user"})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	_, err = instances.Activate(ctx, created.Id, executor.OperationParameters{Reason: "activate", StartedBy: "user"})
-	if err != nil {
-		t.Fatalf("Activate: %v", err)
-	}
+	created := createInstance(t, instances, ctx, executor.OperationParameters{Reason: "create", StartedBy: "user"})
+	runOperation(t, instances, ctx, created.Id, instances.Activate, executor.OperationParameters{Reason: "activate", StartedBy: "user"})
 
 	active, err = instances.GetActive(ctx)
 	if err != nil {
@@ -183,10 +242,7 @@ func TestInstanceRepository_History(t *testing.T) {
 	ctx := context.Background()
 	instances := repo.Instances("s1")
 
-	created, err := instances.Create(ctx, executor.OperationParameters{Reason: "create", StartedBy: "user"})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
+	created := createInstance(t, instances, ctx, executor.OperationParameters{Reason: "create", StartedBy: "user"})
 
 	ops, err := instances.History(ctx, created.Id, 0, 10)
 	if err != nil {
@@ -205,18 +261,12 @@ func TestInstanceRepository_Activate_Deactivate(t *testing.T) {
 	ctx := context.Background()
 	instances := repo.Instances("s1")
 
-	created, err := instances.Create(ctx, executor.OperationParameters{Reason: "create", StartedBy: "user"})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
+	created := createInstance(t, instances, ctx, executor.OperationParameters{Reason: "create", StartedBy: "user"})
 	if created.Status.Name != secrets.Create {
 		t.Errorf("Create returned instance with status %s, want %s", created.Status.Name, secrets.Create)
 	}
 
-	activated, err := instances.Activate(ctx, created.Id, executor.OperationParameters{Reason: "activate", StartedBy: "user"})
-	if err != nil {
-		t.Fatalf("Activate: %v", err)
-	}
+	activated := runOperation(t, instances, ctx, created.Id, instances.Activate, executor.OperationParameters{Reason: "activate", StartedBy: "user"})
 	active, _ := instances.GetActive(ctx)
 	if active == nil || active.Id != created.Id {
 		t.Errorf("after Activate, GetActive = %v", active)
@@ -225,10 +275,7 @@ func TestInstanceRepository_Activate_Deactivate(t *testing.T) {
 		t.Errorf("Activate returned instance with status %s, want %s", activated.Status.Name, secrets.Activate)
 	}
 
-	deactivated, err := instances.Deactivate(ctx, created.Id, executor.OperationParameters{Reason: "deactivate", StartedBy: "user"})
-	if err != nil {
-		t.Fatalf("Deactivate: %v", err)
-	}
+	deactivated := runOperation(t, instances, ctx, created.Id, instances.Deactivate, executor.OperationParameters{Reason: "deactivate", StartedBy: "user"})
 	active, _ = instances.GetActive(ctx)
 	if active != nil {
 		t.Errorf("after Deactivate, GetActive = %v, want nil", active)
@@ -243,24 +290,17 @@ func TestInstanceRepository_ExpectedOperationNumber(t *testing.T) {
 	ctx := context.Background()
 	instances := repo.Instances("s1")
 
-	created, err := instances.Create(ctx, executor.OperationParameters{Reason: "create", StartedBy: "user"})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	_, err = instances.Activate(ctx, created.Id, executor.OperationParameters{Reason: "activate", StartedBy: "user"})
-	if err != nil {
-		t.Fatalf("Activate: %v", err)
-	}
+	created := createInstance(t, instances, ctx, executor.OperationParameters{Reason: "create", StartedBy: "user"})
+	runOperation(t, instances, ctx, created.Id, instances.Activate, executor.OperationParameters{Reason: "activate", StartedBy: "user"})
+
 	// Instance is now at operation 2 (Create=1, Activate=2). Deactivate requires current op 2.
 	expected := 2
-	_, err = instances.Deactivate(ctx, created.Id, executor.OperationParameters{Reason: "deact", StartedBy: "user", ExpectedOperationNumber: &expected})
-	if err != nil {
-		t.Fatalf("Deactivate with matching ExpectedOperationNumber: %v", err)
-	}
+	deactivated := runOperation(t, instances, ctx, created.Id, instances.Deactivate, executor.OperationParameters{Reason: "deact", StartedBy: "user", ExpectedOperationNumber: &expected})
+	_ = deactivated
 
 	// Instance is now at operation 3. Try Activate with expected 1 (wrong) - should fail.
 	wrongExpected := 1
-	_, err = instances.Activate(ctx, created.Id, executor.OperationParameters{Reason: "act", StartedBy: "user", ExpectedOperationNumber: &wrongExpected})
+	_, err := instances.Activate(ctx, created.Id, executor.OperationParameters{Reason: "act", StartedBy: "user", ExpectedOperationNumber: &wrongExpected}, discardStdio())
 	if err == nil {
 		t.Fatal("Activate with mismatched ExpectedOperationNumber want error")
 	}
@@ -269,9 +309,13 @@ func TestInstanceRepository_ExpectedOperationNumber(t *testing.T) {
 	}
 
 	// Same but Forced - should succeed
-	_, err = instances.Activate(ctx, created.Id, executor.OperationParameters{Reason: "act", StartedBy: "user", ExpectedOperationNumber: &wrongExpected, Forced: true})
+	started, err := instances.Activate(ctx, created.Id, executor.OperationParameters{Reason: "act", StartedBy: "user", ExpectedOperationNumber: &wrongExpected, Forced: true}, discardStdio())
 	if err != nil {
 		t.Fatalf("Activate with Forced should ignore ExpectedOperationNumber mismatch: %v", err)
+	}
+	_, err = instances.Await(ctx, started.Id, started.Status.OperationNumber)
+	if err != nil {
+		t.Fatalf("Await after forced Activate: %v", err)
 	}
 }
 
@@ -280,15 +324,49 @@ func TestInstanceRepository_Create_validateReason(t *testing.T) {
 	ctx := context.Background()
 	instances := repo.Instances("s1")
 
-	_, err := instances.Create(ctx, executor.OperationParameters{Reason: "ok", StartedBy: "user"})
+	started, err := instances.Create(ctx, executor.OperationParameters{Reason: "ok", StartedBy: "user"}, discardStdio())
 	if err != nil {
 		t.Fatalf("Create (short reason): %v", err)
+	}
+	if _, err := instances.Await(ctx, started.Id, started.Status.OperationNumber); err != nil {
+		t.Fatalf("Await: %v", err)
 	}
 
 	// maxReasonLen is 256 in newTestRepo
 	longReason := string(make([]byte, 257))
-	_, err = instances.Create(ctx, executor.OperationParameters{Reason: longReason, StartedBy: "user"})
+	_, err = instances.Create(ctx, executor.OperationParameters{Reason: longReason, StartedBy: "user"}, discardStdio())
 	if err == nil {
 		t.Fatal("Create with too-long reason = nil, want error")
+	}
+}
+
+func TestInstanceRepository_Await_stale(t *testing.T) {
+	repo := newTestRepo(t, nil)
+	ctx := context.Background()
+	instances := repo.Instances("s1")
+
+	created := createInstance(t, instances, ctx, executor.OperationParameters{Reason: "create", StartedBy: "user"})
+	firstOpNumber := created.Status.OperationNumber
+
+	// Start another operation so firstOpNumber becomes stale.
+	runOperation(t, instances, ctx, created.Id, instances.Activate, executor.OperationParameters{Reason: "activate", StartedBy: "user"})
+
+	// Await with the stale operation number.
+	instance, err := instances.Await(ctx, created.Id, firstOpNumber)
+	if err == nil {
+		t.Fatal("Await with stale op number should return error")
+	}
+	staleErr, ok := err.(*store.StaleOperationError)
+	if !ok {
+		t.Fatalf("Await error type = %T, want *store.StaleOperationError", err)
+	}
+	if staleErr.Expected != firstOpNumber {
+		t.Errorf("StaleOperationError.Expected = %d, want %d", staleErr.Expected, firstOpNumber)
+	}
+	if instance == nil {
+		t.Fatal("Await with stale op should still return the latest instance")
+	}
+	if instance.Status.Name != secrets.Activate {
+		t.Errorf("Await returned instance with status %s, want %s", instance.Status.Name, secrets.Activate)
 	}
 }

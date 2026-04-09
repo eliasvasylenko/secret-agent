@@ -3,16 +3,16 @@ package executor
 import (
 	"context"
 	"fmt"
+	"io"
 	"testing"
 
 	"github.com/eliasvasylenko/secret-agent/internal/command"
 	"github.com/eliasvasylenko/secret-agent/internal/secrets"
 )
 
-// processCommandCall records a single call to the processCommand mock.
 type processCommandCall struct {
 	Script string
-	Input  string
+	Stdin  string
 	Env    command.Environment
 }
 
@@ -20,9 +20,9 @@ func TestExecute(t *testing.T) {
 	ctx := context.Background()
 	var call processCommandCall
 	saved := processCommand
-	processCommand = func(cmd *command.Command, _ context.Context, input string, env command.Environment) (string, error) {
-		call = processCommandCall{Script: cmd.Script, Input: input, Env: env}
-		return "mock-output", nil
+	processCommand = func(cmd *command.Command, _ context.Context, stdio command.Stdio, env command.Environment) error {
+		call = processCommandCall{Script: cmd.Script, Stdin: stdio.Stdin, Env: env}
+		return nil
 	}
 	defer func() { processCommand = saved }()
 
@@ -30,15 +30,16 @@ func TestExecute(t *testing.T) {
 		Name:   "test-secret",
 		Create: command.New("echo -n", nil, ""),
 	}
-	err := Execute(ctx, s, secrets.Create, "", OperationParameters{}, "inst-1")
+	stdio := command.Stdio{Stdout: io.Discard, Stderr: io.Discard}
+	err := Execute(ctx, s, secrets.Create, stdio, OperationParameters{}, "inst-1")
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
 	if call.Script != "echo -n" {
 		t.Errorf("processCommand called with Script = %q, want %q", call.Script, "echo -n")
 	}
-	if call.Input != "" {
-		t.Errorf("processCommand called with Input = %q, want %q", call.Input, "")
+	if call.Stdin != "" {
+		t.Errorf("processCommand called with Stdin = %q, want %q", call.Stdin, "")
 	}
 	wantEnv := map[string]string{"ID": "inst-1", "NAME": "test-secret", "FORCE": "false", "REASON": "", "STARTED_BY": ""}
 	for k, v := range wantEnv {
@@ -52,9 +53,9 @@ func TestExecute_withEnv(t *testing.T) {
 	ctx := context.Background()
 	var call processCommandCall
 	saved := processCommand
-	processCommand = func(cmd *command.Command, _ context.Context, input string, env command.Environment) (string, error) {
-		call = processCommandCall{Script: cmd.Script, Input: input, Env: env}
-		return "", nil
+	processCommand = func(cmd *command.Command, _ context.Context, stdio command.Stdio, env command.Environment) error {
+		call = processCommandCall{Script: cmd.Script, Stdin: stdio.Stdin, Env: env}
+		return nil
 	}
 	defer func() { processCommand = saved }()
 
@@ -66,15 +67,16 @@ func TestExecute_withEnv(t *testing.T) {
 		Reason:    "test",
 		StartedBy: "tests",
 	}
-	err := Execute(ctx, s, secrets.Create, "stdin", params, "inst-1")
+	stdio := command.Stdio{Stdin: "stdin", Stdout: io.Discard, Stderr: io.Discard}
+	err := Execute(ctx, s, secrets.Create, stdio, params, "inst-1")
 	if err != nil {
 		t.Fatalf("Execute with env: %v", err)
 	}
 	if call.Script != "create-script" {
 		t.Errorf("processCommand Script = %q, want create-script", call.Script)
 	}
-	if call.Input != "stdin" {
-		t.Errorf("processCommand Input = %q, want stdin", call.Input)
+	if call.Stdin != "stdin" {
+		t.Errorf("processCommand Stdin = %q, want stdin", call.Stdin)
 	}
 	if call.Env["NAME"] != "test-secret" {
 		t.Errorf("processCommand Env[NAME] = %q, want test-secret", call.Env["NAME"])
@@ -88,14 +90,15 @@ func TestExecute_noCommandForOp(t *testing.T) {
 	ctx := context.Background()
 	var called bool
 	saved := processCommand
-	processCommand = func(*command.Command, context.Context, string, command.Environment) (string, error) {
+	processCommand = func(*command.Command, context.Context, command.Stdio, command.Environment) error {
 		called = true
-		return "", nil
+		return nil
 	}
 	defer func() { processCommand = saved }()
 
-	s := &secrets.Secret{Name: "no-cmds"} // no command for Create
-	err := Execute(ctx, s, secrets.Create, "", OperationParameters{}, "id")
+	s := &secrets.Secret{Name: "no-cmds"}
+	stdio := command.Stdio{Stdout: io.Discard, Stderr: io.Discard}
+	err := Execute(ctx, s, secrets.Create, stdio, OperationParameters{}, "id")
 	if err != nil {
 		t.Fatalf("Execute when no command for op should succeed (no-op): %v", err)
 	}
@@ -108,13 +111,14 @@ func TestExecute_returnsCommandError(t *testing.T) {
 	ctx := context.Background()
 	wantErr := fmt.Errorf("command failed")
 	saved := processCommand
-	processCommand = func(*command.Command, context.Context, string, command.Environment) (string, error) {
-		return "", wantErr
+	processCommand = func(*command.Command, context.Context, command.Stdio, command.Environment) error {
+		return wantErr
 	}
 	defer func() { processCommand = saved }()
 
 	s := &secrets.Secret{Name: "x", Create: command.New("script", nil, "")}
-	err := Execute(ctx, s, secrets.Create, "", OperationParameters{}, "id")
+	stdio := command.Stdio{Stdout: io.Discard, Stderr: io.Discard}
+	err := Execute(ctx, s, secrets.Create, stdio, OperationParameters{}, "id")
 	if err != wantErr {
 		t.Errorf("Execute err = %v, want %v", err, wantErr)
 	}
@@ -122,8 +126,9 @@ func TestExecute_returnsCommandError(t *testing.T) {
 
 func TestExecute_noCommand(t *testing.T) {
 	ctx := context.Background()
-	s := &secrets.Secret{Name: "leaf"} // no Create command
-	err := Execute(ctx, s, secrets.Create, "input", OperationParameters{}, "id")
+	s := &secrets.Secret{Name: "leaf"}
+	stdio := command.Stdio{Stdin: "input", Stdout: io.Discard, Stderr: io.Discard}
+	err := Execute(ctx, s, secrets.Create, stdio, OperationParameters{}, "id")
 	if err != nil {
 		t.Errorf("Execute with no command for op should succeed (no-op): %v", err)
 	}

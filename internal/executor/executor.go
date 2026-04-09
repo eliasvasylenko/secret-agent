@@ -9,7 +9,6 @@ import (
 	"github.com/eliasvasylenko/secret-agent/internal/secrets"
 )
 
-// The function to execute a command
 var processCommand = (*command.Command).Process
 
 // OperationParameters are the common parameters for an operation on a secret instance
@@ -31,7 +30,7 @@ func (p OperationParameters) Validate(maxReasonLength int) error {
 }
 
 // Execute runs the command for the given operation on the secret.
-func Execute(ctx context.Context, secret *secrets.Secret, operation secrets.OperationName, input string, parameters OperationParameters, instanceId string) error {
+func Execute(ctx context.Context, secret *secrets.Secret, operation secrets.OperationName, stdio command.Stdio, parameters OperationParameters, instanceId string) error {
 	parameters.Env = secret.Environment.ExpandAndMergeWith(command.Environment{
 		"ID":         instanceId,
 		"NAME":       secret.Name,
@@ -42,8 +41,7 @@ func Execute(ctx context.Context, secret *secrets.Secret, operation secrets.Oper
 
 	cmd := secret.Command(operation)
 	if cmd != nil {
-		_, err := processCommand(cmd, ctx, input, parameters.Env)
-		return err
+		return processCommand(cmd, ctx, stdio, parameters.Env)
 	}
 	return nil
 }

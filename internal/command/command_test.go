@@ -1,6 +1,7 @@
 package command
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -168,12 +169,14 @@ func TestProcess(t *testing.T) {
 				Script:      tc.script,
 				Shell:       tc.shell,
 			}
-			err := command.Process(context.Background(), tc.expectedInput, Environment{})
+			var stdout bytes.Buffer
+			stdio := Stdio{Stdin: tc.expectedInput, Stdout: &stdout, Stderr: io.Discard}
+			err := command.Process(context.Background(), stdio, Environment{})
 			if err != nil {
 				t.Errorf("unexpected error '%v'", err)
 			}
-			if output != tc.mockOutput {
-				t.Errorf("expected '%v', got '%v'", tc.mockOutput, output)
+			if stdout.String() != tc.mockOutput {
+				t.Errorf("expected '%v', got '%v'", tc.mockOutput, stdout.String())
 			}
 		})
 	}

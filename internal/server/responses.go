@@ -1,9 +1,11 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 )
 
@@ -19,6 +21,11 @@ type ErrorResponse struct {
 type httpError struct {
 	Code    int    `json:"status"`
 	Message string `json:"message"`
+}
+
+type StreamResponse struct {
+	Data     []byte `json:"data,omitempty"`
+	Complete bool   `json:"complete"`
 }
 
 func NewErrorResponse(code int, err error) *ErrorResponse {
@@ -49,7 +56,9 @@ func writeResult(w http.ResponseWriter, value any, statusCode int) error {
 func writeError(w http.ResponseWriter, err error) error {
 	var response *ErrorResponse
 	if errors.As(err, &response) {
-		w.Header().Add("", "")
+		for key, value := range response.Headers {
+			w.Header().Set(key, value)
+		}
 	} else {
 		response = NewErrorResponse(
 			http.StatusInternalServerError,
@@ -57,4 +66,15 @@ func writeError(w http.ResponseWriter, err error) error {
 		)
 	}
 	return writeResult(w, response, response.HttpError.Code)
+}
+
+func writeBytes(ctx context.Context, w http.ResponseWriter, stream Stream, fromByte int, maxBytes int) error {
+	data := make([]byte, maxBytes)
+	reader := stream.Reader(ctx)
+	n, err := reader.ReadAt(data, int64(fromByte))
+	if err != nil && err != io.EOF {
+		return writeError(w, err)
+	}
+	response := StreamResponse{Data: data[:n], Complete: err == io.EOF}
+	return writeResult(w, response, http.StatusOK)
 }
