@@ -30,7 +30,6 @@ The secret-agent service will:
 - Perform the configured operations to create, destroy, activate, deactivate, and test *instances* of secrets, according to the configured plans.
 - Record all operations performed.
 - Accept or deny commands according to the configured permissions for the calling user or group.
-- 
 
 ## Quick start (NixOS)
 
@@ -40,7 +39,6 @@ The secret-agent service will:
    services.secret-agent.enable = true;
    services.secret-agent.secrets.my-secret = {
      create = "openssl rand -base64 32";
-     
    };
    ```
 

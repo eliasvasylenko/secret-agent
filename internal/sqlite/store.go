@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -43,18 +44,35 @@ type InstanceRepository struct {
 }
 
 func NewSecretRepository(ctx context.Context, dbFile string, secrets secrets.Secrets, debug bool, maxReasonLen int) (*SecretRespository, error) {
-	db, err := sql.Open("sqlite3", dbFile)
+	dsn := dbFile
+	if strings.Contains(dsn, "?") {
+		dsn += "&_fk=1"
+	} else {
+		dsn += "?_fk=1"
+	}
+	db, err := sql.Open("sqlite3", dsn)
+	if err != nil {
+		return nil, err
+	}
 	_, err = db.ExecContext(ctx, `
-		CREATE TABLE IF NOT EXISTS instance (
-			id TEXT NOT NULL PRIMARY KEY,
-			secretId TEXT NOT NULL,
-			secret JSONB NOT NULL,
-			FOREIGN KEY(secretId) REFERENCES secret(id)
-		);
 		CREATE TABLE IF NOT EXISTS secret (
 			id TEXT NOT NULL PRIMARY KEY,
 			activeInstanceId TEXT,
-			FOREIGN KEY(activeInstanceId) REFERENCES instance(id)
+			FOREIGN KEY (activeInstanceId) REFERENCES instance(id) DEFERRABLE INITIALLY DEFERRED
+		);
+		CREATE TABLE IF NOT EXISTS revision (
+			secretId TEXT NOT NULL,
+			version INTEGER NOT NULL,
+			plan JSONB NOT NULL,
+			PRIMARY KEY (secretId, version),
+			FOREIGN KEY (secretId) REFERENCES secret(id)
+		);
+		CREATE TABLE IF NOT EXISTS instance (
+			id TEXT NOT NULL PRIMARY KEY,
+			secretId TEXT NOT NULL,
+			version INTEGER NOT NULL,
+			FOREIGN KEY (secretId) REFERENCES secret(id),
+			FOREIGN KEY (secretId, version) REFERENCES revision(secretId, version)
 		);
 		CREATE TABLE IF NOT EXISTS operation (
 			id INTEGER NOT NULL PRIMARY KEY,
@@ -73,12 +91,20 @@ func NewSecretRepository(ctx context.Context, dbFile string, secrets secrets.Sec
 		CREATE INDEX IF NOT EXISTS instance_operation ON operation (instanceId, id DESC);
 		CREATE INDEX IF NOT EXISTS secret_operation ON operation (secretId, id DESC);
 	`)
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err := syncPlanRevisions(ctx, db, secrets); err != nil {
+		db.Close()
+		return nil, err
+	}
 	return &SecretRespository{
 		db:           db,
 		secrets:      secrets,
 		maxReasonLen: maxReasonLen,
 		operations:   make(map[int]*operationRuntime),
-	}, err
+	}, nil
 }
 
 func (s *SecretRespository) Close() {
@@ -162,7 +188,7 @@ func (i *InstanceRepository) List(ctx context.Context, from int, to int) (secret
 	rows, err := i.db.QueryContext(ctx, `
 		SELECT
 			i.id,
-			i.secret,
+			r.plan,
 			o.id,
 			o.name,
 			o.forced,
@@ -172,6 +198,8 @@ func (i *InstanceRepository) List(ctx context.Context, from int, to int) (secret
 			o.completedAt,
 			o.failedAt
 		FROM instance i
+		INNER JOIN revision r
+			ON r.secretId = i.secretId AND r.version = i.version
 		INNER JOIN (
 			SELECT MAX(id), *
 			FROM operation
@@ -205,7 +233,7 @@ func (i *InstanceRepository) Get(ctx context.Context, instanceId string) (*secre
 	var secretBytes []byte
 	err := i.db.QueryRowContext(ctx, `
 		SELECT
-			i.secret,
+			r.plan,
 			o.id,
 			o.name,
 			o.forced,
@@ -215,6 +243,8 @@ func (i *InstanceRepository) Get(ctx context.Context, instanceId string) (*secre
 			o.completedAt,
 			o.failedAt
 		FROM instance i
+		INNER JOIN revision r
+			ON r.secretId = i.secretId AND r.version = i.version
 		INNER JOIN (
 			SELECT MAX(id), *
 			FROM operation
@@ -234,7 +264,7 @@ func (i *InstanceRepository) GetActive(ctx context.Context) (*secrets.Instance, 
 	rows, err := i.db.QueryContext(ctx, `
 		SELECT
 			i.id,
-			i.secret,
+			r.plan,
 			o.id,
 			o.name,
 			o.forced,
@@ -246,6 +276,8 @@ func (i *InstanceRepository) GetActive(ctx context.Context) (*secrets.Instance, 
 		FROM secret s
 		INNER JOIN instance i
 			ON i.id = s.activeInstanceId
+		INNER JOIN revision r
+			ON r.secretId = i.secretId AND r.version = i.version
 		INNER JOIN (
 			SELECT MAX(id), *
 			FROM operation
@@ -294,16 +326,11 @@ func (i *InstanceRepository) Create(ctx context.Context, parameters executor.Ope
 		return nil, err
 	}
 
-	secretBytes, err := marshal.JSON(i.secret)
-	if err != nil {
-		return nil, err
-	}
-
 	instanceId := uuid.NewString()
 	_, err = tx.ExecContext(ctx, `
-			INSERT INTO instance(id, secretId, secret)
+			INSERT INTO instance(id, secretId, version)
 				VALUES(?, ?, ?)
-		`, instanceId, i.secretId, secretBytes)
+		`, instanceId, i.secretId, i.secret.Version)
 	if err != nil {
 		return nil, err
 	}
@@ -359,7 +386,7 @@ func (i *InstanceRepository) startUpdateOperation(ctx context.Context, instanceI
 	var previousOperation secrets.Operation
 	err = tx.QueryRowContext(ctx, `
 		SELECT
-			i.secret,
+			r.plan,
 			s.activeInstanceId,
 			o.id,
 			o.name,
@@ -369,6 +396,8 @@ func (i *InstanceRepository) startUpdateOperation(ctx context.Context, instanceI
 		FROM instance i
 		INNER JOIN secret s
 			ON s.id = i.secretId
+		INNER JOIN revision r
+			ON r.secretId = i.secretId AND r.version = i.version
 		INNER JOIN (
 			SELECT MAX(id), *
 			FROM operation
@@ -568,4 +597,25 @@ func (i *InstanceRepository) History(ctx context.Context, instanceId string, sta
 		err = rows.Scan(&operation.OperationNumber, &operation.SecretId, &operation.InstanceId, &operation.Name, &operation.Forced, &operation.Reason, &operation.StartedBy, &operation.StartedAt, &operation.CompletedAt, &operation.FailedAt)
 	}
 	return operations, err
+}
+
+func syncPlanRevisions(ctx context.Context, db *sql.DB, secrets secrets.Secrets) error {
+	for id, secret := range secrets {
+		if _, err := db.ExecContext(ctx, `INSERT OR IGNORE INTO secret(id) VALUES (?)`, id); err != nil {
+			return err
+		}
+		secretBytes, err := marshal.JSON(secret)
+		if err != nil {
+			return err
+		}
+		_, err = db.ExecContext(ctx, `
+			INSERT INTO revision (secretId, version, plan)
+			VALUES (?, ?, ?)
+			ON CONFLICT(secretId, version) DO UPDATE SET plan = excluded.plan
+		`, id, secret.Version, secretBytes)
+		if err != nil {
+			return fmt.Errorf("sync secret %q version %d: %w", id, secret.Version, err)
+		}
+	}
+	return nil
 }

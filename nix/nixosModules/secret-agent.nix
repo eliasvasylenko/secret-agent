@@ -57,6 +57,16 @@ let
 
   # Make the options for provisioning a secret
   secretOptions = name: {
+    version = lib.mkOption {
+      description = ''
+        Version of this secret's plan. Instances record this at create time; later
+        destroy/activate/deactivate/test use the latest stored plan for that version. Bump when
+        provisioning semantics change incompatibly; leave unchanged to allow script fixes
+        (e.g. a broken destroy) to apply to existing instances.
+      '';
+      type = lib.types.ints.positive;
+      default = 1;
+    };
     environment = lib.mkOption {
       description = "The environment variables to surface to the secret commands";
       default = { };
@@ -155,6 +165,7 @@ let
         name: secret:
         lib.attrsets.filterAttrs (n: v: v != null) {
           inherit name;
+          version = secret.version;
           environment = secret.environment;
           create = makeCommandConfig secret.create;
           destroy = makeCommandConfig secret.destroy;

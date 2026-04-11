@@ -64,13 +64,13 @@ type StaleOperationError struct {
 	Latest   int
 }
 
-func (e *UnknkownOperationError) Error() string {
+func (e *UnknownOperationError) Error() string {
 	return fmt.Sprintf("unknown operation: expected %d, latest is %d", e.Expected, e.Latest)
 }
 
-// UnknkownOperationError is returned by Await when the requested operation number
+// UnknownOperationError is returned by Await when the requested operation number
 // has not been recorded yet.
-type UnknkownOperationError struct {
+type UnknownOperationError struct {
 	Expected int
 	Latest   int
 }

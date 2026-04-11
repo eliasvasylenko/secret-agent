@@ -15,6 +15,10 @@ type Secret struct {
 	// The name of the secret
 	Name string `json:"name"`
 
+	// Version is the compatibility line for instances: same version shares one revision stream
+	// in the store; bump when create/provision semantics change incompatibly.
+	Version int `json:"version,omitempty"`
+
 	// The environment variables for the secret plan
 	Environment command.Environment `json:"environment,omitempty"`
 
@@ -39,6 +43,9 @@ func New(secretList []*Secret) (Secrets, error) {
 	for _, secret := range secretList {
 		if secret.Name == "" {
 			return nil, fmt.Errorf("Secret name must not be empty")
+		}
+		if secret.Version < 1 {
+			return nil, fmt.Errorf("Secret '%s' version must be >= 1", secret.Name)
 		}
 		if _, ok := secrets[secret.Name]; ok {
 			return nil, fmt.Errorf("Secret name '%s' must be unique", secret.Name)

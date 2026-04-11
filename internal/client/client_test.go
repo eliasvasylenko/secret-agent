@@ -92,12 +92,12 @@ func TestBuildRequest(t *testing.T) {
 func TestDo_success(t *testing.T) {
 	ctx := context.Background()
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://unix/secrets", nil)
-	stub := &stubClient{status: 200, body: `{"items":[{"name":"s1"}]}`}
+	stub := &stubClient{status: 200, body: `{"items":[{"name":"s1","version":1}]}`}
 	got, err := Do[server.ItemsResponse[secrets.Secrets]](stub, req, nil)
 	if err != nil {
 		t.Fatalf("Do: %v", err)
 	}
-	want := server.ItemsResponse[secrets.Secrets]{Items: secrets.Secrets{"s1": {Name: "s1"}}}
+	want := server.ItemsResponse[secrets.Secrets]{Items: secrets.Secrets{"s1": {Name: "s1", Version: 1}}}
 	if !cmp.Equal(got, want, cmpSecretOpts) {
 		t.Errorf("Do response:\n%s", cmp.Diff(want, got, cmpSecretOpts))
 	}
@@ -134,7 +134,7 @@ func TestDo_serverErrorResponse(t *testing.T) {
 
 func TestSecretClient_List(t *testing.T) {
 	ctx := context.Background()
-	stub := &stubClient{status: 200, body: `{"items":[{"name":"x"}]}`}
+	stub := &stubClient{status: 200, body: `{"items":[{"name":"x","version":1}]}`}
 	c := &SecretClient{client: stub}
 	got, err := c.List(ctx)
 	if err != nil {
@@ -143,7 +143,7 @@ func TestSecretClient_List(t *testing.T) {
 	if got := requestString(stub.lastReq.Load()); got != "GET /secrets\n" {
 		t.Errorf("request:\n%s", cmp.Diff("GET /secrets\n", got))
 	}
-	want := secrets.Secrets{"x": {Name: "x"}}
+	want := secrets.Secrets{"x": {Name: "x", Version: 1}}
 	if !cmp.Equal(got, want, cmpSecretOpts) {
 		t.Errorf("List response:\n%s", cmp.Diff(want, got, cmpSecretOpts))
 	}
@@ -151,7 +151,7 @@ func TestSecretClient_List(t *testing.T) {
 
 func TestSecretClient_Get(t *testing.T) {
 	ctx := context.Background()
-	stub := &stubClient{status: 200, body: `{"name":"my-secret"}`}
+	stub := &stubClient{status: 200, body: `{"name":"my-secret","version":1}`}
 	c := &SecretClient{client: stub}
 	got, err := c.Get(ctx, "my-secret")
 	if err != nil {
@@ -160,7 +160,7 @@ func TestSecretClient_Get(t *testing.T) {
 	if gotReq := requestString(stub.lastReq.Load()); gotReq != "GET /secrets/my-secret\n" {
 		t.Errorf("request:\n%s", cmp.Diff("GET /secrets/my-secret\n", gotReq))
 	}
-	want := &secrets.Secret{Name: "my-secret"}
+	want := &secrets.Secret{Name: "my-secret", Version: 1}
 	if !cmp.Equal(got, want, cmpSecretOpts) {
 		t.Errorf("Get response:\n%s", cmp.Diff(want, got, cmpSecretOpts))
 	}
@@ -186,7 +186,7 @@ func TestInstanceClient_List(t *testing.T) {
 
 func TestInstanceClient_Get(t *testing.T) {
 	ctx := context.Background()
-	stub := &stubClient{status: 200, body: `{"id":"i1","secret":{"name":"s1"},"status":{}}`}
+	stub := &stubClient{status: 200, body: `{"id":"i1","secret":{"name":"s1","version":1},"status":{}}`}
 	parent := &SecretClient{client: stub}
 	c := &InstanceClient{parent: parent, secretId: "sid"}
 	got, err := c.Get(ctx, "i1")
@@ -196,7 +196,7 @@ func TestInstanceClient_Get(t *testing.T) {
 	if gotReq := requestString(stub.lastReq.Load()); gotReq != "GET /secrets/sid/instances/i1\n" {
 		t.Errorf("request:\n%s", cmp.Diff("GET /secrets/sid/instances/i1\n", gotReq))
 	}
-	want := &secrets.Instance{Id: "i1", Secret: secrets.Secret{Name: "s1"}, Status: secrets.Status{}}
+	want := &secrets.Instance{Id: "i1", Secret: secrets.Secret{Name: "s1", Version: 1}, Status: secrets.Status{}}
 	if !cmp.Equal(got, want, cmpInstanceOpts) {
 		t.Errorf("Get response:\n%s", cmp.Diff(want, got, cmpInstanceOpts))
 	}
@@ -204,7 +204,7 @@ func TestInstanceClient_Get(t *testing.T) {
 
 func TestInstanceClient_Create(t *testing.T) {
 	ctx := context.Background()
-	stub := &stubClient{status: 200, body: `{"id":"new-id","secret":{"name":"s1"},"operationNumber":1,"status":{}}`}
+	stub := &stubClient{status: 200, body: `{"id":"new-id","secret":{"name":"s1","version":1},"operationNumber":1,"status":{}}`}
 	parent := &SecretClient{client: stub}
 	c := &InstanceClient{parent: parent, secretId: "sid"}
 	params := executor.OperationParameters{Reason: "test", StartedBy: "user"}
@@ -216,7 +216,7 @@ func TestInstanceClient_Create(t *testing.T) {
 	if gotReq := requestString(stub.lastReq.Load()); gotReq != wantReq {
 		t.Errorf("request:\n%s", cmp.Diff(wantReq, gotReq))
 	}
-	want := &secrets.Instance{Id: "new-id", Secret: secrets.Secret{Name: "s1"}, Status: secrets.Status{}}
+	want := &secrets.Instance{Id: "new-id", Secret: secrets.Secret{Name: "s1", Version: 1}, Status: secrets.Status{}}
 	if !cmp.Equal(got, want, cmpInstanceOpts) {
 		t.Errorf("Create response:\n%s", cmp.Diff(want, got, cmpInstanceOpts))
 	}
@@ -224,7 +224,7 @@ func TestInstanceClient_Create(t *testing.T) {
 
 func TestInstanceClient_Create_PostJSON_decodesInput(t *testing.T) {
 	ctx := context.Background()
-	stub := &stubClient{status: 200, body: `{"id":"new-id","secret":{"name":"s1"},"operationNumber":1,"status":{}}`}
+	stub := &stubClient{status: 200, body: `{"id":"new-id","secret":{"name":"s1","version":1},"operationNumber":1,"status":{}}`}
 	parent := &SecretClient{client: stub}
 	c := &InstanceClient{parent: parent, secretId: "sid"}
 	params := executor.OperationParameters{Reason: "test", StartedBy: "user"}
@@ -251,7 +251,7 @@ func TestInstanceClient_Create_PostJSON_decodesInput(t *testing.T) {
 
 func TestInstanceClient_Create_withStdin(t *testing.T) {
 	ctx := context.Background()
-	stub := &stubClient{status: 200, body: `{"id":"new-id","secret":{"name":"s1"},"operationNumber":1,"status":{}}`}
+	stub := &stubClient{status: 200, body: `{"id":"new-id","secret":{"name":"s1","version":1},"operationNumber":1,"status":{}}`}
 	parent := &SecretClient{client: stub}
 	c := &InstanceClient{parent: parent, secretId: "sid"}
 	params := executor.OperationParameters{Reason: "test", StartedBy: "user"}
@@ -263,7 +263,7 @@ func TestInstanceClient_Create_withStdin(t *testing.T) {
 	if gotReq := requestString(stub.lastReq.Load()); gotReq != wantReq {
 		t.Errorf("request:\n%s", cmp.Diff(wantReq, gotReq))
 	}
-	want := &secrets.Instance{Id: "new-id", Secret: secrets.Secret{Name: "s1"}, Status: secrets.Status{}}
+	want := &secrets.Instance{Id: "new-id", Secret: secrets.Secret{Name: "s1", Version: 1}, Status: secrets.Status{}}
 	if !cmp.Equal(got, want, cmpInstanceOpts) {
 		t.Errorf("Create response:\n%s", cmp.Diff(want, got, cmpInstanceOpts))
 	}
@@ -289,7 +289,7 @@ func TestSecretClient_History(t *testing.T) {
 
 func TestInstanceClient_GetActive(t *testing.T) {
 	ctx := context.Background()
-	stub := &stubClient{status: 200, body: `{"id":"active-id","secret":{"name":"s1"},"status":{}}`}
+	stub := &stubClient{status: 200, body: `{"id":"active-id","secret":{"name":"s1","version":1},"status":{}}`}
 	parent := &SecretClient{client: stub}
 	c := &InstanceClient{parent: parent, secretId: "sid"}
 	got, err := c.GetActive(ctx)
@@ -300,7 +300,7 @@ func TestInstanceClient_GetActive(t *testing.T) {
 	if gotReq := requestString(stub.lastReq.Load()); gotReq != wantReq {
 		t.Errorf("request:\n%s", cmp.Diff(wantReq, gotReq))
 	}
-	want := &secrets.Instance{Id: "active-id", Secret: secrets.Secret{Name: "s1"}, Status: secrets.Status{}}
+	want := &secrets.Instance{Id: "active-id", Secret: secrets.Secret{Name: "s1", Version: 1}, Status: secrets.Status{}}
 	if !cmp.Equal(got, want, cmpInstanceOpts) {
 		t.Errorf("GetActive response:\n%s", cmp.Diff(want, got, cmpInstanceOpts))
 	}
@@ -308,7 +308,7 @@ func TestInstanceClient_GetActive(t *testing.T) {
 
 func TestInstanceClient_Destroy(t *testing.T) {
 	ctx := context.Background()
-	stub := &stubClient{status: 200, body: `{"id":"i1","secret":{"name":"s1"},"operationNumber":1,"status":{}}`}
+	stub := &stubClient{status: 200, body: `{"id":"i1","secret":{"name":"s1","version":1},"operationNumber":1,"status":{}}`}
 	parent := &SecretClient{client: stub}
 	c := &InstanceClient{parent: parent, secretId: "sid"}
 	params := executor.OperationParameters{Reason: "r", StartedBy: "user"}
@@ -320,7 +320,7 @@ func TestInstanceClient_Destroy(t *testing.T) {
 	if gotReq := requestString(stub.lastReq.Load()); gotReq != wantReq {
 		t.Errorf("request:\n%s", cmp.Diff(wantReq, gotReq))
 	}
-	want := &secrets.Instance{Id: "i1", Secret: secrets.Secret{Name: "s1"}, Status: secrets.Status{}}
+	want := &secrets.Instance{Id: "i1", Secret: secrets.Secret{Name: "s1", Version: 1}, Status: secrets.Status{}}
 	if !cmp.Equal(got, want, cmpInstanceOpts) {
 		t.Errorf("Destroy response:\n%s", cmp.Diff(want, got, cmpInstanceOpts))
 	}
@@ -328,7 +328,7 @@ func TestInstanceClient_Destroy(t *testing.T) {
 
 func TestInstanceClient_Activate(t *testing.T) {
 	ctx := context.Background()
-	stub := &stubClient{status: 200, body: `{"id":"i1","secret":{"name":"s1"},"operationNumber":1,"status":{}}`}
+	stub := &stubClient{status: 200, body: `{"id":"i1","secret":{"name":"s1","version":1},"operationNumber":1,"status":{}}`}
 	parent := &SecretClient{client: stub}
 	c := &InstanceClient{parent: parent, secretId: "sid"}
 	params := executor.OperationParameters{Reason: "activate-reason", StartedBy: "user"}
@@ -340,7 +340,7 @@ func TestInstanceClient_Activate(t *testing.T) {
 	if gotReq := requestString(stub.lastReq.Load()); gotReq != wantReq {
 		t.Errorf("request:\n%s", cmp.Diff(wantReq, gotReq))
 	}
-	want := &secrets.Instance{Id: "i1", Secret: secrets.Secret{Name: "s1"}, Status: secrets.Status{}}
+	want := &secrets.Instance{Id: "i1", Secret: secrets.Secret{Name: "s1", Version: 1}, Status: secrets.Status{}}
 	if !cmp.Equal(got, want, cmpInstanceOpts) {
 		t.Errorf("Activate response:\n%s", cmp.Diff(want, got, cmpInstanceOpts))
 	}
@@ -348,7 +348,7 @@ func TestInstanceClient_Activate(t *testing.T) {
 
 func TestInstanceClient_Deactivate(t *testing.T) {
 	ctx := context.Background()
-	stub := &stubClient{status: 200, body: `{"id":"i1","secret":{"name":"s1"},"operationNumber":1,"status":{}}`}
+	stub := &stubClient{status: 200, body: `{"id":"i1","secret":{"name":"s1","version":1},"operationNumber":1,"status":{}}`}
 	parent := &SecretClient{client: stub}
 	c := &InstanceClient{parent: parent, secretId: "sid"}
 	params := executor.OperationParameters{Reason: "deact", StartedBy: "user"}
@@ -360,7 +360,7 @@ func TestInstanceClient_Deactivate(t *testing.T) {
 	if gotReq := requestString(stub.lastReq.Load()); gotReq != wantReq {
 		t.Errorf("request:\n%s", cmp.Diff(wantReq, gotReq))
 	}
-	want := &secrets.Instance{Id: "i1", Secret: secrets.Secret{Name: "s1"}, Status: secrets.Status{}}
+	want := &secrets.Instance{Id: "i1", Secret: secrets.Secret{Name: "s1", Version: 1}, Status: secrets.Status{}}
 	if !cmp.Equal(got, want, cmpInstanceOpts) {
 		t.Errorf("Deactivate response:\n%s", cmp.Diff(want, got, cmpInstanceOpts))
 	}
@@ -368,7 +368,7 @@ func TestInstanceClient_Deactivate(t *testing.T) {
 
 func TestInstanceClient_Test(t *testing.T) {
 	ctx := context.Background()
-	stub := &stubClient{status: 200, body: `{"id":"i1","secret":{"name":"s1"},"operationNumber":1,"status":{}}`}
+	stub := &stubClient{status: 200, body: `{"id":"i1","secret":{"name":"s1","version":1},"operationNumber":1,"status":{}}`}
 	parent := &SecretClient{client: stub}
 	c := &InstanceClient{parent: parent, secretId: "sid"}
 	params := executor.OperationParameters{Reason: "test-run", StartedBy: "user"}
@@ -380,7 +380,7 @@ func TestInstanceClient_Test(t *testing.T) {
 	if gotReq := requestString(stub.lastReq.Load()); gotReq != wantReq {
 		t.Errorf("request:\n%s", cmp.Diff(wantReq, gotReq))
 	}
-	want := &secrets.Instance{Id: "i1", Secret: secrets.Secret{Name: "s1"}, Status: secrets.Status{}}
+	want := &secrets.Instance{Id: "i1", Secret: secrets.Secret{Name: "s1", Version: 1}, Status: secrets.Status{}}
 	if !cmp.Equal(got, want, cmpInstanceOpts) {
 		t.Errorf("Test response:\n%s", cmp.Diff(want, got, cmpInstanceOpts))
 	}

@@ -253,7 +253,7 @@ func (c *InstanceClient) Await(ctx context.Context, instanceId string, operation
 		return nil, err
 	}
 	if instance.Status.OperationNumber < operationNumber {
-		return instance, &store.UnknkownOperationError{
+		return instance, &store.UnknownOperationError{
 			Expected: operationNumber,
 			Latest:   instance.Status.OperationNumber,
 		}

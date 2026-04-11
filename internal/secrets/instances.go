@@ -14,7 +14,7 @@ type Instance struct {
 	// The ID of the secret instance
 	Id string `json:"id,omitempty"`
 
-	// The plan for managing this secret
+	// The plan for managing this secret (includes Version for the instance's plan line)
 	Secret Secret `json:"secret"`
 
 	// The current status of the instance, indicated by the last operation performed
