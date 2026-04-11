@@ -9,6 +9,7 @@ let
   expectedInstance = action: number: {
     secret = {
       name = "db-creds";
+      version = 1;
       create = "echo done create > /etc/creds";
       activate = "echo done activate > /etc/creds";
       deactivate = "echo done deactivate > /etc/creds";

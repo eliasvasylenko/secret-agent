@@ -71,6 +71,7 @@ pkgs.testers.runNixOSTest {
       expected = loads("""[
         {
           "name": "db-creds",
+          "version": 1,
           "create": "echo created > /etc/creds"
         }
       ]""")
@@ -82,10 +83,12 @@ pkgs.testers.runNixOSTest {
       expected = loads("""{
         "db-creds": {
           "name": "db-creds",
+          "version": 1,
           "create": "echo created > /etc/creds"
         },
         "extra-creds": {
           "name": "extra-creds",
+          "version": 1,
           "create": "init-creds"
         }
       }""")

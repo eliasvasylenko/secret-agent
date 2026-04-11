@@ -370,3 +370,55 @@ func TestInstanceRepository_Await_stale(t *testing.T) {
 		t.Errorf("Await returned instance with status %s, want %s", instance.Status.Name, secrets.Activate)
 	}
 }
+
+func TestInstanceRepository_planPinnedAfterVersionBump(t *testing.T) {
+	ctx := context.Background()
+	marker := filepath.Join(t.TempDir(), "marker")
+	env := command.NewEnvironment()
+	cmd := func(script string) *command.Command {
+		return command.New(script, env, "")
+	}
+	v1 := &secrets.Secret{
+		Name:     "s1",
+		Version:  1,
+		Create:   cmd("true"),
+		Activate: cmd("true"),
+		Test:     cmd(fmt.Sprintf(`printf v1 > %q`, marker)),
+	}
+	v2 := &secrets.Secret{
+		Name:     "s1",
+		Version:  2,
+		Create:   cmd("true"),
+		Activate: cmd("true"),
+		Test:     cmd(fmt.Sprintf(`printf v2 > %q`, marker)),
+	}
+
+	repo := newTestRepo(t, secrets.Secrets{"s1": v1})
+	instances := repo.Instances("s1")
+
+	created := createInstance(t, instances, ctx, executor.OperationParameters{Reason: "create", StartedBy: "user"})
+	runOperation(t, instances, ctx, created.Id, instances.Activate, executor.OperationParameters{Reason: "activate", StartedBy: "user"})
+
+	repo.secrets["s1"] = v2
+	if err := syncPlanRevisions(ctx, repo.db, repo.secrets); err != nil {
+		t.Fatalf("syncPlanRevisions after bump: %v", err)
+	}
+
+	runOperation(t, instances, ctx, created.Id, instances.Test, executor.OperationParameters{Reason: "test", StartedBy: "user"})
+
+	data, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("read marker: %v", err)
+	}
+	if string(data) != "v1" {
+		t.Fatalf("Test command wrote %q, want v1 (instance should use revision v1, not v2)", data)
+	}
+
+	got, err := instances.Get(ctx, created.Id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Secret.Version != 1 {
+		t.Errorf("Get().Secret.Version = %d, want 1", got.Secret.Version)
+	}
+}
