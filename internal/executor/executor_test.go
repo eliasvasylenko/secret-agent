@@ -41,7 +41,7 @@ func TestExecute(t *testing.T) {
 	if call.Stdin != "" {
 		t.Errorf("processCommand called with Stdin = %q, want %q", call.Stdin, "")
 	}
-	wantEnv := map[string]string{"INSTANCE_ID": "inst-1", "SECRET_ID": "test-secret", "FORCE": "false", "REASON": "", "STARTED_BY": ""}
+	wantEnv := map[string]string{"INSTANCE": "inst-1", "SECRET": "test-secret", "FORCE": "false", "REASON": "", "STARTED_BY": ""}
 	for k, v := range wantEnv {
 		if call.Env[k] != v {
 			t.Errorf("processCommand Env[%q] = %q, want %q", k, call.Env[k], v)
@@ -78,8 +78,8 @@ func TestExecute_withEnv(t *testing.T) {
 	if call.Stdin != "stdin" {
 		t.Errorf("processCommand Stdin = %q, want stdin", call.Stdin)
 	}
-	if call.Env["SECRET_ID"] != "test-secret" {
-		t.Errorf("processCommand Env[SECRET_ID] = %q, want test-secret", call.Env["SECRET_ID"])
+	if call.Env["SECRET"] != "test-secret" {
+		t.Errorf("processCommand Env[SECRET] = %q, want test-secret", call.Env["SECRET"])
 	}
 	if call.Env["REASON"] != "test" || call.Env["STARTED_BY"] != "tests" {
 		t.Errorf("processCommand Env REASON=%q STARTED_BY=%q, want test, tests", call.Env["REASON"], call.Env["STARTED_BY"])

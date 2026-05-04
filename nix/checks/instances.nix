@@ -8,7 +8,7 @@
 let
   expectedInstance = action: number: {
     secret = {
-      name = "db-creds";
+      id = "db-creds";
       version = 1;
       create = "echo done create > /etc/creds";
       activate = "echo done activate > /etc/creds";

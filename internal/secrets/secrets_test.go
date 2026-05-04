@@ -86,10 +86,10 @@ func TestLoadPlans(t *testing.T) {
 		Id:         "db-creds",
 		Version:    1,
 		Create:     command.New("openssl rand -base64 32", nil, ""),
-		Destroy:    command.New("rm -f /etc/enrypted-creds/$SECRET_ID/$INSTANCE_ID.cred", nil, ""),
-		Activate:   command.New("cp -f /etc/enrypted-creds/$SECRET_ID/$INSTANCE_ID.cred /etc/enrypted-creds/service.cred", nil, ""),
+		Destroy:    command.New("rm -f /etc/enrypted-creds/$SECRET/$INSTANCE.cred", nil, ""),
+		Activate:   command.New("cp -f /etc/enrypted-creds/$SECRET/$INSTANCE.cred /etc/enrypted-creds/service.cred", nil, ""),
 		Deactivate: command.New("rm -f /etc/enrypted-creds/service.cred", nil, ""),
-		Test:       command.New("ssh host -csecret-agent test $SECRET_ID $INSTANCE_ID", nil, ""),
+		Test:       command.New("ssh host -csecret-agent test $SECRET $INSTANCE", nil, ""),
 	}
 	tests := []struct {
 		file            string
