@@ -31,6 +31,12 @@ type Controller struct {
 	operationTtl time.Duration
 }
 
+type operationMapKey struct {
+	secretId        string
+	instanceId      string
+	operationNumber int
+}
+
 func NewController(secretStore store.Secrets, limiter limiter, permissions permissions, maxBytes int, operationTtl time.Duration) *Controller {
 	if maxBytes <= 0 {
 		maxBytes = defaultMaxBytes
@@ -158,6 +164,7 @@ func (s *Controller) createInstance(w http.ResponseWriter, r *http.Request) {
 	stdio := command.Stdio{Stdin: operationParameters.Input, Stdout: stdout, Stderr: stderr}
 	instance, err := instances.Create(r.Context(), parameters, stdio)
 	if err != nil {
+		closeOperationStreams(stdout, stderr)
 		writeError(w, err)
 		return
 	}
@@ -181,10 +188,15 @@ func (s *Controller) getOperations(w http.ResponseWriter, r *http.Request) {
 	secretId := r.PathValue("secretId")
 	instanceId := r.PathValue("instanceId")
 	from, to, err := parseRange(r)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
 	instances := s.secretStore.Instances(secretId)
 	operations, err := instances.History(r.Context(), instanceId, int(from), int(to))
 	if err != nil {
 		writeError(w, err)
+		return
 	}
 	writeResult(w, operations, http.StatusOK)
 }
@@ -201,7 +213,7 @@ func (s *Controller) createOperation(w http.ResponseWriter, r *http.Request) {
 
 	identity := identityFromContext(r.Context())
 	if identity == nil {
-		writeError(w, NewErrorResponse(http.StatusInternalServerError, fmt.Errorf("identity not found in context")))
+		writeError(w, NewErrorResponse(http.StatusUnauthorized, fmt.Errorf("identity not found in context")))
 		return
 	}
 	parameters := executor.OperationParameters{
@@ -227,10 +239,12 @@ func (s *Controller) createOperation(w http.ResponseWriter, r *http.Request) {
 	case secrets.Test:
 		instance, err = instances.Test(r.Context(), instanceId, parameters, stdio)
 	default:
+		closeOperationStreams(stdout, stderr)
 		writeError(w, NewErrorResponse(http.StatusBadRequest, fmt.Errorf("Cannot post operation %s", operationParameters.Name)))
 		return
 	}
 	if err != nil {
+		closeOperationStreams(stdout, stderr)
 		writeError(w, err)
 		return
 	}
@@ -246,7 +260,8 @@ func (s *Controller) trackOperation(stdout Stream, stderr Stream, startedBy stri
 		startedBy: startedBy,
 	}
 	opNumber := instance.Status.OperationNumber
-	s.operations.Store(opNumber, op)
+	key := operationMapKey{secretId: instance.Secret.Name, instanceId: instance.Id, operationNumber: opNumber}
+	s.operations.Store(key, op)
 	go func() {
 		_, err := instances.Await(context.Background(), instance.Id, opNumber)
 		var staleErr *store.StaleOperationError
@@ -260,7 +275,7 @@ func (s *Controller) trackOperation(stdout Stream, stderr Stream, startedBy stri
 			log.Printf("error closing stderr: %v", err)
 		}
 		time.AfterFunc(s.operationTtl, func() {
-			s.operations.Delete(opNumber)
+			s.operations.Delete(key)
 		})
 	}()
 }
@@ -292,6 +307,8 @@ func (s *Controller) streamStderr(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Controller) handleStream(w http.ResponseWriter, r *http.Request, pickStream func(*operation) Stream) {
+	secretId := r.PathValue("secretId")
+	instanceId := r.PathValue("instanceId")
 	opNumber, err := parseNumber(r, "opNumber", nil)
 	if err != nil {
 		writeError(w, err)
@@ -303,7 +320,8 @@ func (s *Controller) handleStream(w http.ResponseWriter, r *http.Request, pickSt
 		writeError(w, NewErrorResponse(http.StatusInternalServerError, fmt.Errorf("identity not found in context")))
 		return
 	}
-	load, ok := s.operations.Load(opNumber)
+	key := operationMapKey{secretId: secretId, instanceId: instanceId, operationNumber: opNumber}
+	load, ok := s.operations.Load(key)
 	if !ok {
 		writeError(w, NewErrorResponse(http.StatusNotFound, fmt.Errorf("operation %d not found", opNumber)))
 		return
@@ -328,6 +346,11 @@ func (s *Controller) handleStream(w http.ResponseWriter, r *http.Request, pickSt
 	ctx, cancel := context.WithTimeout(r.Context(), maxWait)
 	defer cancel()
 	writeBytes(ctx, w, pickStream(op), fromByte, maxBytes)
+}
+
+func closeOperationStreams(stdout Stream, stderr Stream) {
+	_ = stdout.Close()
+	_ = stderr.Close()
 }
 
 func parseNumber(r *http.Request, param string, defaultValue *int) (int, error) {

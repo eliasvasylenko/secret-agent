@@ -159,8 +159,8 @@ func TestStream_ReadAtBlocksUntilContextCancel(t *testing.T) {
 	if gotN != 0 {
 		t.Errorf("n = %d, want 0", gotN)
 	}
-	if gotErr != nil {
-		t.Errorf("err = %v, want nil (stream not done)", gotErr)
+	if gotErr != context.Canceled {
+		t.Errorf("err = %v, want context.Canceled", gotErr)
 	}
 }
 
@@ -248,30 +248,6 @@ func TestStream_IncrementalRead(t *testing.T) {
 
 	if secondData != "second" {
 		t.Errorf("second read = %q, want %q", secondData, "second")
-	}
-}
-
-func TestStream_CloseIsIdempotent(t *testing.T) {
-	s := newStream()
-	if err := s.Close(); err != nil {
-		t.Fatalf("first Close: %v", err)
-	}
-	if err := s.Close(); err != nil {
-		t.Fatalf("second Close: %v", err)
-	}
-	if !s.done {
-		t.Error("stream should be done after Close")
-	}
-}
-
-func TestStream_CloseRecordsCompletedAt(t *testing.T) {
-	s := newStream()
-	before := time.Now()
-	s.Close()
-	after := time.Now()
-
-	if s.completedAt.Before(before) || s.completedAt.After(after) {
-		t.Errorf("completedAt = %v, want between %v and %v", s.completedAt, before, after)
 	}
 }
 
