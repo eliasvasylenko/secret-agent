@@ -27,7 +27,7 @@ func TestExecute(t *testing.T) {
 	defer func() { processCommand = saved }()
 
 	s := &secrets.Secret{
-		Name:   "test-secret",
+		Id:     "test-secret",
 		Create: command.New("echo -n", nil, ""),
 	}
 	stdio := command.Stdio{Stdout: io.Discard, Stderr: io.Discard}
@@ -41,7 +41,7 @@ func TestExecute(t *testing.T) {
 	if call.Stdin != "" {
 		t.Errorf("processCommand called with Stdin = %q, want %q", call.Stdin, "")
 	}
-	wantEnv := map[string]string{"ID": "inst-1", "NAME": "test-secret", "FORCE": "false", "REASON": "", "STARTED_BY": ""}
+	wantEnv := map[string]string{"INSTANCE_ID": "inst-1", "SECRET_ID": "test-secret", "FORCE": "false", "REASON": "", "STARTED_BY": ""}
 	for k, v := range wantEnv {
 		if call.Env[k] != v {
 			t.Errorf("processCommand Env[%q] = %q, want %q", k, call.Env[k], v)
@@ -60,7 +60,7 @@ func TestExecute_withEnv(t *testing.T) {
 	defer func() { processCommand = saved }()
 
 	s := &secrets.Secret{
-		Name:   "test-secret",
+		Id:     "test-secret",
 		Create: command.New("create-script", nil, ""),
 	}
 	params := OperationParameters{
@@ -78,8 +78,8 @@ func TestExecute_withEnv(t *testing.T) {
 	if call.Stdin != "stdin" {
 		t.Errorf("processCommand Stdin = %q, want stdin", call.Stdin)
 	}
-	if call.Env["NAME"] != "test-secret" {
-		t.Errorf("processCommand Env[NAME] = %q, want test-secret", call.Env["NAME"])
+	if call.Env["SECRET_ID"] != "test-secret" {
+		t.Errorf("processCommand Env[SECRET_ID] = %q, want test-secret", call.Env["SECRET_ID"])
 	}
 	if call.Env["REASON"] != "test" || call.Env["STARTED_BY"] != "tests" {
 		t.Errorf("processCommand Env REASON=%q STARTED_BY=%q, want test, tests", call.Env["REASON"], call.Env["STARTED_BY"])
@@ -96,7 +96,7 @@ func TestExecute_noCommandForOp(t *testing.T) {
 	}
 	defer func() { processCommand = saved }()
 
-	s := &secrets.Secret{Name: "no-cmds"}
+	s := &secrets.Secret{Id: "no-cmds"}
 	stdio := command.Stdio{Stdout: io.Discard, Stderr: io.Discard}
 	err := Execute(ctx, s, secrets.Create, stdio, OperationParameters{}, "id")
 	if err != nil {
@@ -116,7 +116,7 @@ func TestExecute_returnsCommandError(t *testing.T) {
 	}
 	defer func() { processCommand = saved }()
 
-	s := &secrets.Secret{Name: "x", Create: command.New("script", nil, "")}
+	s := &secrets.Secret{Id: "x", Create: command.New("script", nil, "")}
 	stdio := command.Stdio{Stdout: io.Discard, Stderr: io.Discard}
 	err := Execute(ctx, s, secrets.Create, stdio, OperationParameters{}, "id")
 	if err != wantErr {
@@ -126,7 +126,7 @@ func TestExecute_returnsCommandError(t *testing.T) {
 
 func TestExecute_noCommand(t *testing.T) {
 	ctx := context.Background()
-	s := &secrets.Secret{Name: "leaf"}
+	s := &secrets.Secret{Id: "leaf"}
 	stdio := command.Stdio{Stdin: "input", Stdout: io.Discard, Stderr: io.Discard}
 	err := Execute(ctx, s, secrets.Create, stdio, OperationParameters{}, "id")
 	if err != nil {

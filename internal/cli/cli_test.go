@@ -30,7 +30,7 @@ func TestRun_secrets(t *testing.T) {
 	mockStore := &mocks.MockSecrets{}
 	defer mockStore.Mock.Validate(t)
 	mockList := func(ctx context.Context) (sec.Secrets, error) {
-		return sec.Secrets{"s1": {Name: "s1"}}, nil
+		return sec.Secrets{"s1": {Id: "s1"}}, nil
 	}
 	mocks.Expect(&mockStore.Mock, mockStore.List, mockList)
 
@@ -49,7 +49,7 @@ func TestRun_secrets(t *testing.T) {
 func TestRun_secret(t *testing.T) {
 	mockStore := &mocks.MockSecrets{}
 	defer mockStore.Mock.Validate(t)
-	want := &sec.Secret{Name: "my-secret", Version: 1}
+	want := &sec.Secret{Id: "my-secret", Version: 1}
 	mockGet := func(ctx context.Context, secretId string) (*sec.Secret, error) {
 		if secretId != "my-secret" {
 			t.Errorf("Get called with secretId=%q, want my-secret", secretId)
@@ -70,7 +70,7 @@ func TestRun_secret(t *testing.T) {
 	if err := json.Unmarshal(stdout, &got); err != nil {
 		t.Fatalf("stdout should be valid JSON: %v\noutput: %s", err, stdout)
 	}
-	expected := sec.Secret{Name: "my-secret", Version: 1}
+	expected := sec.Secret{Id: "my-secret", Version: 1}
 	if !cmp.Equal(got, expected) {
 		t.Errorf("stdout secret:\n%s", cmp.Diff(expected, got))
 	}

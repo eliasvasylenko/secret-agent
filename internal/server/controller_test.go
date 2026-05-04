@@ -51,7 +51,7 @@ func TestController_listSecrets(t *testing.T) {
 	mockStore := &mocks.MockSecrets{}
 	defer mockStore.Mock.Validate(t)
 	mocks.Expect(&mockStore.Mock, mockStore.List, func(ctx context.Context) (secrets.Secrets, error) {
-		return secrets.Secrets{"s1": {Name: "s1", Version: 1}}, nil
+		return secrets.Secrets{"s1": {Id: "s1", Version: 1}}, nil
 	})
 
 	_, mux := newTestController(t, mockStore, nil)
@@ -67,7 +67,7 @@ func TestController_listSecrets(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	want := ItemsResponse[secrets.Secrets]{Items: secrets.Secrets{"s1": {Name: "s1", Version: 1}}}
+	want := ItemsResponse[secrets.Secrets]{Items: secrets.Secrets{"s1": {Id: "s1", Version: 1}}}
 	if !cmp.Equal(got, want, cmp.AllowUnexported(secrets.Secret{})) {
 		t.Errorf("response:\n%s", cmp.Diff(want, got, cmp.AllowUnexported(secrets.Secret{})))
 	}
@@ -80,7 +80,7 @@ func TestController_getSecret(t *testing.T) {
 		if secretId != "my-secret" {
 			t.Errorf("Get secretId = %q", secretId)
 		}
-		return &secrets.Secret{Name: "my-secret"}, nil
+		return &secrets.Secret{Id: "my-secret"}, nil
 	})
 
 	_, mux := newTestController(t, mockStore, nil)
@@ -96,8 +96,8 @@ func TestController_getSecret(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if got.Name != "my-secret" {
-		t.Errorf("secret name = %q", got.Name)
+	if got.Id != "my-secret" {
+		t.Errorf("secret id = %q", got.Id)
 	}
 }
 
@@ -146,7 +146,7 @@ func TestController_getInstance(t *testing.T) {
 		if instanceId != "i1" {
 			t.Errorf("Get instanceId = %q", instanceId)
 		}
-		return &secrets.Instance{Id: "i1", Secret: secrets.Secret{Name: "s1", Version: 1}, Status: secrets.Status{}}, nil
+		return &secrets.Instance{Id: "i1", Secret: secrets.Secret{Id: "s1", Version: 1}, Status: secrets.Status{}}, nil
 	})
 
 	_, mux := newTestController(t, mockStore, nil)
@@ -182,12 +182,12 @@ func TestController_createInstance(t *testing.T) {
 		if params.Reason != "create-reason" {
 			t.Errorf("Reason = %q", params.Reason)
 		}
-		return &secrets.Instance{Id: "new-id", Secret: secrets.Secret{Name: "s1", Version: 1}, Status: secrets.Status{OperationNumber: 1}}, nil
+		return &secrets.Instance{Id: "new-id", Secret: secrets.Secret{Id: "s1", Version: 1}, Status: secrets.Status{OperationNumber: 1}}, nil
 	})
 	awaitDone := make(chan struct{})
 	mocks.Expect(&mockInstances.Mock, mockInstances.Await, func(ctx context.Context, instanceId string, opNumber int) (*secrets.Instance, error) {
 		defer close(awaitDone)
-		return &secrets.Instance{Id: "new-id", Secret: secrets.Secret{Name: "s1", Version: 1}, Status: secrets.Status{OperationNumber: 1}}, nil
+		return &secrets.Instance{Id: "new-id", Secret: secrets.Secret{Id: "s1", Version: 1}, Status: secrets.Status{OperationNumber: 1}}, nil
 	})
 
 	_, mux := newTestController(t, mockStore, &auth.Identity{Principal: "test-user"})
@@ -223,12 +223,12 @@ func TestController_createInstance_JSONInputReachesStdio(t *testing.T) {
 		if stdio.Stdin != "payload-from-json" {
 			t.Errorf("Create stdio.Stdin = %q, want payload-from-json", stdio.Stdin)
 		}
-		return &secrets.Instance{Id: "new-id", Secret: secrets.Secret{Name: "s1", Version: 1}, Status: secrets.Status{OperationNumber: 1}}, nil
+		return &secrets.Instance{Id: "new-id", Secret: secrets.Secret{Id: "s1", Version: 1}, Status: secrets.Status{OperationNumber: 1}}, nil
 	})
 	awaitDone := make(chan struct{})
 	mocks.Expect(&mockInstances.Mock, mockInstances.Await, func(ctx context.Context, instanceId string, opNumber int) (*secrets.Instance, error) {
 		defer close(awaitDone)
-		return &secrets.Instance{Id: "new-id", Secret: secrets.Secret{Name: "s1", Version: 1}, Status: secrets.Status{OperationNumber: 1}}, nil
+		return &secrets.Instance{Id: "new-id", Secret: secrets.Secret{Id: "s1", Version: 1}, Status: secrets.Status{OperationNumber: 1}}, nil
 	})
 
 	_, mux := newTestController(t, mockStore, &auth.Identity{Principal: "test-user"})
@@ -246,7 +246,7 @@ func TestController_createInstance_JSONInputReachesStdio(t *testing.T) {
 }
 
 func TestController_createOperation(t *testing.T) {
-	instance := &secrets.Instance{Id: "i1", Secret: secrets.Secret{Name: "s1", Version: 1}, Status: secrets.Status{OperationNumber: 1}}
+	instance := &secrets.Instance{Id: "i1", Secret: secrets.Secret{Id: "s1", Version: 1}, Status: secrets.Status{OperationNumber: 1}}
 
 	tests := []struct {
 		name   string

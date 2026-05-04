@@ -12,8 +12,8 @@ type Secrets map[string]*Secret
 
 // A plan for the provisioning of a secret.
 type Secret struct {
-	// The name of the secret
-	Name string `json:"name"`
+	// Id is the stable identifier for the secret
+	Id string `json:"id"`
 
 	// Version is the compatibility line for instances: same version shares one revision stream
 	// in the store; bump when create/provision semantics change incompatibly.
@@ -41,16 +41,16 @@ type Secret struct {
 func New(secretList []*Secret) (Secrets, error) {
 	secrets := map[string]*Secret{}
 	for _, secret := range secretList {
-		if secret.Name == "" {
-			return nil, fmt.Errorf("Secret name must not be empty")
+		if secret.Id == "" {
+			return nil, fmt.Errorf("Secret id must not be empty")
 		}
 		if secret.Version < 1 {
-			return nil, fmt.Errorf("Secret '%s' version must be >= 1", secret.Name)
+			return nil, fmt.Errorf("Secret '%s' version must be >= 1", secret.Id)
 		}
-		if _, ok := secrets[secret.Name]; ok {
-			return nil, fmt.Errorf("Secret name '%s' must be unique", secret.Name)
+		if _, ok := secrets[secret.Id]; ok {
+			return nil, fmt.Errorf("Secret id '%s' must be unique", secret.Id)
 		}
-		secrets[secret.Name] = secret
+		secrets[secret.Id] = secret
 	}
 	return secrets, nil
 }

@@ -260,7 +260,7 @@ func (s *Controller) trackOperation(stdout Stream, stderr Stream, startedBy stri
 		startedBy: startedBy,
 	}
 	opNumber := instance.Status.OperationNumber
-	key := operationMapKey{secretId: instance.Secret.Name, instanceId: instance.Id, operationNumber: opNumber}
+	key := operationMapKey{secretId: instance.Secret.Id, instanceId: instance.Id, operationNumber: opNumber}
 	s.operations.Store(key, op)
 	go func() {
 		_, err := instances.Await(context.Background(), instance.Id, opNumber)

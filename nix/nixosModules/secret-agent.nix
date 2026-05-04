@@ -160,11 +160,11 @@ let
   # Map the nix secrets config into a service secrets config
   makeSecretsConfig =
     secrets:
-    lib.lists.sortOn ({ name, ... }: name) (
+    lib.lists.sortOn (s: s.id) (
       lib.attrsets.mapAttrsToList (
         name: secret:
         lib.attrsets.filterAttrs (n: v: v != null) {
-          inherit name;
+          id = name;
           version = secret.version;
           environment = secret.environment;
           create = makeCommandConfig secret.create;

@@ -70,7 +70,7 @@ pkgs.testers.runNixOSTest {
       value = loads(output)
       expected = loads("""[
         {
-          "name": "db-creds",
+          "id": "db-creds",
           "version": 1,
           "create": "echo created > /etc/creds"
         }
@@ -79,15 +79,15 @@ pkgs.testers.runNixOSTest {
 
     with subtest("list multiple"):
       output = multiple.succeed("secret-agent secrets")
-      value = {item["name"]: item for item in loads(output)}
+      value = {item["id"]: item for item in loads(output)}
       expected = loads("""{
         "db-creds": {
-          "name": "db-creds",
+          "id": "db-creds",
           "version": 1,
           "create": "echo created > /etc/creds"
         },
         "extra-creds": {
-          "name": "extra-creds",
+          "id": "extra-creds",
           "version": 1,
           "create": "init-creds"
         }

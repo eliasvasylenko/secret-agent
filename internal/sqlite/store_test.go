@@ -16,7 +16,7 @@ import (
 )
 
 // noOpSecret has no commands so Execute is a no-op (used for store operations that run Execute).
-var noOpSecret = &secrets.Secret{Name: "s1"}
+var noOpSecret = &secrets.Secret{Id: "s1"}
 
 func newTestRepo(t *testing.T, s secrets.Secrets) *SecretRespository {
 	t.Helper()
@@ -76,7 +76,7 @@ func TestNewSecretRepository(t *testing.T) {
 }
 
 func TestSecretRepository_List(t *testing.T) {
-	want := secrets.Secrets{"s1": noOpSecret, "s2": {Name: "s2"}}
+	want := secrets.Secrets{"s1": noOpSecret, "s2": {Id: "s2"}}
 	repo := newTestRepo(t, want)
 	ctx := context.Background()
 
@@ -97,7 +97,7 @@ func TestSecretRepository_Get(t *testing.T) {
 		name     string
 		secretId string
 		wantErr  bool
-		wantName string
+		wantId   string
 	}{
 		{"found", "s1", false, "s1"},
 		{"not found", "missing", true, ""},
@@ -114,8 +114,8 @@ func TestSecretRepository_Get(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Get: %v", err)
 			}
-			if got.Name != tt.wantName {
-				t.Errorf("Get().Name = %q, want %q", got.Name, tt.wantName)
+			if got.Id != tt.wantId {
+				t.Errorf("Get().Id = %q, want %q", got.Id, tt.wantId)
 			}
 		})
 	}
@@ -137,7 +137,7 @@ func TestInstanceRepository_Create_stdinReachesSubprocess(t *testing.T) {
 	// Bash builtins only (no PATH); same idea as secrets that use echo in other tests.
 	script := fmt.Sprintf(`read -r _stdin || :; printf '%%s' "$_stdin" > %q`, out)
 	s := &secrets.Secret{
-		Name:   "s1",
+		Id:     "s1",
 		Create: command.New(script, command.NewEnvironment(), ""),
 	}
 	repo := newTestRepo(t, secrets.Secrets{"s1": s})
@@ -173,8 +173,8 @@ func TestInstanceRepository_Create_List_Get(t *testing.T) {
 	if created.Id == "" {
 		t.Error("Create returned instance with empty Id")
 	}
-	if created.Secret.Name != "s1" {
-		t.Errorf("Create returned Secret.Name = %q", created.Secret.Name)
+	if created.Secret.Id != "s1" {
+		t.Errorf("Create returned Secret.Id = %q", created.Secret.Id)
 	}
 
 	list, err := instances.List(ctx, 0, 10)
@@ -379,14 +379,14 @@ func TestInstanceRepository_planPinnedAfterVersionBump(t *testing.T) {
 		return command.New(script, env, "")
 	}
 	v1 := &secrets.Secret{
-		Name:     "s1",
+		Id:       "s1",
 		Version:  1,
 		Create:   cmd("true"),
 		Activate: cmd("true"),
 		Test:     cmd(fmt.Sprintf(`printf v1 > %q`, marker)),
 	}
 	v2 := &secrets.Secret{
-		Name:     "s1",
+		Id:       "s1",
 		Version:  2,
 		Create:   cmd("true"),
 		Activate: cmd("true"),
