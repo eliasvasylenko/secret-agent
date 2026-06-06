@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"time"
@@ -74,11 +73,11 @@ func (c *CLI) Run(ctx context.Context) {
 	case "instance <secret-id> <instance-id>":
 		result, err = c.secretStore.Instances(c.Instance.SecretID).Get(ctx, c.Instance.InstanceID)
 	case "active <secret-id>":
-		result, err = c.secretStore.Instances(c.Instance.SecretID).GetActive(ctx)
+		result, err = c.secretStore.Instances(c.Active.SecretID).GetActive(ctx)
 	case "history <secret-id>":
 		result, err = c.secretStore.History(ctx, c.History.SecretID, c.History.From, c.History.To)
 	case "history <secret-id> <instance-id>":
-		result, err = c.secretStore.Instances(c.Instance.SecretID).History(ctx, c.Instance.InstanceID, c.History.From, c.History.To)
+		result, err = c.secretStore.Instances(c.History.SecretID).History(ctx, c.History.InstanceID, c.History.From, c.History.To)
 	case "create <secret-id>":
 		result, err = c.startSecretOperation(ctx, c.Create, store.Instances.Create)
 	case "destroy <secret-id> <instance-id>":
@@ -119,39 +118,24 @@ func (c *CLI) Run(ctx context.Context) {
 	c.ctx.FatalIfErrorf(err)
 }
 
-func readStdin() string {
-	info, err := os.Stdin.Stat()
-	if err != nil || info.Mode()&os.ModeCharDevice != 0 {
-		return ""
-	}
-	data, err := io.ReadAll(os.Stdin)
-	if err != nil {
-		return ""
-	}
-	return string(data)
-}
+// runCreateMutation starts a create operation and blocks on Await until it completes.
+func (c *CLI) startSecretOperation(ctx context.Context, operation SecretCommand, start func(store.Instances, context.Context, executor.OperationParameters, command.Stdio) (*secrets.Instance, error)) (*secrets.Instance, error) {
+	stdioCtx, stopStdio := context.WithCancel(ctx)
+	defer stopStdio()
 
-// startSecretOperation runs a mutation via the given function, then blocks on Await until the operation completes.
-func (c *CLI) startSecretOperation(ctx context.Context, operation SecretCommand, operationFunc func(_ store.Instances, ctx context.Context, parameters executor.OperationParameters, stdio command.Stdio) (*secrets.Instance, error)) (*secrets.Instance, error) {
 	instances := c.secretStore.Instances(operation.SecretID)
-	stdio := command.Stdio{Stdin: readStdin(), Stdout: os.Stdout, Stderr: os.Stderr}
-	started, err := operationFunc(instances, ctx, operation.parameters(), stdio)
-	return awaitOperation(ctx, instances, started, err)
-}
-
-// startInstanceOperation runs a mutation via the given function, then blocks on Await until the operation completes.
-func (c *CLI) startInstanceOperation(ctx context.Context, operation InstanceCommand, operationFunc func(_ store.Instances, ctx context.Context, instanceId string, parameters executor.OperationParameters, stdio command.Stdio) (*secrets.Instance, error)) (*secrets.Instance, error) {
-	instances := c.secretStore.Instances(operation.SecretID)
-	stdio := command.Stdio{Stdin: readStdin(), Stdout: os.Stdout, Stderr: os.Stderr}
-	started, err := operationFunc(instances, ctx, operation.InstanceID, operation.parameters(), stdio)
-	return awaitOperation(ctx, instances, started, err)
-}
-
-func awaitOperation(ctx context.Context, instances store.Instances, instance *secrets.Instance, err error) (*secrets.Instance, error) {
+	stdio := command.Stdio{Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr}
+	instance, err := start(instances, stdioCtx, operation.parameters(), stdio)
 	if err != nil {
 		return nil, err
 	}
 	return instances.Await(ctx, instance.Id, instance.Status.OperationNumber)
+}
+
+func (c *CLI) startInstanceOperation(ctx context.Context, operation InstanceCommand, start func(store.Instances, context.Context, string, executor.OperationParameters, command.Stdio) (*secrets.Instance, error)) (*secrets.Instance, error) {
+	return c.startSecretOperation(ctx, operation.SecretCommand, func(instances store.Instances, ctx context.Context, parameters executor.OperationParameters, stdio command.Stdio) (*secrets.Instance, error) {
+		return start(instances, ctx, operation.InstanceID, parameters, stdio)
+	})
 }
 
 type Secrets struct{}
@@ -187,9 +171,8 @@ type SecretCommand struct {
 }
 
 type InstanceCommand struct {
-	SecretID   string `arg:"" help:"ID of the secret"`
+	SecretCommand
 	InstanceID string `arg:"" help:"ID of the instance"`
-	Command
 }
 
 type Command struct {

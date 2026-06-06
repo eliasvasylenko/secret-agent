@@ -3,10 +3,10 @@ package client
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -15,9 +15,13 @@ import (
 	"github.com/eliasvasylenko/secret-agent/internal/executor"
 	"github.com/eliasvasylenko/secret-agent/internal/secrets"
 	"github.com/eliasvasylenko/secret-agent/internal/server"
+	"github.com/eliasvasylenko/secret-agent/internal/store"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 )
+
+// Ensure that *InstanceClient satisfies the store.Instances interface.
+var _ store.Instances = (*InstanceClient)(nil)
 
 // cmp options for comparing secrets types that contain unexported fields.
 var cmpSecretOpts = cmp.Options{
@@ -28,20 +32,40 @@ var cmpInstanceOpts = cmp.Options{
 	cmpopts.IgnoreUnexported(time.Time{}),
 }
 
-// stubClient implements httpClient. It records the first request for assertion
-// and returns an error for any subsequent calls, which causes poll goroutines
-// spawned by startPolling to exit immediately.
+// stubClient implements httpClient. It records the first non-poll request for
+// assertion. process/io polls return completed streams; result polls return
+// resultStatus/resultBody when set.
 type stubClient struct {
-	status  int
-	body    string
-	doErr   error
-	lastReq atomic.Pointer[http.Request]
+	status       int
+	body         string
+	resultStatus int
+	resultBody   string
+	doErr        error
+	lastReq      atomic.Pointer[http.Request]
 }
 
 func (s *stubClient) Do(req *http.Request) (*http.Response, error) {
+	if strings.Contains(req.URL.Path, "/process/io") {
+		return &http.Response{
+			StatusCode: 200,
+			Body:       io.NopCloser(bytes.NewReader([]byte(`{"stdout":{"index":0,"closed":true},"stderr":{"index":0,"closed":true}}`))),
+		}, nil
+	}
+	if strings.Contains(req.URL.Path, "/result") {
+		status := s.resultStatus
+		body := s.resultBody
+		if status == 0 {
+			status = 408
+			body = `{"error":{"status":408,"message":"timeout"}}`
+		}
+		return &http.Response{
+			StatusCode: status,
+			Body:       io.NopCloser(bytes.NewReader([]byte(body))),
+		}, nil
+	}
 	first := s.lastReq.CompareAndSwap(nil, req)
 	if !first {
-		return nil, fmt.Errorf("stub: unexpected request")
+		return nil, fmt.Errorf("stub: unexpected request %s %s", req.Method, req.URL.Path)
 	}
 	if s.doErr != nil {
 		return nil, s.doErr
@@ -132,6 +156,23 @@ func TestDo_serverErrorResponse(t *testing.T) {
 	}
 }
 
+func TestDo_nonJSONErrorResponse(t *testing.T) {
+	ctx := context.Background()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://unix/secrets", nil)
+	stub := &stubClient{status: 404, body: "404 page not found\n"}
+	got, err := Do[secrets.Secrets](stub, req, nil)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if got != nil {
+		t.Errorf("expected nil body, got %v", got)
+	}
+	respErr, ok := err.(*server.ErrorResponse)
+	if !ok || respErr.HttpError == nil || respErr.HttpError.Code != 404 {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestSecretClient_List(t *testing.T) {
 	ctx := context.Background()
 	stub := &stubClient{status: 200, body: `{"items":[{"id":"x","version":1}]}`}
@@ -208,27 +249,27 @@ func TestInstanceClient_Create(t *testing.T) {
 	parent := &SecretClient{client: stub}
 	c := &InstanceClient{parent: parent, secretId: "sid"}
 	params := executor.OperationParameters{Reason: "test", StartedBy: "user"}
-	got, err := c.Create(ctx, params, command.Stdio{Stdout: io.Discard, Stderr: io.Discard})
+	started, err := c.Create(ctx, params, command.Stdio{Stdout: io.Discard, Stderr: io.Discard})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	wantReq := "POST /secrets/sid/instances\n" + `{"name":"","env":null,"forced":false,"reason":"test"}` + "\n"
+	want := &secrets.Instance{Id: "new-id", Secret: secrets.Secret{Id: "s1", Version: 1}, Status: secrets.Status{}}
+	if !cmp.Equal(started, want, cmpInstanceOpts) {
+		t.Errorf("Create returned instance:\n%s", cmp.Diff(want, started, cmpInstanceOpts))
+	}
+	wantReq := "POST /secrets/sid/instances\n" + `{"env":null,"forced":false,"reason":"test"}` + "\n"
 	if gotReq := requestString(stub.lastReq.Load()); gotReq != wantReq {
 		t.Errorf("request:\n%s", cmp.Diff(wantReq, gotReq))
 	}
-	want := &secrets.Instance{Id: "new-id", Secret: secrets.Secret{Id: "s1", Version: 1}, Status: secrets.Status{}}
-	if !cmp.Equal(got, want, cmpInstanceOpts) {
-		t.Errorf("Create response:\n%s", cmp.Diff(want, got, cmpInstanceOpts))
-	}
 }
 
-func TestInstanceClient_Create_PostJSON_decodesInput(t *testing.T) {
+func TestInstanceClient_Create_hasNoInputField(t *testing.T) {
 	ctx := context.Background()
 	stub := &stubClient{status: 200, body: `{"id":"new-id","secret":{"id":"s1","version":1},"operationNumber":1,"status":{}}`}
 	parent := &SecretClient{client: stub}
 	c := &InstanceClient{parent: parent, secretId: "sid"}
 	params := executor.OperationParameters{Reason: "test", StartedBy: "user"}
-	_, err := c.Create(ctx, params, command.Stdio{Stdin: "hello\n", Stdout: io.Discard, Stderr: io.Discard})
+	_, err := c.Create(ctx, params, command.Stdio{})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -240,32 +281,8 @@ func TestInstanceClient_Create_PostJSON_decodesInput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var decoded server.OperationParameters
-	if err := json.Unmarshal(body, &decoded); err != nil {
-		t.Fatalf("unmarshal POST body: %v\n%s", err, body)
-	}
-	if decoded.Input != "hello\n" {
-		t.Fatalf("JSON input field = %q, want hello\\n", decoded.Input)
-	}
-}
-
-func TestInstanceClient_Create_withStdin(t *testing.T) {
-	ctx := context.Background()
-	stub := &stubClient{status: 200, body: `{"id":"new-id","secret":{"id":"s1","version":1},"operationNumber":1,"status":{}}`}
-	parent := &SecretClient{client: stub}
-	c := &InstanceClient{parent: parent, secretId: "sid"}
-	params := executor.OperationParameters{Reason: "test", StartedBy: "user"}
-	got, err := c.Create(ctx, params, command.Stdio{Stdin: "hello\n", Stdout: io.Discard, Stderr: io.Discard})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	wantReq := "POST /secrets/sid/instances\n" + `{"name":"","env":null,"forced":false,"reason":"test","input":"hello\n"}` + "\n"
-	if gotReq := requestString(stub.lastReq.Load()); gotReq != wantReq {
-		t.Errorf("request:\n%s", cmp.Diff(wantReq, gotReq))
-	}
-	want := &secrets.Instance{Id: "new-id", Secret: secrets.Secret{Id: "s1", Version: 1}, Status: secrets.Status{}}
-	if !cmp.Equal(got, want, cmpInstanceOpts) {
-		t.Errorf("Create response:\n%s", cmp.Diff(want, got, cmpInstanceOpts))
+	if strings.Contains(string(body), "input") {
+		t.Fatalf("create POST body must not include input; got %s", body)
 	}
 }
 
@@ -312,18 +329,22 @@ func TestInstanceClient_Destroy(t *testing.T) {
 	parent := &SecretClient{client: stub}
 	c := &InstanceClient{parent: parent, secretId: "sid"}
 	params := executor.OperationParameters{Reason: "r", StartedBy: "user"}
-	got, err := c.Destroy(ctx, "i1", params, command.Stdio{Stdout: io.Discard, Stderr: io.Discard})
+	started, err := c.Destroy(ctx, "i1", params, discardStdio())
 	if err != nil {
 		t.Fatalf("Destroy: %v", err)
+	}
+	want := &secrets.Instance{Id: "i1", Secret: secrets.Secret{Id: "s1", Version: 1}, Status: secrets.Status{}}
+	if !cmp.Equal(started, want, cmpInstanceOpts) {
+		t.Errorf("Destroy returned instance:\n%s", cmp.Diff(want, started, cmpInstanceOpts))
 	}
 	wantReq := "POST /secrets/sid/instances/i1/operations\n" + `{"name":"destroy","env":null,"forced":false,"reason":"r"}` + "\n"
 	if gotReq := requestString(stub.lastReq.Load()); gotReq != wantReq {
 		t.Errorf("request:\n%s", cmp.Diff(wantReq, gotReq))
 	}
-	want := &secrets.Instance{Id: "i1", Secret: secrets.Secret{Id: "s1", Version: 1}, Status: secrets.Status{}}
-	if !cmp.Equal(got, want, cmpInstanceOpts) {
-		t.Errorf("Destroy response:\n%s", cmp.Diff(want, got, cmpInstanceOpts))
-	}
+}
+
+func discardStdio() command.Stdio {
+	return command.Stdio{Stdout: io.Discard, Stderr: io.Discard}
 }
 
 func TestInstanceClient_Activate(t *testing.T) {
@@ -332,17 +353,17 @@ func TestInstanceClient_Activate(t *testing.T) {
 	parent := &SecretClient{client: stub}
 	c := &InstanceClient{parent: parent, secretId: "sid"}
 	params := executor.OperationParameters{Reason: "activate-reason", StartedBy: "user"}
-	got, err := c.Activate(ctx, "i1", params, command.Stdio{Stdout: io.Discard, Stderr: io.Discard})
+	started, err := c.Activate(ctx, "i1", params, discardStdio())
 	if err != nil {
 		t.Fatalf("Activate: %v", err)
+	}
+	want := &secrets.Instance{Id: "i1", Secret: secrets.Secret{Id: "s1", Version: 1}, Status: secrets.Status{}}
+	if !cmp.Equal(started, want, cmpInstanceOpts) {
+		t.Errorf("Activate returned instance:\n%s", cmp.Diff(want, started, cmpInstanceOpts))
 	}
 	wantReq := "POST /secrets/sid/instances/i1/operations\n" + `{"name":"activate","env":null,"forced":false,"reason":"activate-reason"}` + "\n"
 	if gotReq := requestString(stub.lastReq.Load()); gotReq != wantReq {
 		t.Errorf("request:\n%s", cmp.Diff(wantReq, gotReq))
-	}
-	want := &secrets.Instance{Id: "i1", Secret: secrets.Secret{Id: "s1", Version: 1}, Status: secrets.Status{}}
-	if !cmp.Equal(got, want, cmpInstanceOpts) {
-		t.Errorf("Activate response:\n%s", cmp.Diff(want, got, cmpInstanceOpts))
 	}
 }
 
@@ -352,18 +373,58 @@ func TestInstanceClient_Deactivate(t *testing.T) {
 	parent := &SecretClient{client: stub}
 	c := &InstanceClient{parent: parent, secretId: "sid"}
 	params := executor.OperationParameters{Reason: "deact", StartedBy: "user"}
-	got, err := c.Deactivate(ctx, "i1", params, command.Stdio{Stdout: io.Discard, Stderr: io.Discard})
+	started, err := c.Deactivate(ctx, "i1", params, discardStdio())
 	if err != nil {
 		t.Fatalf("Deactivate: %v", err)
+	}
+	want := &secrets.Instance{Id: "i1", Secret: secrets.Secret{Id: "s1", Version: 1}, Status: secrets.Status{}}
+	if !cmp.Equal(started, want, cmpInstanceOpts) {
+		t.Errorf("Deactivate returned instance:\n%s", cmp.Diff(want, started, cmpInstanceOpts))
 	}
 	wantReq := "POST /secrets/sid/instances/i1/operations\n" + `{"name":"deactivate","env":null,"forced":false,"reason":"deact"}` + "\n"
 	if gotReq := requestString(stub.lastReq.Load()); gotReq != wantReq {
 		t.Errorf("request:\n%s", cmp.Diff(wantReq, gotReq))
 	}
-	want := &secrets.Instance{Id: "i1", Secret: secrets.Secret{Id: "s1", Version: 1}, Status: secrets.Status{}}
-	if !cmp.Equal(got, want, cmpInstanceOpts) {
-		t.Errorf("Deactivate response:\n%s", cmp.Diff(want, got, cmpInstanceOpts))
+}
+
+func TestInstanceClient_Await_retriesUntilComplete(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	stub := &resultRetryStub{}
+	parent := &SecretClient{client: stub}
+	c := &InstanceClient{parent: parent, secretId: "sid"}
+
+	got, err := c.Await(ctx, "i1", 1)
+	if err != nil {
+		t.Fatalf("Await: %v", err)
 	}
+	if got.Id != "i1" {
+		t.Fatalf("instance id = %q", got.Id)
+	}
+	if stub.resultCalls.Load() < 2 {
+		t.Fatalf("result calls = %d, want at least 2", stub.resultCalls.Load())
+	}
+}
+
+type resultRetryStub struct {
+	resultCalls atomic.Int32
+}
+
+func (s *resultRetryStub) Do(req *http.Request) (*http.Response, error) {
+	if strings.Contains(req.URL.Path, "/result") {
+		if s.resultCalls.Add(1) == 1 {
+			return &http.Response{
+				StatusCode: 408,
+				Body:       io.NopCloser(bytes.NewReader([]byte(`{"error":{"status":408,"message":"timeout"}}`))),
+			}, nil
+		}
+		return &http.Response{
+			StatusCode: 200,
+			Body:       io.NopCloser(bytes.NewReader([]byte(`{"id":"i1","secret":{"id":"s1","version":1},"operationNumber":1,"status":{}}`))),
+		}, nil
+	}
+	return nil, fmt.Errorf("stub: unexpected request %s %s", req.Method, req.URL.Path)
 }
 
 func TestInstanceClient_Test(t *testing.T) {
@@ -372,17 +433,17 @@ func TestInstanceClient_Test(t *testing.T) {
 	parent := &SecretClient{client: stub}
 	c := &InstanceClient{parent: parent, secretId: "sid"}
 	params := executor.OperationParameters{Reason: "test-run", StartedBy: "user"}
-	got, err := c.Test(ctx, "i1", params, command.Stdio{Stdout: io.Discard, Stderr: io.Discard})
+	started, err := c.Test(ctx, "i1", params, discardStdio())
 	if err != nil {
 		t.Fatalf("Test: %v", err)
+	}
+	want := &secrets.Instance{Id: "i1", Secret: secrets.Secret{Id: "s1", Version: 1}, Status: secrets.Status{}}
+	if !cmp.Equal(started, want, cmpInstanceOpts) {
+		t.Errorf("Test returned instance:\n%s", cmp.Diff(want, started, cmpInstanceOpts))
 	}
 	wantReq := "POST /secrets/sid/instances/i1/operations\n" + `{"name":"test","env":null,"forced":false,"reason":"test-run"}` + "\n"
 	if gotReq := requestString(stub.lastReq.Load()); gotReq != wantReq {
 		t.Errorf("request:\n%s", cmp.Diff(wantReq, gotReq))
-	}
-	want := &secrets.Instance{Id: "i1", Secret: secrets.Secret{Id: "s1", Version: 1}, Status: secrets.Status{}}
-	if !cmp.Equal(got, want, cmpInstanceOpts) {
-		t.Errorf("Test response:\n%s", cmp.Diff(want, got, cmpInstanceOpts))
 	}
 }
 

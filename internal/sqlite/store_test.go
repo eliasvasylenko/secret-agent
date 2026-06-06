@@ -6,16 +6,16 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/eliasvasylenko/secret-agent/internal/command"
 	"github.com/eliasvasylenko/secret-agent/internal/executor"
 	"github.com/eliasvasylenko/secret-agent/internal/secrets"
-	"github.com/eliasvasylenko/secret-agent/internal/store"
 	"github.com/google/go-cmp/cmp"
 )
 
-// noOpSecret has no commands so Execute is a no-op (used for store operations that run Execute).
+// noOpSecret has no commands so Await is a no-op subprocess (used for store-only tests).
 var noOpSecret = &secrets.Secret{Id: "s1"}
 
 func newTestRepo(t *testing.T, s secrets.Secrets) *SecretRespository {
@@ -33,14 +33,14 @@ func newTestRepo(t *testing.T, s secrets.Secrets) *SecretRespository {
 	return repo
 }
 
-// createInstance is a test helper that creates an instance and awaits completion.
+// createInstance starts a create operation and awaits completion.
 func createInstance(t *testing.T, instances *InstanceRepository, ctx context.Context, params executor.OperationParameters) *secrets.Instance {
 	t.Helper()
-	started, err := instances.Create(ctx, params, discardStdio())
+	instance, err := instances.Create(ctx, params, discardStdio())
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	completed, err := instances.Await(ctx, started.Id, started.Status.OperationNumber)
+	completed, err := instances.Await(ctx, instance.Id, instance.Status.OperationNumber)
 	if err != nil {
 		t.Fatalf("Await after Create: %v", err)
 	}
@@ -51,14 +51,14 @@ func discardStdio() command.Stdio {
 	return command.Stdio{Stdout: io.Discard, Stderr: io.Discard}
 }
 
-// runOperation is a test helper that runs an operation and awaits completion.
+// runOperation starts an update operation and awaits completion.
 func runOperation(t *testing.T, instances *InstanceRepository, ctx context.Context, instanceId string, op func(context.Context, string, executor.OperationParameters, command.Stdio) (*secrets.Instance, error), params executor.OperationParameters) *secrets.Instance {
 	t.Helper()
-	started, err := op(ctx, instanceId, params, discardStdio())
+	instance, err := op(ctx, instanceId, params, discardStdio())
 	if err != nil {
 		t.Fatalf("operation start: %v", err)
 	}
-	completed, err := instances.Await(ctx, started.Id, started.Status.OperationNumber)
+	completed, err := instances.Await(ctx, instanceId, instance.Status.OperationNumber)
 	if err != nil {
 		t.Fatalf("Await after operation: %v", err)
 	}
@@ -132,6 +132,29 @@ func TestSecretRepository_Instances_Create_unknownSecret(t *testing.T) {
 	}
 }
 
+func TestSecretRepository_Instances_returnsSameRepository(t *testing.T) {
+	repo := newTestRepo(t, nil)
+	if repo.Instances("s1") != repo.Instances("s1") {
+		t.Fatal("Instances() must return the same repository so Await can wait on in-flight operations")
+	}
+}
+
+func TestSecretRepository_Instances_AwaitAcrossLookups(t *testing.T) {
+	repo := newTestRepo(t, nil)
+	ctx := context.Background()
+	started, err := repo.Instances("s1").Create(ctx, executor.OperationParameters{Reason: "r", StartedBy: "u"}, discardStdio())
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	completed, err := repo.Instances("s1").Await(ctx, started.Id, started.Status.OperationNumber)
+	if err != nil {
+		t.Fatalf("Await: %v", err)
+	}
+	if completed.Status.CompletedAt == nil {
+		t.Fatal("expected completedAt after Await from a separate Instances() lookup")
+	}
+}
+
 func TestInstanceRepository_Create_stdinReachesSubprocess(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "captured")
 	// Bash builtins only (no PATH); same idea as secrets that use echo in other tests.
@@ -143,15 +166,15 @@ func TestInstanceRepository_Create_stdinReachesSubprocess(t *testing.T) {
 	repo := newTestRepo(t, secrets.Secrets{"s1": s})
 	ctx := context.Background()
 	instances := repo.Instances("s1")
-	started, err := instances.Create(ctx, executor.OperationParameters{Reason: "r", StartedBy: "user"}, command.Stdio{
-		Stdin:  "stdin-payload",
+	instance, err := instances.Create(ctx, executor.OperationParameters{Reason: "r", StartedBy: "user"}, command.Stdio{
+		Stdin:  strings.NewReader("stdin-payload"),
 		Stdout: io.Discard,
 		Stderr: io.Discard,
 	})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	_, err = instances.Await(ctx, started.Id, started.Status.OperationNumber)
+	_, err = instances.Await(ctx, instance.Id, instance.Status.OperationNumber)
 	if err != nil {
 		t.Fatalf("Await: %v", err)
 	}
@@ -313,8 +336,7 @@ func TestInstanceRepository_ExpectedOperationNumber(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Activate with Forced should ignore ExpectedOperationNumber mismatch: %v", err)
 	}
-	_, err = instances.Await(ctx, started.Id, started.Status.OperationNumber)
-	if err != nil {
+	if _, err := instances.Await(ctx, started.Id, started.Status.OperationNumber); err != nil {
 		t.Fatalf("Await after forced Activate: %v", err)
 	}
 }
@@ -324,11 +346,11 @@ func TestInstanceRepository_Create_validateReason(t *testing.T) {
 	ctx := context.Background()
 	instances := repo.Instances("s1")
 
-	started, err := instances.Create(ctx, executor.OperationParameters{Reason: "ok", StartedBy: "user"}, discardStdio())
+	instance, err := instances.Create(ctx, executor.OperationParameters{Reason: "ok", StartedBy: "user"}, discardStdio())
 	if err != nil {
 		t.Fatalf("Create (short reason): %v", err)
 	}
-	if _, err := instances.Await(ctx, started.Id, started.Status.OperationNumber); err != nil {
+	if _, err := instances.Await(ctx, instance.Id, instance.Status.OperationNumber); err != nil {
 		t.Fatalf("Await: %v", err)
 	}
 
@@ -337,37 +359,6 @@ func TestInstanceRepository_Create_validateReason(t *testing.T) {
 	_, err = instances.Create(ctx, executor.OperationParameters{Reason: longReason, StartedBy: "user"}, discardStdio())
 	if err == nil {
 		t.Fatal("Create with too-long reason = nil, want error")
-	}
-}
-
-func TestInstanceRepository_Await_stale(t *testing.T) {
-	repo := newTestRepo(t, nil)
-	ctx := context.Background()
-	instances := repo.Instances("s1")
-
-	created := createInstance(t, instances, ctx, executor.OperationParameters{Reason: "create", StartedBy: "user"})
-	firstOpNumber := created.Status.OperationNumber
-
-	// Start another operation so firstOpNumber becomes stale.
-	runOperation(t, instances, ctx, created.Id, instances.Activate, executor.OperationParameters{Reason: "activate", StartedBy: "user"})
-
-	// Await with the stale operation number.
-	instance, err := instances.Await(ctx, created.Id, firstOpNumber)
-	if err == nil {
-		t.Fatal("Await with stale op number should return error")
-	}
-	staleErr, ok := err.(*store.StaleOperationError)
-	if !ok {
-		t.Fatalf("Await error type = %T, want *store.StaleOperationError", err)
-	}
-	if staleErr.Expected != firstOpNumber {
-		t.Errorf("StaleOperationError.Expected = %d, want %d", staleErr.Expected, firstOpNumber)
-	}
-	if instance == nil {
-		t.Fatal("Await with stale op should still return the latest instance")
-	}
-	if instance.Status.Name != secrets.Activate {
-		t.Errorf("Await returned instance with status %s, want %s", instance.Status.Name, secrets.Activate)
 	}
 }
 

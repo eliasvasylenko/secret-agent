@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -21,6 +20,9 @@ import (
 
 // defaultStreamReadChunk is used when MaxBytes is unset (0): each stream poll reads up to this many bytes.
 const defaultMaxBytes = 1 << 10
+
+// DefaultStdioPollDuration is the maximum time a process/io round may block per stream read.
+const DefaultMaxPollDuration = 5 * time.Second
 
 type Controller struct {
 	secretStore  store.Secrets
@@ -94,17 +96,17 @@ func (c *Controller) buildHandler(registerHandler func(pattern string, handler h
 		auth.Permissions{auth.Secrets: auth.Write, auth.Instances: auth.Write},
 		c.createOperation,
 	))
-	registerHandler("GET /secrets/{secretId}/instances/{instanceId}/operations/{opNumber}/await", c.middleware(
-		auth.Permissions{auth.Instances: auth.Write},
-		c.awaitOperation,
+	registerHandler("GET /secrets/{secretId}/instances/{instanceId}/operations/{opNumber}/result", c.middleware(
+		auth.Permissions{auth.Instances: auth.Read},
+		c.operationResult,
 	))
-	registerHandler("GET /secrets/{secretId}/instances/{instanceId}/operations/{opNumber}/stdout", c.middleware(
+	registerHandler("DELETE /secrets/{secretId}/instances/{instanceId}/operations/{opNumber}/process", c.middleware(
 		auth.Permissions{auth.Instances: auth.Write},
-		c.streamStdout,
+		c.cancelOperation,
 	))
-	registerHandler("GET /secrets/{secretId}/instances/{instanceId}/operations/{opNumber}/stderr", c.middleware(
-		auth.Permissions{auth.Instances: auth.Write},
-		c.streamStderr,
+	registerHandler("POST /secrets/{secretId}/instances/{instanceId}/operations/{opNumber}/process/io", c.middleware(
+		auth.Permissions{auth.Instances: auth.Read},
+		c.exchangeStdio,
 	))
 }
 
@@ -131,7 +133,7 @@ func (s *Controller) listInstances(w http.ResponseWriter, r *http.Request) {
 	secretId := r.PathValue("secretId")
 	instances := s.secretStore.Instances(secretId)
 	from, to, err := parseRange(r)
-	insts, err := instances.List(r.Context(), from, to)
+	insts, err := instances.List(r.Context(), int(from), int(to))
 	if err != nil {
 		writeError(w, NewErrorResponse(http.StatusBadRequest, err))
 		return
@@ -161,14 +163,19 @@ func (s *Controller) createInstance(w http.ResponseWriter, r *http.Request) {
 	}
 	stdout := s.newStream()
 	stderr := s.newStream()
-	stdio := command.Stdio{Stdin: operationParameters.Input, Stdout: stdout, Stderr: stderr}
+	stdin := s.newStream()
+	stdio := command.Stdio{
+		Stdin:  stdin,
+		Stdout: stdout,
+		Stderr: stderr,
+	}
 	instance, err := instances.Create(r.Context(), parameters, stdio)
 	if err != nil {
-		closeOperationStreams(stdout, stderr)
+		closeOperationStreams(stdout, stderr, stdin)
 		writeError(w, err)
 		return
 	}
-	s.trackOperation(stdout, stderr, identity.Principal, instances, instance)
+	s.trackOperation(identity.Principal, instance, stdout, stderr, stdin)
 	writeResult(w, instance, http.StatusOK)
 }
 
@@ -226,8 +233,12 @@ func (s *Controller) createOperation(w http.ResponseWriter, r *http.Request) {
 
 	stdout := s.newStream()
 	stderr := s.newStream()
-	stdio := command.Stdio{Stdin: operationParameters.Input, Stdout: stdout, Stderr: stderr}
-
+	stdin := s.newStream()
+	stdio := command.Stdio{
+		Stdin:  stdin,
+		Stdout: stdout,
+		Stderr: stderr,
+	}
 	var instance *secrets.Instance
 	switch operationParameters.Name {
 	case secrets.Activate:
@@ -239,34 +250,46 @@ func (s *Controller) createOperation(w http.ResponseWriter, r *http.Request) {
 	case secrets.Test:
 		instance, err = instances.Test(r.Context(), instanceId, parameters, stdio)
 	default:
-		closeOperationStreams(stdout, stderr)
+		closeOperationStreams(stdout, stderr, stdin)
 		writeError(w, NewErrorResponse(http.StatusBadRequest, fmt.Errorf("Cannot post operation %s", operationParameters.Name)))
 		return
 	}
 	if err != nil {
-		closeOperationStreams(stdout, stderr)
+		closeOperationStreams(stdout, stderr, stdin)
 		writeError(w, err)
 		return
 	}
 
-	s.trackOperation(stdout, stderr, identity.Principal, instances, instance)
+	s.trackOperation(identity.Principal, instance, stdout, stderr, stdin)
 	writeResult(w, instance, http.StatusOK)
 }
 
-func (s *Controller) trackOperation(stdout Stream, stderr Stream, startedBy string, instances store.Instances, instance *secrets.Instance) {
+func closeOperationStreams(stdout, stderr, stdin Stream) {
+	_ = stdout.Close()
+	_ = stderr.Close()
+	if stdin != nil {
+		_ = stdin.Close()
+	}
+}
+
+// register stream handles for an in-flight operation and close them once the store reports completion.
+func (s *Controller) trackOperation(startedBy string, instance *secrets.Instance, stdout, stderr, stdin Stream) {
 	op := &operation{
 		Stdout:    stdout,
 		Stderr:    stderr,
+		Stdin:     stdin,
 		startedBy: startedBy,
+		done:      make(chan struct{}),
 	}
 	opNumber := instance.Status.OperationNumber
 	key := operationMapKey{secretId: instance.Secret.Id, instanceId: instance.Id, operationNumber: opNumber}
 	s.operations.Store(key, op)
+
 	go func() {
-		_, err := instances.Await(context.Background(), instance.Id, opNumber)
-		var staleErr *store.StaleOperationError
-		if !errors.As(err, &staleErr) {
-			log.Printf("error awaiting operation %d: %v", opNumber, err)
+		defer close(op.done)
+		instances := s.secretStore.Instances(instance.Secret.Id)
+		if _, err := instances.Await(context.Background(), instance.Id, opNumber); err != nil {
+			log.Printf("operation %d await: %v", opNumber, err)
 		}
 		if err := stdout.Close(); err != nil {
 			log.Printf("error closing stdout: %v", err)
@@ -274,23 +297,47 @@ func (s *Controller) trackOperation(stdout Stream, stderr Stream, startedBy stri
 		if err := stderr.Close(); err != nil {
 			log.Printf("error closing stderr: %v", err)
 		}
+		if err := stdin.Close(); err != nil {
+			log.Printf("error closing stdin: %v", err)
+		}
 		time.AfterFunc(s.operationTtl, func() {
 			s.operations.Delete(key)
 		})
 	}()
 }
 
-func (s *Controller) awaitOperation(w http.ResponseWriter, r *http.Request) {
+func (s *Controller) operationResult(w http.ResponseWriter, r *http.Request) {
 	secretId := r.PathValue("secretId")
 	instanceId := r.PathValue("instanceId")
-	opNumber, err := parseNumber(r, "opNumber", nil)
+	opNumber, err := parsePath(r, "opNumber", strconv.Atoi)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
 
+	key := operationMapKey{secretId: secretId, instanceId: instanceId, operationNumber: opNumber}
+	load, ok := s.operations.Load(key)
+
+	maxWait, err := parseQuery(r, "maxWait", time.ParseDuration, DefaultMaxPollDuration)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), maxWait)
+	defer cancel()
+
+	if ok {
+		op := load.(*operation)
+		select {
+		case <-op.done:
+		case <-ctx.Done():
+			writeError(w, NewErrorResponse(http.StatusRequestTimeout, ctx.Err()))
+			return
+		}
+	}
+
 	instances := s.secretStore.Instances(secretId)
-	instance, err := instances.Await(r.Context(), instanceId, opNumber)
+	instance, err := instances.Await(ctx, instanceId, opNumber)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -298,18 +345,27 @@ func (s *Controller) awaitOperation(w http.ResponseWriter, r *http.Request) {
 	writeResult(w, instance, http.StatusOK)
 }
 
-func (s *Controller) streamStdout(w http.ResponseWriter, r *http.Request) {
-	s.handleStream(w, r, func(op *operation) Stream { return op.Stdout })
-}
-
-func (s *Controller) streamStderr(w http.ResponseWriter, r *http.Request) {
-	s.handleStream(w, r, func(op *operation) Stream { return op.Stderr })
-}
-
-func (s *Controller) handleStream(w http.ResponseWriter, r *http.Request, pickStream func(*operation) Stream) {
+func (s *Controller) cancelOperation(w http.ResponseWriter, r *http.Request) {
 	secretId := r.PathValue("secretId")
 	instanceId := r.PathValue("instanceId")
-	opNumber, err := parseNumber(r, "opNumber", nil)
+	opNumber, err := parsePath(r, "opNumber", strconv.Atoi)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+
+	instances := s.secretStore.Instances(secretId)
+	if err := instances.Cancel(r.Context(), instanceId, opNumber); err != nil {
+		writeError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Controller) exchangeStdio(w http.ResponseWriter, r *http.Request) {
+	secretId := r.PathValue("secretId")
+	instanceId := r.PathValue("instanceId")
+	opNumber, err := parsePath(r, "opNumber", strconv.Atoi)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -332,52 +388,76 @@ func (s *Controller) handleStream(w http.ResponseWriter, r *http.Request, pickSt
 		return
 	}
 
-	fromByte, _ := parseInt(r, "fromByte", 0)
-	maxBytes, err := parseInt(r, "maxBytes", s.maxBytes)
+	var req ExchangeIORequest
+	if err := readBody(r, &req); err != nil {
+		writeError(w, err)
+		return
+	}
+
+	maxBytes, err := parseQueryInt(r, "maxBytes", int64(s.maxBytes))
 	if err != nil {
 		writeError(w, err)
 		return
 	}
 	if maxBytes <= 0 {
-		maxBytes = s.maxBytes
+		maxBytes = int64(s.maxBytes)
 	}
-	maxWait := parseDuration(r, "maxWait", 5*time.Second)
+	maxWait, err := parseQuery(r, "maxWait", time.ParseDuration, DefaultMaxPollDuration)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+
+	var resp ExchangeIOResponse
+
+	if req.Stdin != nil {
+		if len(req.Stdin.Bytes) > 0 {
+			if err := validateStdinChunk(req.Stdin.Index, req.Stdin.Bytes, maxBytes); err != nil {
+				writeError(w, err)
+				return
+			}
+			if _, err := op.Stdin.AsyncWriter().WriteAt(req.Stdin.Bytes, req.Stdin.Index); err != nil {
+				writeError(w, NewErrorResponse(http.StatusInternalServerError, err))
+				return
+			}
+		}
+		if req.Stdin.Closed {
+			_ = op.Stdin.Close()
+		}
+		resp.Stdin = &ExchangeIndex{Index: req.Stdin.Index + int64(len(req.Stdin.Bytes))}
+		// Return promptly after stdin is delivered so the client can read more input.
+		maxWait = 0
+	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), maxWait)
 	defer cancel()
-	writeBytes(ctx, w, pickStream(op), fromByte, maxBytes)
-}
 
-func closeOperationStreams(stdout Stream, stderr Stream) {
-	_ = stdout.Close()
-	_ = stderr.Close()
-}
-
-func parseNumber(r *http.Request, param string, defaultValue *int) (int, error) {
-	s := r.PathValue(param)
-	if s == "" {
-		if defaultValue == nil {
-			return 0, NewErrorResponse(http.StatusBadRequest, fmt.Errorf("missing required parameter: %s", param))
-		}
-		return *defaultValue, nil
+	var stdoutFrom int64
+	if req.Stdout != nil {
+		stdoutFrom = req.Stdout.Index
 	}
-	n, err := strconv.Atoi(s)
+	stdout, err := readStreamChunk(ctx, op.Stdout, stdoutFrom, maxBytes)
 	if err != nil {
-		return 0, NewErrorResponse(http.StatusBadRequest, fmt.Errorf("invalid operation number: %s", s))
+		writeError(w, err)
+		return
 	}
-	return n, nil
-}
-
-func parseDuration(r *http.Request, param string, defaultValue time.Duration) time.Duration {
-	s := r.URL.Query().Get(param)
-	if s == "" {
-		return defaultValue
+	resp.Stdout = exchangeStreamOut(stdoutFrom, stdout)
+	var stderrFrom int64
+	if req.Stderr != nil {
+		stderrFrom = req.Stderr.Index
 	}
-	d, err := time.ParseDuration(s)
+	chunk, err := readStreamChunk(ctx, op.Stderr, stderrFrom, maxBytes)
 	if err != nil {
-		return defaultValue
+		writeError(w, err)
+		return
 	}
-	return d
+	resp.Stderr = exchangeStreamOut(stderrFrom, chunk)
+
+	if code := op.processExitCode(); code != nil {
+		resp.ExitCode = code
+	}
+
+	writeResult(w, resp, http.StatusOK)
 }
 
 func readBody(r *http.Request, v any) error {
@@ -391,23 +471,42 @@ func readBody(r *http.Request, v any) error {
 	return nil
 }
 
-func parseRange(r *http.Request) (int, int, error) {
-	from, err := parseInt(r, "from", 32)
+func parseRange(r *http.Request) (int64, int64, error) {
+	from, err := parseQueryInt(r, "from", 32)
 	if err != nil {
 		return from, 0, err
 	}
-	to, err := parseInt(r, "to", 32)
+	to, err := parseQueryInt(r, "to", 32)
 	return from, to, err
 }
 
-func parseInt(r *http.Request, name string, defaultValue int) (int, error) {
-	numString := r.URL.Query().Get(name)
-	if numString == "" {
+func parseQueryInt(r *http.Request, name string, defaultValue int64) (int64, error) {
+	return parseQuery(r, name, func(s string) (int64, error) { return strconv.ParseInt(s, 10, 32) }, defaultValue)
+}
+
+func parseQuery[T any](r *http.Request, name string, parser func(s string) (T, error), defaultValue T) (T, error) {
+	valueString := r.URL.Query().Get(name)
+	if valueString == "" {
 		return defaultValue, nil
 	}
-	num, err := strconv.ParseInt(numString, 10, 32)
+	value, err := parser(valueString)
 	if err != nil {
-		return 0, NewErrorResponse(http.StatusBadRequest, fmt.Errorf("failed to parse '%s' - %w", name, err))
+		var empty T
+		return empty, NewErrorResponse(http.StatusBadRequest, fmt.Errorf("failed to parse '%s' - %w", name, err))
 	}
-	return int(num), nil
+	return value, nil
+}
+
+func parsePath[T any](r *http.Request, name string, parser func(s string) (T, error)) (T, error) {
+	numString := r.PathValue(name)
+	if numString == "" {
+		var empty T
+		return empty, NewErrorResponse(http.StatusBadRequest, fmt.Errorf("missing required parameter: %s", name))
+	}
+	value, err := parser(numString)
+	if err != nil {
+		var empty T
+		return empty, NewErrorResponse(http.StatusBadRequest, fmt.Errorf("failed to parse '%s' - %w", name, err))
+	}
+	return value, nil
 }

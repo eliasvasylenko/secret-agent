@@ -20,19 +20,22 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
-// An instance store implementation backed by sqlite
-type SecretRespository struct {
-	db           *sql.DB
-	secrets      secrets.Secrets
-	maxReasonLen int
-
-	mu         sync.Mutex
-	operations map[int]*operationRuntime
+type operationKey struct {
+	instanceId      string
+	operationNumber int
 }
 
-// operationRuntime tracks a running async operation so Await can join it.
 type operationRuntime struct {
-	done chan struct{}
+	done   chan struct{}
+	cancel context.CancelFunc
+}
+
+// An instance store implementation backed by sqlite
+type SecretRespository struct {
+	db            *sql.DB
+	secrets       secrets.Secrets
+	maxReasonLen  int
+	instanceRepos sync.Map
 }
 
 type InstanceRepository struct {
@@ -40,7 +43,9 @@ type InstanceRepository struct {
 	secretId     string
 	secret       *secrets.Secret
 	maxReasonLen int
-	tracker      *SecretRespository
+
+	mu         sync.Mutex
+	operations map[operationKey]*operationRuntime
 }
 
 func NewSecretRepository(ctx context.Context, dbFile string, secrets secrets.Secrets, debug bool, maxReasonLen int) (*SecretRespository, error) {
@@ -103,7 +108,6 @@ func NewSecretRepository(ctx context.Context, dbFile string, secrets secrets.Sec
 		db:           db,
 		secrets:      secrets,
 		maxReasonLen: maxReasonLen,
-		operations:   make(map[int]*operationRuntime),
 	}, nil
 }
 
@@ -174,14 +178,19 @@ func (s *SecretRespository) History(ctx context.Context, secretId string, startA
 }
 
 func (s *SecretRespository) Instances(secretId string) *InstanceRepository {
+	if v, ok := s.instanceRepos.Load(secretId); ok {
+		return v.(*InstanceRepository)
+	}
 	secret := s.secrets[secretId]
-	return &InstanceRepository{
+	repo := &InstanceRepository{
 		db:           s.db,
 		secretId:     secretId,
 		secret:       secret,
 		maxReasonLen: s.maxReasonLen,
-		tracker:      s,
+		operations:   make(map[operationKey]*operationRuntime),
 	}
+	actual, _ := s.instanceRepos.LoadOrStore(secretId, repo)
+	return actual.(*InstanceRepository)
 }
 
 func (i *InstanceRepository) List(ctx context.Context, from int, to int) (secrets.Instances, error) {
@@ -350,7 +359,7 @@ func (i *InstanceRepository) Create(ctx context.Context, parameters executor.Ope
 		Secret: *i.secret,
 	}
 
-	i.launchAsync(operation, instance, parameters, stdio)
+	i.launchAsync(instance, operation, parameters, stdio)
 	return instance, nil
 }
 
@@ -450,33 +459,32 @@ func (i *InstanceRepository) startUpdateOperation(ctx context.Context, instanceI
 		Secret: secretPlan,
 	}
 
-	i.launchAsync(operation, instance, parameters, stdio)
+	i.launchAsync(instance, operation, parameters, stdio)
 	return instance, nil
 }
 
-// launchAsync registers the operation and runs completeOperation in a background goroutine.
-func (i *InstanceRepository) launchAsync(operation secrets.Operation, instance *secrets.Instance, parameters executor.OperationParameters, stdio command.Stdio) {
-	rt := &operationRuntime{done: make(chan struct{})}
-	i.tracker.mu.Lock()
-	i.tracker.operations[operation.OperationNumber] = rt
-	i.tracker.mu.Unlock()
+func (i *InstanceRepository) launchAsync(instance *secrets.Instance, operation secrets.Operation, parameters executor.OperationParameters, stdio command.Stdio) {
+	execCtx, cancel := context.WithCancel(context.Background())
+	rt := &operationRuntime{done: make(chan struct{}), cancel: cancel}
+	key := operationKey{instance.Id, operation.OperationNumber}
+	i.mu.Lock()
+	i.operations[key] = rt
+	i.mu.Unlock()
 
-	// Copy fields needed by the goroutine to avoid capturing the InstanceRepository.
 	db := i.db
 	secretId := i.secretId
-
+	inst := instance
 	go func() {
 		defer close(rt.done)
-		// Use a detached context so the operation outlives the originating request.
-		completeOperation(context.Background(), db, secretId, instance, operation, parameters, stdio)
+		completeOperation(execCtx, db, secretId, inst, operation, parameters, stdio)
 	}()
 }
 
 func (i *InstanceRepository) Await(ctx context.Context, instanceId string, operationNumber int) (*secrets.Instance, error) {
-	// Check for a tracked in-process operation and wait for it.
-	i.tracker.mu.Lock()
-	rt := i.tracker.operations[operationNumber]
-	i.tracker.mu.Unlock()
+	key := operationKey{instanceId, operationNumber}
+	i.mu.Lock()
+	rt := i.operations[key]
+	i.mu.Unlock()
 
 	if rt != nil {
 		select {
@@ -486,19 +494,42 @@ func (i *InstanceRepository) Await(ctx context.Context, instanceId string, opera
 		}
 	}
 
-	// Read the latest operation for this instance from the DB.
 	instance, err := i.Get(ctx, instanceId)
 	if err != nil {
 		return nil, err
 	}
-
-	if instance.Status.OperationNumber != operationNumber {
+	if instance.Status.OperationNumber < operationNumber {
+		return instance, &store.UnknownOperationError{
+			Expected: operationNumber,
+			Latest:   instance.Status.OperationNumber,
+		}
+	}
+	if instance.Status.OperationNumber > operationNumber {
 		return instance, &store.StaleOperationError{
 			Expected: operationNumber,
 			Latest:   instance.Status.OperationNumber,
 		}
 	}
 	return instance, nil
+}
+
+func (i *InstanceRepository) Cancel(ctx context.Context, instanceId string, operationNumber int) error {
+	key := operationKey{instanceId, operationNumber}
+	i.mu.Lock()
+	rt := i.operations[key]
+	i.mu.Unlock()
+
+	if rt != nil {
+		rt.cancel()
+		select {
+		case <-rt.done:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	return fmt.Errorf("operation %d not running", operationNumber)
 }
 
 func startOperation(ctx context.Context, tx *sql.Tx, secretId string, instanceId string, operationName secrets.OperationName, paramaters executor.OperationParameters) (secrets.Operation, error) {

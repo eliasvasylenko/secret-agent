@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
-	"strings"
 
 	"github.com/eliasvasylenko/secret-agent/internal/marshal"
 )
@@ -25,7 +24,7 @@ type Command struct {
 }
 
 type Stdio struct {
-	Stdin  string
+	Stdin  io.Reader
 	Stdout io.Writer
 	Stderr io.Writer
 }
@@ -73,7 +72,7 @@ func (c *Command) Process(ctx context.Context, stdio Stdio, environment Environm
 	subProcess.Env = append(subProcess.Env, env.Render()...)
 	c.CommandOptions.Apply(subProcess)
 
-	subProcess.Stdin = strings.NewReader(stdio.Stdin)
+	subProcess.Stdin = stdio.Stdin
 	subProcess.Stdout = stdio.Stdout
 	subProcess.Stderr = stdio.Stderr
 

@@ -28,8 +28,20 @@ type StreamResponse struct {
 	Complete bool   `json:"complete"`
 }
 
+// StdioResponse is returned by POST .../operations/{opNumber}/stdio.
+type StdioResponse struct {
+	Stdout StreamResponse `json:"stdout"`
+	Stderr StreamResponse `json:"stderr"`
+}
+
 func NewErrorResponse(code int, err error) *ErrorResponse {
-	return &ErrorResponse{HttpError: &httpError{Code: code, Message: err.Error()}, Headers: make(map[string]string)}
+	var message string
+	if err != nil {
+		message = err.Error()
+	} else {
+		message = http.StatusText(code)
+	}
+	return &ErrorResponse{HttpError: &httpError{Code: code, Message: message}, Headers: make(map[string]string)}
 }
 
 func (r *ErrorResponse) Error() string {
@@ -68,13 +80,18 @@ func writeError(w http.ResponseWriter, err error) error {
 	return writeResult(w, response, response.HttpError.Code)
 }
 
-func writeBytes(ctx context.Context, w http.ResponseWriter, stream Stream, fromByte int, maxBytes int) error {
+func readStreamChunk(ctx context.Context, stream Stream, fromByte int64, maxBytes int64) (StreamResponse, error) {
 	data := make([]byte, maxBytes)
-	reader := stream.Reader(ctx)
-	n, err := reader.ReadAt(data, int64(fromByte))
-	if err != nil && err != io.EOF {
-		return writeError(w, err)
+	reader := stream.AsyncReader(ctx)
+	n, err := reader.ReadAt(data, fromByte)
+	if err == io.EOF {
+		return StreamResponse{Data: data[:n], Complete: true}, nil
 	}
-	response := StreamResponse{Data: data[:n], Complete: err == io.EOF}
-	return writeResult(w, response, http.StatusOK)
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return StreamResponse{Data: data[:n], Complete: false}, nil
+	}
+	if err != nil {
+		return StreamResponse{}, err
+	}
+	return StreamResponse{Data: data[:n], Complete: false}, nil
 }

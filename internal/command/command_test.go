@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -170,7 +171,7 @@ func TestProcess(t *testing.T) {
 				Shell:       tc.shell,
 			}
 			var stdout bytes.Buffer
-			stdio := Stdio{Stdin: tc.expectedInput, Stdout: &stdout, Stderr: io.Discard}
+			stdio := Stdio{Stdin: strings.NewReader(tc.expectedInput), Stdout: &stdout, Stderr: io.Discard}
 			err := command.Process(context.Background(), stdio, Environment{})
 			if err != nil {
 				t.Errorf("unexpected error '%v'", err)

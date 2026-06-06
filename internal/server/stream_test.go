@@ -12,7 +12,7 @@ func TestStream_WriteAndReadAt(t *testing.T) {
 	s := newStream()
 	s.Write([]byte("hello world"))
 
-	reader := s.Reader(context.Background())
+	reader := s.AsyncReader(context.Background())
 	buf := make([]byte, 11)
 	n, err := reader.ReadAt(buf, 0)
 	if err != nil {
@@ -30,7 +30,7 @@ func TestStream_ReadAtOffset(t *testing.T) {
 	s := newStream()
 	s.Write([]byte("hello world"))
 
-	reader := s.Reader(context.Background())
+	reader := s.AsyncReader(context.Background())
 	buf := make([]byte, 5)
 	n, err := reader.ReadAt(buf, 6)
 	if err != nil {
@@ -46,7 +46,7 @@ func TestStream_ReadAtOffset(t *testing.T) {
 
 func TestStream_ReadAtBlocksUntilWrite(t *testing.T) {
 	s := newStream()
-	reader := s.Reader(context.Background())
+	reader := s.AsyncReader(context.Background())
 
 	var (
 		mu      sync.Mutex
@@ -95,7 +95,7 @@ func TestStream_ReadAtBlocksUntilWrite(t *testing.T) {
 
 func TestStream_ReadAtBlocksUntilClose(t *testing.T) {
 	s := newStream()
-	reader := s.Reader(context.Background())
+	reader := s.AsyncReader(context.Background())
 
 	done := make(chan struct{})
 	var gotErr error
@@ -129,7 +129,7 @@ func TestStream_ReadAtBlocksUntilClose(t *testing.T) {
 func TestStream_ReadAtBlocksUntilContextCancel(t *testing.T) {
 	s := newStream()
 	ctx, cancel := context.WithCancel(context.Background())
-	reader := s.Reader(ctx)
+	reader := s.AsyncReader(ctx)
 
 	done := make(chan struct{})
 	var gotN int
@@ -169,7 +169,7 @@ func TestStream_ReadAtReturnsEOFWhenClosed(t *testing.T) {
 	s.Write([]byte("data"))
 	s.Close()
 
-	reader := s.Reader(context.Background())
+	reader := s.AsyncReader(context.Background())
 	buf := make([]byte, 10)
 	n, err := reader.ReadAt(buf, 0)
 	if err != io.EOF {
@@ -185,7 +185,7 @@ func TestStream_ReadAtPastEndOfClosedStream(t *testing.T) {
 	s.Write([]byte("data"))
 	s.Close()
 
-	reader := s.Reader(context.Background())
+	reader := s.AsyncReader(context.Background())
 	buf := make([]byte, 10)
 	n, err := reader.ReadAt(buf, 100)
 	if err != io.EOF {
@@ -201,7 +201,7 @@ func TestStream_MultipleWrites(t *testing.T) {
 	s.Write([]byte("hello "))
 	s.Write([]byte("world"))
 
-	reader := s.Reader(context.Background())
+	reader := s.AsyncReader(context.Background())
 	buf := make([]byte, 20)
 	n, err := reader.ReadAt(buf, 0)
 	if err != nil {
@@ -214,7 +214,7 @@ func TestStream_MultipleWrites(t *testing.T) {
 
 func TestStream_IncrementalRead(t *testing.T) {
 	s := newStream()
-	reader := s.Reader(context.Background())
+	reader := s.AsyncReader(context.Background())
 
 	s.Write([]byte("first"))
 
@@ -271,7 +271,7 @@ func TestStream_ConcurrentReaders(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			reader := s.Reader(context.Background())
+			reader := s.AsyncReader(context.Background())
 			buf := make([]byte, 10)
 			n, err := reader.ReadAt(buf, 0)
 			if err != nil {
@@ -300,7 +300,7 @@ func TestStream_ReadSmallBuffer(t *testing.T) {
 	s := newStream()
 	s.Write([]byte("hello world"))
 
-	reader := s.Reader(context.Background())
+	reader := s.AsyncReader(context.Background())
 	buf := make([]byte, 3)
 	n, err := reader.ReadAt(buf, 0)
 	if err != nil {
@@ -315,7 +315,7 @@ func TestStream_ReadSmallBufferAtOffset(t *testing.T) {
 	s := newStream()
 	s.Write([]byte("hello world"))
 
-	reader := s.Reader(context.Background())
+	reader := s.AsyncReader(context.Background())
 	buf := make([]byte, 3)
 	n, err := reader.ReadAt(buf, 2)
 	if err != nil {
@@ -330,7 +330,7 @@ func TestStream_ReadLargeBuffer(t *testing.T) {
 	s := newStream()
 	s.Write([]byte("hello world"))
 
-	reader := s.Reader(context.Background())
+	reader := s.AsyncReader(context.Background())
 	buf := make([]byte, 12)
 	n, err := reader.ReadAt(buf, 0)
 	if err != nil {
@@ -346,7 +346,7 @@ func TestStream_ReadLargeBufferAtOffset(t *testing.T) {
 	s := newStream()
 	s.Write([]byte("hello world"))
 
-	reader := s.Reader(context.Background())
+	reader := s.AsyncReader(context.Background())
 	buf := make([]byte, 12)
 	n, err := reader.ReadAt(buf, 2)
 	if err != nil {
@@ -360,4 +360,65 @@ func TestStream_ReadLargeBufferAtOffset(t *testing.T) {
 
 func TestStream_ImplementsStreamInterface(t *testing.T) {
 	var _ Stream = newStream()
+}
+
+func TestStream_WriteAt_overlapping(t *testing.T) {
+	s := newStream()
+	w := s.AsyncWriter()
+	w.WriteAt([]byte("hello"), 0)
+	w.WriteAt([]byte("WORLD"), 5)
+
+	buf := make([]byte, 20)
+	n, err := io.ReadFull(s, buf[:10])
+	if err != nil && err != io.EOF {
+		t.Fatalf("Read: %v", err)
+	}
+	if string(buf[:n]) != "helloWORLD" {
+		t.Errorf("data = %q, want helloWORLD", buf[:n])
+	}
+}
+
+func TestStream_WriteAt_ignoresBelowBase(t *testing.T) {
+	s := newStream()
+	w := s.AsyncWriter()
+	w.WriteAt([]byte("data"), 0)
+
+	buf := make([]byte, 4)
+	io.ReadFull(s, buf)
+
+	n, err := w.WriteAt([]byte("ab"), 0)
+	if err != nil || n != 2 {
+		t.Errorf("stale write n=%d err=%v, want 2 nil", n, err)
+	}
+
+	w.WriteAt([]byte("x"), 4)
+	rest := make([]byte, 1)
+	if _, err := io.ReadFull(s, rest); err != nil || rest[0] != 'x' {
+		t.Errorf("after stale write, append read = %q err=%v, want x", rest, err)
+	}
+}
+
+func TestStream_WriteAt_retrySameOffset(t *testing.T) {
+	s := newStream()
+	w := s.AsyncWriter()
+	w.WriteAt([]byte("bad"), 0)
+	w.WriteAt([]byte("ok"), 0)
+
+	buf := make([]byte, 2)
+	n, _ := io.ReadFull(s, buf)
+	if string(buf[:n]) != "ok" {
+		t.Errorf("data = %q, want ok", buf[:n])
+	}
+}
+
+func TestStream_WriteAt_gapZeroFill(t *testing.T) {
+	s := newStream()
+	w := s.AsyncWriter()
+	w.WriteAt([]byte("z"), 5)
+
+	buf := make([]byte, 6)
+	n, _ := io.ReadFull(s, buf)
+	if string(buf[:n]) != "\x00\x00\x00\x00\x00z" {
+		t.Errorf("data = %q, want six bytes ending in z", buf[:n])
+	}
 }

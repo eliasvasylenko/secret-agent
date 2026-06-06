@@ -57,6 +57,9 @@ func (i *MockInstances) Test(ctx context.Context, instanceId string, parameters 
 func (i *MockInstances) Await(ctx context.Context, instanceId string, operationNumber int) (*secrets.Instance, error) {
 	return nextCall(&i.Mock, i.Await)(ctx, instanceId, operationNumber)
 }
+func (i *MockInstances) Cancel(ctx context.Context, instanceId string, operationNumber int) error {
+	return nextCall(&i.Mock, i.Cancel)(ctx, instanceId, operationNumber)
+}
 func (i *MockInstances) History(ctx context.Context, instanceId string, from int, to int) ([]*secrets.Operation, error) {
 	return nextCall(&i.Mock, i.History)(ctx, instanceId, from, to)
 }

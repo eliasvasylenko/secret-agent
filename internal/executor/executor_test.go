@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 	"testing"
 
 	"github.com/eliasvasylenko/secret-agent/internal/command"
@@ -16,12 +17,23 @@ type processCommandCall struct {
 	Env    command.Environment
 }
 
+func stdinString(r io.Reader) string {
+	if r == nil {
+		return ""
+	}
+	b, err := io.ReadAll(r)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
 func TestExecute(t *testing.T) {
 	ctx := context.Background()
 	var call processCommandCall
 	saved := processCommand
 	processCommand = func(cmd *command.Command, _ context.Context, stdio command.Stdio, env command.Environment) error {
-		call = processCommandCall{Script: cmd.Script, Stdin: stdio.Stdin, Env: env}
+		call = processCommandCall{Script: cmd.Script, Stdin: stdinString(stdio.Stdin), Env: env}
 		return nil
 	}
 	defer func() { processCommand = saved }()
@@ -54,7 +66,7 @@ func TestExecute_withEnv(t *testing.T) {
 	var call processCommandCall
 	saved := processCommand
 	processCommand = func(cmd *command.Command, _ context.Context, stdio command.Stdio, env command.Environment) error {
-		call = processCommandCall{Script: cmd.Script, Stdin: stdio.Stdin, Env: env}
+		call = processCommandCall{Script: cmd.Script, Stdin: stdinString(stdio.Stdin), Env: env}
 		return nil
 	}
 	defer func() { processCommand = saved }()
@@ -67,7 +79,7 @@ func TestExecute_withEnv(t *testing.T) {
 		Reason:    "test",
 		StartedBy: "tests",
 	}
-	stdio := command.Stdio{Stdin: "stdin", Stdout: io.Discard, Stderr: io.Discard}
+	stdio := command.Stdio{Stdin: strings.NewReader("stdin"), Stdout: io.Discard, Stderr: io.Discard}
 	err := Execute(ctx, s, secrets.Create, stdio, params, "inst-1")
 	if err != nil {
 		t.Fatalf("Execute with env: %v", err)
@@ -127,7 +139,7 @@ func TestExecute_returnsCommandError(t *testing.T) {
 func TestExecute_noCommand(t *testing.T) {
 	ctx := context.Background()
 	s := &secrets.Secret{Id: "leaf"}
-	stdio := command.Stdio{Stdin: "input", Stdout: io.Discard, Stderr: io.Discard}
+	stdio := command.Stdio{Stdin: strings.NewReader("input"), Stdout: io.Discard, Stderr: io.Discard}
 	err := Execute(ctx, s, secrets.Create, stdio, OperationParameters{}, "id")
 	if err != nil {
 		t.Errorf("Execute with no command for op should succeed (no-op): %v", err)

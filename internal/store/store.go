@@ -33,48 +33,49 @@ type Instances interface {
 	// Read the active instance of the secret
 	GetActive(ctx context.Context) (*secrets.Instance, error)
 
-	// Start creating a new instance. Returns immediately after the operation is recorded;
-	// the command runs asynchronously with output delivered via stdio.
+	// Create a new instance of the secret, returning immediately when the operation is started
 	Create(ctx context.Context, parameters executor.OperationParameters, stdio command.Stdio) (*secrets.Instance, error)
 
-	// Start destroying an instance. Returns immediately; command runs asynchronously.
+	// Destroy an instance of the secret, returning immediately when the operation is started
 	Destroy(ctx context.Context, instanceId string, parameters executor.OperationParameters, stdio command.Stdio) (*secrets.Instance, error)
 
-	// Start activating an instance. Returns immediately; command runs asynchronously.
+	// Activate an instance of the secret, returning immediately when the operation is started
 	Activate(ctx context.Context, instanceId string, parameters executor.OperationParameters, stdio command.Stdio) (*secrets.Instance, error)
 
-	// Start deactivating an instance. Returns immediately; command runs asynchronously.
+	// Deactivate an instance of the secret, returning immediately when the operation is started
 	Deactivate(ctx context.Context, instanceId string, parameters executor.OperationParameters, stdio command.Stdio) (*secrets.Instance, error)
 
-	// Start testing an instance. Returns immediately; command runs asynchronously.
+	// Test an instance of the secret, returning immediately when the operation is started
 	Test(ctx context.Context, instanceId string, parameters executor.OperationParameters, stdio command.Stdio) (*secrets.Instance, error)
 
-	// Block until the operation identified by operationNumber completes (success or failure).
-	// If operationNumber is stale (a newer operation exists), returns the latest instance and a *StaleOperationError.
+	// Await the completion of an operation, blocking until the operation is completed or the context is cancelled
 	Await(ctx context.Context, instanceId string, operationNumber int) (*secrets.Instance, error)
 
-	// Read the operation history of a secret instance, from the given inclusive index, to the given exclusive index
+	// Cancel an operation, returning immediately when the operation is cancelled
+	Cancel(ctx context.Context, instanceId string, operationNumber int) error
+
+	// Read the operation history of an instance, from the given inclusive index, to the given exclusive index
 	History(ctx context.Context, instanceId string, from int, to int) ([]*secrets.Operation, error)
 }
 
-// StaleOperationError is returned by Await when the requested operation number
-// has been superseded by a newer operation on the same instance.
+// StaleOperationError is returned when the requested operation number has been
+// superseded by a newer operation on the same instance.
 type StaleOperationError struct {
-	Expected int
-	Latest   int
-}
-
-func (e *UnknownOperationError) Error() string {
-	return fmt.Sprintf("unknown operation: expected %d, latest is %d", e.Expected, e.Latest)
-}
-
-// UnknownOperationError is returned by Await when the requested operation number
-// has not been recorded yet.
-type UnknownOperationError struct {
 	Expected int
 	Latest   int
 }
 
 func (e *StaleOperationError) Error() string {
 	return fmt.Sprintf("stale operation: expected %d, latest is %d", e.Expected, e.Latest)
+}
+
+// UnknownOperationError is returned when the requested operation number has
+// not been recorded yet.
+type UnknownOperationError struct {
+	Expected int
+	Latest   int
+}
+
+func (e *UnknownOperationError) Error() string {
+	return fmt.Sprintf("unknown operation: expected %d, latest is %d", e.Expected, e.Latest)
 }

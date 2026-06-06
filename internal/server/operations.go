@@ -9,7 +9,6 @@ type OperationParameters struct {
 	Env    command.Environment `json:"env"`
 	Forced bool                `json:"forced"`
 	Reason string              `json:"reason"`
-	Input  string              `json:"input,omitempty"`
 }
 
 type CreateOperationParameters struct {

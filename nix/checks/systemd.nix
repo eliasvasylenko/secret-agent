@@ -88,6 +88,7 @@ pkgs.testers.runNixOSTest {
 
     start_all()
     machine.wait_for_unit("sockets.target")
+    machine.succeed("systemd-creds setup")
 
     with subtest("no creds"):
       machine.succeed("systemctl start credential-consumer")
