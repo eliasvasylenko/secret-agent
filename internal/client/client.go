@@ -4,12 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"strconv"
+	"sync"
 
 	"github.com/eliasvasylenko/secret-agent/internal/command"
 	"github.com/eliasvasylenko/secret-agent/internal/executor"
@@ -120,7 +120,7 @@ func (c *SecretClient) History(ctx context.Context, secretId string, from int, t
 	return Do[[]*secrets.Operation](c.client, req, err)
 }
 
-func (c *SecretClient) Instances(secretId string) *InstanceClient {
+func (c *SecretClient) Instances(secretId string) store.Instances {
 	return &InstanceClient{
 		parent:   c,
 		secretId: secretId,
@@ -169,7 +169,7 @@ func (c *InstanceClient) Create(ctx context.Context, parameters executor.Operati
 	if err != nil {
 		return nil, err
 	}
-	go c.runStdioExchange(ctx, instance, stdio)
+	go c.runAttach(ctx, instance, stdio)
 	return instance, nil
 }
 
@@ -207,179 +207,55 @@ func (c *InstanceClient) startOperation(ctx context.Context, instanceId string, 
 	if err != nil {
 		return nil, err
 	}
-	go c.runStdioExchange(ctx, instance, stdio)
+	go c.runAttach(ctx, instance, stdio)
 	return instance, nil
 }
 
-// runStdioExchange streams stdin to the server and copies stdout/stderr back
-// via POST .../operations/{opNumber}/process/io. The loop ends when server stdout
-// and stderr are complete (subprocess exited), matching normal pipe behaviour:
-// an open stdin at the client does not keep output streaming after the process ends.
-func (c *InstanceClient) runStdioExchange(ctx context.Context, instance *secrets.Instance, stdio command.Stdio) {
-	if stdio.Stdin == nil && stdio.Stdout == nil && stdio.Stderr == nil {
-		return
-	}
-
-	path := fmt.Sprintf("/secrets/%s/instances/%s/operations/%d/process/io",
+func (c *InstanceClient) runAttach(ctx context.Context, instance *secrets.Instance, stdio command.Stdio) {
+	base := fmt.Sprintf("/secrets/%s/instances/%s/operations/%d/attach",
 		c.secretId, instance.Id, instance.Status.OperationNumber)
 
-	stdinCh := make(chan []byte, 8)
-	if stdio.Stdin != nil {
+	var wg sync.WaitGroup
+	attachStream := func(stream string, direction attachDirection, rw io.ReadWriter) {
+		wg.Add(1)
 		go func() {
-			defer close(stdinCh)
-			buf := make([]byte, 4096)
-			for {
-				n, err := stdio.Stdin.Read(buf)
-				if n > 0 {
-					chunk := make([]byte, n)
-					copy(chunk, buf[:n])
-					stdinCh <- chunk
-				}
-				if err != nil {
-					return
-				}
+			defer wg.Done()
+			conn, err := upgradeAttach(ctx, c.parent.socket, base+"/"+stream)
+			if err != nil {
+				return
 			}
+			_ = copyAttach(ctx, conn, direction, rw)
 		}()
 	}
 
-	stdinCompleteSent := false
-	stdinTo := 0
-	stdoutFrom := 0
-	stderrFrom := 0
-	stdoutDone := false
-	stderrDone := false
-
-	for !stdoutDone || !stderrDone {
-		if ctx.Err() != nil {
-			return
-		}
-
-		reqBody := server.ExchangeIORequest{}
-		if !stdoutDone {
-			reqBody.Stdout = &server.ExchangeIndex{Index: int64(stdoutFrom)}
-		}
-		if !stderrDone {
-			reqBody.Stderr = &server.ExchangeIndex{Index: int64(stderrFrom)}
-		}
-
-		if !stdinCompleteSent {
-			select {
-			case chunk, ok := <-stdinCh:
-				if ok {
-					reqBody.Stdin = &server.ExchangeBytes{
-						Index: int64(stdinTo),
-						Bytes: chunk,
-					}
-				} else {
-					reqBody.Stdin = &server.ExchangeBytes{
-						Index:  int64(stdinTo),
-						Closed: true,
-					}
-					stdinCompleteSent = true
-				}
-			default:
-			}
-		}
-
-		req, err := BuildRequest(ctx, http.MethodPost, path, reqBody)
-		if err != nil {
-			return
-		}
-		query := req.URL.Query()
-		query.Set("maxWait", "5s")
-		req.URL.RawQuery = query.Encode()
-
-		resp, err := Do[server.ExchangeIOResponse](c.parent.client, req, err)
-		if err != nil {
-			return
-		}
-
-		if resp.Stdin != nil {
-			stdinTo = int(resp.Stdin.Index)
-		}
-
-		if resp.Stdout != nil {
-			if len(resp.Stdout.Bytes) > 0 && stdio.Stdout != nil {
-				stdio.Stdout.Write(resp.Stdout.Bytes)
-				stdoutFrom += len(resp.Stdout.Bytes)
-			}
-			if resp.Stdout.Closed {
-				stdoutDone = true
-			}
-		}
-
-		if resp.Stderr != nil {
-			if len(resp.Stderr.Bytes) > 0 && stdio.Stderr != nil {
-				stdio.Stderr.Write(resp.Stderr.Bytes)
-				stderrFrom += len(resp.Stderr.Bytes)
-			}
-			if resp.Stderr.Closed {
-				stderrDone = true
-			}
-		}
-	}
+	attachStream("stdin", attachWrite, newAttachReadWriter(stdio.Stdin, nil))
+	attachStream("stdout", attachRead, newAttachReadWriter(nil, stdio.Stdout))
+	attachStream("stderr", attachRead, newAttachReadWriter(nil, stdio.Stderr))
+	wg.Wait()
 }
 
-func (c *InstanceClient) Await(ctx context.Context, instanceId string, operationNumber int) (*secrets.Instance, error) {
-	maxWait := server.DefaultMaxPollDuration
-	path := fmt.Sprintf("/secrets/%s/instances/%s/operations/%d/result",
-		c.secretId, instanceId, operationNumber)
-	for {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		req, err := BuildRequest(ctx, http.MethodGet, path, nil)
-		if err != nil {
-			return nil, err
-		}
-		query := req.URL.Query()
-		query.Set("maxWait", maxWait.String())
-		req.URL.RawQuery = query.Encode()
-		instance, err := Do[*secrets.Instance](c.parent.client, req, nil)
-		if err == nil {
-			return instance, nil
-		}
-		var resp *server.ErrorResponse
-		if errors.As(err, &resp) && resp.HttpError != nil && resp.HttpError.Code == http.StatusRequestTimeout {
-			continue
-		}
-		return nil, err
-	}
+type attachReadWriter struct {
+	r io.Reader
+	w io.Writer
 }
 
-func (c *InstanceClient) Cancel(ctx context.Context, instanceId string, operationNumber int) error {
-	path := fmt.Sprintf("/secrets/%s/instances/%s/operations/%d/cancel",
-		c.secretId, instanceId, operationNumber)
-	req, err := BuildRequest(ctx, http.MethodDelete, path, nil)
-	if err != nil {
-		return err
-	}
-	resp, err := c.parent.client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		bodyBytes, _ := io.ReadAll(resp.Body)
-		var errorResponse server.ErrorResponse
-		if json.Unmarshal(bodyBytes, &errorResponse) == nil && errorResponse.HttpError != nil {
-			return &errorResponse
-		}
-		return server.NewErrorResponse(resp.StatusCode, nil)
-	}
-	return nil
+func newAttachReadWriter(r io.Reader, w io.Writer) io.ReadWriter {
+	return attachReadWriter{r: r, w: w}
 }
 
-func (c *InstanceClient) History(ctx context.Context, instanceId string, from int, to int) (operations []*secrets.Operation, err error) {
-	req, err := BuildRequest(ctx, http.MethodGet, "/secrets/"+c.secretId+"/instances/"+instanceId+"/operations", nil)
-	if err != nil {
-		return nil, err
+func (rw attachReadWriter) Read(p []byte) (int, error) {
+	if rw.r == nil {
+		return 0, io.EOF
 	}
-	query := req.URL.Query()
-	query.Set("from", strconv.FormatInt(int64(from), 10))
-	query.Set("to", strconv.FormatInt(int64(to), 10))
-	req.URL.RawQuery = query.Encode()
-	return Do[[]*secrets.Operation](c.parent.client, req, err)
+	return rw.r.Read(p)
 }
 
+func (rw attachReadWriter) Write(p []byte) (int, error) {
+	if rw.w == nil {
+		return len(p), nil
+	}
+	return rw.w.Write(p)
+}
+
+var _ store.Store = (*SecretClient)(nil)
 var _ store.Instances = (*InstanceClient)(nil)

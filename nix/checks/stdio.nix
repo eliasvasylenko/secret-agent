@@ -107,8 +107,10 @@ pkgs.testers.runNixOSTest {
     with subtest("interleaved stdin and stdout"):
       machine.succeed("rm -f /tmp/interleaved-out")
       machine.succeed("mkfifo /tmp/interleaved-in")
+      # Opening a fifo O_RDONLY via "< fifo" blocks until a writer exists; use
+      # O_RDWR (exec N<> fifo) so the shell can start secret-agent before payload.
       machine.succeed(
-        "secret-agent create interleaved < /tmp/interleaved-in > /tmp/interleaved-out 2>/dev/null &"
+        "bash -c 'exec 3<> /tmp/interleaved-in; secret-agent create interleaved 0<&3 > /tmp/interleaved-out 2>/dev/null & exec 3>&-'"
       )
       machine.wait_until_succeeds("grep -q before-read /tmp/interleaved-out")
       machine.fail("grep -q after-read /tmp/interleaved-out")

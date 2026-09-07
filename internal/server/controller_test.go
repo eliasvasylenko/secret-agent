@@ -3,12 +3,13 @@ package server
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -36,6 +37,21 @@ func expectStoreInstances(mockStore *mocks.MockSecrets, mockInstances *mocks.Moc
 	mocks.Expect(&mockStore.Mock, mockStore.Instances, fn)
 }
 
+func expectOperationAwait(mockInstances *mocks.MockInstances, mockOperations *mocks.MockOperations, execDone chan struct{}, instance *secrets.Instance, await func(context.Context, int) (store.Event, *secrets.Instance, error)) {
+	mocks.Expect(&mockInstances.Mock, mockInstances.Operations, func(instanceId string) store.Operations {
+		return mockOperations
+	})
+	if await == nil {
+		await = func(context.Context, int) (store.Event, *secrets.Instance, error) {
+			if execDone != nil {
+				defer close(execDone)
+			}
+			return store.NewCompletedEvent("", executor.OperationParameters{}), instance, nil
+		}
+	}
+	mocks.Expect(&mockOperations.Mock, mockOperations.Await, await)
+}
+
 type noopPermissions struct {
 	identity *auth.Identity
 }
@@ -49,9 +65,9 @@ func (p noopPermissions) Middleware(_ auth.Permissions, next http.Handler) http.
 	})
 }
 
-func newTestController(t *testing.T, store store.Secrets, identity *auth.Identity) (*Controller, *http.ServeMux) {
+func newTestController(t *testing.T, store store.Store, identity *auth.Identity) (*Controller, *http.ServeMux) {
 	t.Helper()
-	c := NewController(store, noopLimiter{}, noopPermissions{identity: identity}, 1024, 5*time.Minute)
+	c := NewController(store, noopLimiter{}, noopPermissions{identity: identity}, 5*time.Minute)
 	mux := http.NewServeMux()
 	c.buildHandler(mux.Handle)
 	return c, mux
@@ -182,6 +198,8 @@ func TestController_createInstance(t *testing.T) {
 	defer mockStore.Mock.Validate(t)
 	mockInstances := &mocks.MockInstances{}
 	defer mockInstances.Mock.Validate(t)
+	mockOperations := &mocks.MockOperations{}
+	defer mockOperations.Mock.Validate(t)
 	expectStoreInstances(mockStore, mockInstances)
 	execDone := make(chan struct{})
 	instance := &secrets.Instance{Id: "new-id", Secret: secrets.Secret{Id: "s1", Version: 1}, Status: secrets.Status{OperationNumber: 1}}
@@ -194,10 +212,7 @@ func TestController_createInstance(t *testing.T) {
 		}
 		return instance, nil
 	})
-	mocks.Expect(&mockInstances.Mock, mockInstances.Await, func(ctx context.Context, instanceId string, opNumber int) (*secrets.Instance, error) {
-		defer close(execDone)
-		return instance, nil
-	})
+	expectOperationAwait(mockInstances, mockOperations, execDone, instance, nil)
 
 	_, mux := newTestController(t, mockStore, &auth.Identity{Principal: "test-user"})
 
@@ -220,11 +235,13 @@ func TestController_createInstance(t *testing.T) {
 	<-execDone
 }
 
-func TestController_exchangeStdio_stdinReachesSubprocess(t *testing.T) {
+func TestController_attachProcess_stdinReachesSubprocess(t *testing.T) {
 	mockStore := &mocks.MockSecrets{}
 	defer mockStore.Mock.Validate(t)
 	mockInstances := &mocks.MockInstances{}
 	defer mockInstances.Mock.Validate(t)
+	mockOperations := &mocks.MockOperations{}
+	defer mockOperations.Mock.Validate(t)
 	expectStoreInstances(mockStore, mockInstances)
 	execDone := make(chan struct{})
 	stdinRead := make(chan struct{})
@@ -237,13 +254,15 @@ func TestController_exchangeStdio_stdinReachesSubprocess(t *testing.T) {
 		}()
 		return instance, nil
 	})
-	mocks.Expect(&mockInstances.Mock, mockInstances.Await, func(ctx context.Context, instanceId string, opNumber int) (*secrets.Instance, error) {
+	expectOperationAwait(mockInstances, mockOperations, execDone, instance, func(context.Context, int) (store.Event, *secrets.Instance, error) {
 		<-stdinRead
 		defer close(execDone)
-		return instance, nil
+		return store.NewCompletedEvent("", executor.OperationParameters{}), instance, nil
 	})
 
 	_, mux := newTestController(t, mockStore, &auth.Identity{Principal: "test-user"})
+	server := httptest.NewServer(mux)
+	defer server.Close()
 
 	createBody := `{"env":{},"forced":false,"reason":"create-reason"}`
 	rec := httptest.NewRecorder()
@@ -254,14 +273,27 @@ func TestController_exchangeStdio_stdinReachesSubprocess(t *testing.T) {
 		t.Fatalf("create status = %d, want 200\nbody: %s", rec.Code, rec.Body.Bytes())
 	}
 
-	stdioRec := httptest.NewRecorder()
-	stdioBody := `{"stdin":{"index":0,"bytes":"cGF5bG9hZA==","closed":true}}`
-	stdioReq := httptest.NewRequest(http.MethodPost, "http://test/secrets/sid/instances/new-id/operations/1/process/io", bytes.NewReader([]byte(stdioBody)))
-	stdioReq.Header.Set("Content-Type", "application/json")
-	stdioReq = stdioReq.WithContext(req.Context())
-	mux.ServeHTTP(stdioRec, stdioReq)
-	if stdioRec.Code != http.StatusOK {
-		t.Fatalf("stdio status = %d, want 200\nbody: %s", stdioRec.Code, stdioRec.Body.Bytes())
+	conn, err := net.Dial("tcp", strings.TrimPrefix(server.URL, "http://"))
+	if err != nil {
+		t.Fatalf("dial attach server: %v", err)
+	}
+
+	host := strings.TrimPrefix(server.URL, "http://")
+	attachPath := "/secrets/sid/instances/new-id/operations/1/attach/stdin"
+	payload := "payload"
+	attachReq := fmt.Sprintf(
+		"POST %s HTTP/1.1\r\nHost: %s\r\nConnection: Upgrade\r\nUpgrade: %s\r\nContent-Length: %d\r\n\r\n%s",
+		attachPath,
+		host,
+		AttachUpgradeProtocol,
+		len(payload),
+		payload,
+	)
+	if _, err := conn.Write([]byte(attachReq)); err != nil {
+		t.Fatalf("write attach request: %v", err)
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatalf("close attach conn: %v", err)
 	}
 
 	<-execDone
@@ -270,19 +302,20 @@ func TestController_exchangeStdio_stdinReachesSubprocess(t *testing.T) {
 	}
 }
 
-func TestController_exchangeStdio_rejectsOversizedStdin(t *testing.T) {
+func TestController_attachProcess_rejectsMissingUpgrade(t *testing.T) {
 	mockStore := &mocks.MockSecrets{}
 	defer mockStore.Mock.Validate(t)
 	mockInstances := &mocks.MockInstances{}
 	defer mockInstances.Mock.Validate(t)
+	mockOperations := &mocks.MockOperations{}
+	defer mockOperations.Mock.Validate(t)
 	expectStoreInstances(mockStore, mockInstances)
+	execDone := make(chan struct{})
 	instance := &secrets.Instance{Id: "new-id", Secret: secrets.Secret{Id: "sid", Version: 1}, Status: secrets.Status{OperationNumber: 1}}
 	mocks.Expect(&mockInstances.Mock, mockInstances.Create, func(context.Context, executor.OperationParameters, command.Stdio) (*secrets.Instance, error) {
 		return instance, nil
 	})
-	mocks.Expect(&mockInstances.Mock, mockInstances.Await, func(context.Context, string, int) (*secrets.Instance, error) {
-		return instance, nil
-	})
+	expectOperationAwait(mockInstances, mockOperations, execDone, instance, nil)
 
 	_, mux := newTestController(t, mockStore, &auth.Identity{Principal: "test-user"})
 
@@ -295,31 +328,13 @@ func TestController_exchangeStdio_rejectsOversizedStdin(t *testing.T) {
 		t.Fatalf("create status = %d, want 200", rec.Code)
 	}
 
-	tests := []struct {
-		name string
-		body string
-	}{
-		{
-			name: "chunk too large",
-			body: fmt.Sprintf(`{"stdin":{"index":0,"bytes":"%s"}}`, base64.StdEncoding.EncodeToString(bytes.Repeat([]byte("a"), 1025))),
-		},
-		{
-			name: "total stdin would exceed maxBytes",
-			body: fmt.Sprintf(`{"stdin":{"index":900,"bytes":"%s"}}`, base64.StdEncoding.EncodeToString(bytes.Repeat([]byte("b"), 200))),
-		},
+	attachRec := httptest.NewRecorder()
+	attachReq := httptest.NewRequest(http.MethodPost, "http://test/secrets/sid/instances/new-id/operations/1/attach/stdin", nil)
+	mux.ServeHTTP(attachRec, attachReq)
+	if attachRec.Code != http.StatusUpgradeRequired {
+		t.Fatalf("status = %d, want 426\nbody: %s", attachRec.Code, attachRec.Body.Bytes())
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			stdioRec := httptest.NewRecorder()
-			stdioReq := httptest.NewRequest(http.MethodPost, "http://test/secrets/sid/instances/new-id/operations/1/process/io", bytes.NewReader([]byte(tt.body)))
-			stdioReq.Header.Set("Content-Type", "application/json")
-			stdioReq = stdioReq.WithContext(req.Context())
-			mux.ServeHTTP(stdioRec, stdioReq)
-			if stdioRec.Code != http.StatusRequestEntityTooLarge {
-				t.Fatalf("status = %d, want 413\nbody: %s", stdioRec.Code, stdioRec.Body.Bytes())
-			}
-		})
-	}
+	<-execDone
 }
 
 func TestController_createOperation(t *testing.T) {
@@ -329,74 +344,62 @@ func TestController_createOperation(t *testing.T) {
 		name   string
 		opName secrets.OperationName
 		reason string
-		expect func(*mocks.MockInstances, string, chan struct{})
+		expect func(*mocks.MockInstances, *mocks.MockOperations, string, chan struct{})
 	}{
 		{
 			name:   "activate",
 			opName: secrets.Activate,
 			reason: "act-reason",
-			expect: func(m *mocks.MockInstances, reason string, execDone chan struct{}) {
+			expect: func(m *mocks.MockInstances, o *mocks.MockOperations, reason string, execDone chan struct{}) {
 				mocks.Expect(&m.Mock, m.Activate, func(ctx context.Context, instanceId string, params executor.OperationParameters, stdio command.Stdio) (*secrets.Instance, error) {
 					if instanceId != "i1" || params.Reason != reason {
 						t.Errorf("Activate instanceId=%q reason=%q", instanceId, params.Reason)
 					}
 					return instance, nil
 				})
-				mocks.Expect(&m.Mock, m.Await, func(context.Context, string, int) (*secrets.Instance, error) {
-					close(execDone)
-					return instance, nil
-				})
+				expectOperationAwait(m, o, execDone, instance, nil)
 			},
 		},
 		{
 			name:   "deactivate",
 			opName: secrets.Deactivate,
 			reason: "deact-reason",
-			expect: func(m *mocks.MockInstances, reason string, execDone chan struct{}) {
+			expect: func(m *mocks.MockInstances, o *mocks.MockOperations, reason string, execDone chan struct{}) {
 				mocks.Expect(&m.Mock, m.Deactivate, func(ctx context.Context, instanceId string, params executor.OperationParameters, stdio command.Stdio) (*secrets.Instance, error) {
 					if instanceId != "i1" || params.Reason != reason {
 						t.Errorf("Deactivate instanceId=%q reason=%q", instanceId, params.Reason)
 					}
 					return instance, nil
 				})
-				mocks.Expect(&m.Mock, m.Await, func(context.Context, string, int) (*secrets.Instance, error) {
-					close(execDone)
-					return instance, nil
-				})
+				expectOperationAwait(m, o, execDone, instance, nil)
 			},
 		},
 		{
 			name:   "destroy",
 			opName: secrets.Destroy,
 			reason: "destroy-reason",
-			expect: func(m *mocks.MockInstances, reason string, execDone chan struct{}) {
+			expect: func(m *mocks.MockInstances, o *mocks.MockOperations, reason string, execDone chan struct{}) {
 				mocks.Expect(&m.Mock, m.Destroy, func(ctx context.Context, instanceId string, params executor.OperationParameters, stdio command.Stdio) (*secrets.Instance, error) {
 					if instanceId != "i1" || params.Reason != reason {
 						t.Errorf("Destroy instanceId=%q reason=%q", instanceId, params.Reason)
 					}
 					return instance, nil
 				})
-				mocks.Expect(&m.Mock, m.Await, func(context.Context, string, int) (*secrets.Instance, error) {
-					close(execDone)
-					return instance, nil
-				})
+				expectOperationAwait(m, o, execDone, instance, nil)
 			},
 		},
 		{
 			name:   "test",
 			opName: secrets.Test,
 			reason: "test-reason",
-			expect: func(m *mocks.MockInstances, reason string, execDone chan struct{}) {
+			expect: func(m *mocks.MockInstances, o *mocks.MockOperations, reason string, execDone chan struct{}) {
 				mocks.Expect(&m.Mock, m.Test, func(ctx context.Context, instanceId string, params executor.OperationParameters, stdio command.Stdio) (*secrets.Instance, error) {
 					if instanceId != "i1" || params.Reason != reason {
 						t.Errorf("Test instanceId=%q reason=%q", instanceId, params.Reason)
 					}
 					return instance, nil
 				})
-				mocks.Expect(&m.Mock, m.Await, func(context.Context, string, int) (*secrets.Instance, error) {
-					close(execDone)
-					return instance, nil
-				})
+				expectOperationAwait(m, o, execDone, instance, nil)
 			},
 		},
 	}
@@ -407,9 +410,11 @@ func TestController_createOperation(t *testing.T) {
 			defer mockStore.Mock.Validate(t)
 			mockInstances := &mocks.MockInstances{}
 			defer mockInstances.Mock.Validate(t)
+			mockOperations := &mocks.MockOperations{}
+			defer mockOperations.Mock.Validate(t)
 			expectStoreInstances(mockStore, mockInstances)
 			execDone := make(chan struct{})
-			tt.expect(mockInstances, tt.reason, execDone)
+			tt.expect(mockInstances, mockOperations, tt.reason, execDone)
 
 			_, mux := newTestController(t, mockStore, &auth.Identity{Principal: "op-user"})
 
@@ -439,12 +444,20 @@ func TestController_getOperations(t *testing.T) {
 	defer mockStore.Mock.Validate(t)
 	mockInstances := &mocks.MockInstances{}
 	defer mockInstances.Mock.Validate(t)
+	mockOperations := &mocks.MockOperations{}
+	defer mockOperations.Mock.Validate(t)
 	mocks.Expect(&mockStore.Mock, mockStore.Instances, func(secretId string) store.Instances {
 		return mockInstances
 	})
-	mocks.Expect(&mockInstances.Mock, mockInstances.History, func(ctx context.Context, instanceId string, from int, to int) ([]*secrets.Operation, error) {
-		if instanceId != "i1" || from != 0 || to != 10 {
-			t.Errorf("History instanceId=%s from=%d to=%d", instanceId, from, to)
+	mocks.Expect(&mockInstances.Mock, mockInstances.Operations, func(instanceId string) store.Operations {
+		if instanceId != "i1" {
+			t.Errorf("Operations instanceId=%s", instanceId)
+		}
+		return mockOperations
+	})
+	mocks.Expect(&mockOperations.Mock, mockOperations.List, func(ctx context.Context, from int, to int) ([]*secrets.Operation, error) {
+		if from != 0 || to != 10 {
+			t.Errorf("List from=%d to=%d", from, to)
 		}
 		return []*secrets.Operation{}, nil
 	})
@@ -472,12 +485,17 @@ func TestController_operationResult_withoutTrackedOperation(t *testing.T) {
 	defer mockStore.Mock.Validate(t)
 	mockInstances := &mocks.MockInstances{}
 	defer mockInstances.Mock.Validate(t)
+	mockOperations := &mocks.MockOperations{}
+	defer mockOperations.Mock.Validate(t)
 	mocks.Expect(&mockStore.Mock, mockStore.Instances, func(secretId string) store.Instances {
 		return mockInstances
 	})
 	instance := &secrets.Instance{Id: "i1", Secret: secrets.Secret{Id: "sid", Version: 1}, Status: secrets.Status{OperationNumber: 1}}
-	mocks.Expect(&mockInstances.Mock, mockInstances.Await, func(ctx context.Context, instanceId string, opNumber int) (*secrets.Instance, error) {
-		return instance, nil
+	mocks.Expect(&mockInstances.Mock, mockInstances.Operations, func(instanceId string) store.Operations {
+		return mockOperations
+	})
+	mocks.Expect(&mockOperations.Mock, mockOperations.Await, func(ctx context.Context, opNumber int) (store.Event, *secrets.Instance, error) {
+		return store.NewCompletedEvent("", executor.OperationParameters{}), instance, nil
 	})
 
 	_, mux := newTestController(t, mockStore, nil)
@@ -496,15 +514,23 @@ func TestController_operationResult(t *testing.T) {
 	defer mockStore.Mock.Validate(t)
 	mockInstances := &mocks.MockInstances{}
 	defer mockInstances.Mock.Validate(t)
+	mockOperations := &mocks.MockOperations{}
+	defer mockOperations.Mock.Validate(t)
 	mocks.Expect(&mockStore.Mock, mockStore.Instances, func(secretId string) store.Instances {
 		return mockInstances
 	})
 	instance := &secrets.Instance{Id: "i1", Secret: secrets.Secret{Id: "sid", Version: 1}, Status: secrets.Status{OperationNumber: 1}}
-	mocks.Expect(&mockInstances.Mock, mockInstances.Await, func(ctx context.Context, instanceId string, opNumber int) (*secrets.Instance, error) {
-		if instanceId != "i1" || opNumber != 1 {
-			t.Errorf("Await instanceId=%q opNumber=%d", instanceId, opNumber)
+	mocks.Expect(&mockInstances.Mock, mockInstances.Operations, func(instanceId string) store.Operations {
+		if instanceId != "i1" {
+			t.Errorf("Operations instanceId=%q", instanceId)
 		}
-		return instance, nil
+		return mockOperations
+	})
+	mocks.Expect(&mockOperations.Mock, mockOperations.Await, func(ctx context.Context, opNumber int) (store.Event, *secrets.Instance, error) {
+		if opNumber != 1 {
+			t.Errorf("Await opNumber=%d", opNumber)
+		}
+		return store.NewCompletedEvent("", executor.OperationParameters{}), instance, nil
 	})
 
 	c, mux := newTestController(t, mockStore, nil)

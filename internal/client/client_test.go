@@ -32,9 +32,7 @@ var cmpInstanceOpts = cmp.Options{
 	cmpopts.IgnoreUnexported(time.Time{}),
 }
 
-// stubClient implements httpClient. It records the first non-poll request for
-// assertion. process/io polls return completed streams; result polls return
-// resultStatus/resultBody when set.
+// stubClient implements httpClient. Attach streams use a separate unix dial path.
 type stubClient struct {
 	status       int
 	body         string
@@ -45,12 +43,6 @@ type stubClient struct {
 }
 
 func (s *stubClient) Do(req *http.Request) (*http.Response, error) {
-	if strings.Contains(req.URL.Path, "/process/io") {
-		return &http.Response{
-			StatusCode: 200,
-			Body:       io.NopCloser(bytes.NewReader([]byte(`{"stdout":{"index":0,"closed":true},"stderr":{"index":0,"closed":true}}`))),
-		}, nil
-	}
 	if strings.Contains(req.URL.Path, "/result") {
 		status := s.resultStatus
 		body := s.resultBody
@@ -394,8 +386,9 @@ func TestInstanceClient_Await_retriesUntilComplete(t *testing.T) {
 	stub := &resultRetryStub{}
 	parent := &SecretClient{client: stub}
 	c := &InstanceClient{parent: parent, secretId: "sid"}
+	ops := &OperationsClient{parent: c, instanceId: "i1"}
 
-	got, err := c.Await(ctx, "i1", 1)
+	_, got, err := ops.Await(ctx, 1)
 	if err != nil {
 		t.Fatalf("Await: %v", err)
 	}
@@ -452,7 +445,8 @@ func TestInstanceClient_History(t *testing.T) {
 	stub := &stubClient{status: 200, body: `[]`}
 	parent := &SecretClient{client: stub}
 	c := &InstanceClient{parent: parent, secretId: "sid"}
-	got, err := c.History(ctx, "i1", 5, 15)
+	ops := &OperationsClient{parent: c, instanceId: "i1"}
+	got, err := ops.List(ctx, 5, 15)
 	if err != nil {
 		t.Fatalf("History: %v", err)
 	}

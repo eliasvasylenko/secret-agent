@@ -12,6 +12,7 @@ import (
 	"github.com/eliasvasylenko/secret-agent/internal/command"
 	"github.com/eliasvasylenko/secret-agent/internal/executor"
 	"github.com/eliasvasylenko/secret-agent/internal/secrets"
+	"github.com/eliasvasylenko/secret-agent/internal/store"
 	"github.com/google/go-cmp/cmp"
 )
 
@@ -34,15 +35,20 @@ func newTestRepo(t *testing.T, s secrets.Secrets) *SecretRespository {
 }
 
 // createInstance starts a create operation and awaits completion.
-func createInstance(t *testing.T, instances *InstanceRepository, ctx context.Context, params executor.OperationParameters) *secrets.Instance {
+func createInstance(t *testing.T, instances store.Instances, ctx context.Context, params executor.OperationParameters) *secrets.Instance {
 	t.Helper()
 	instance, err := instances.Create(ctx, params, discardStdio())
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	completed, err := instances.Await(ctx, instance.Id, instance.Status.OperationNumber)
+	return awaitOperation(t, instances, ctx, instance.Id, instance.Status.OperationNumber)
+}
+
+func awaitOperation(t *testing.T, instances store.Instances, ctx context.Context, instanceId string, opNumber int) *secrets.Instance {
+	t.Helper()
+	_, completed, err := instances.Operations(instanceId).Await(ctx, opNumber)
 	if err != nil {
-		t.Fatalf("Await after Create: %v", err)
+		t.Fatalf("Await: %v", err)
 	}
 	return completed
 }
@@ -52,17 +58,13 @@ func discardStdio() command.Stdio {
 }
 
 // runOperation starts an update operation and awaits completion.
-func runOperation(t *testing.T, instances *InstanceRepository, ctx context.Context, instanceId string, op func(context.Context, string, executor.OperationParameters, command.Stdio) (*secrets.Instance, error), params executor.OperationParameters) *secrets.Instance {
+func runOperation(t *testing.T, instances store.Instances, ctx context.Context, instanceId string, op func(context.Context, string, executor.OperationParameters, command.Stdio) (*secrets.Instance, error), params executor.OperationParameters) *secrets.Instance {
 	t.Helper()
 	instance, err := op(ctx, instanceId, params, discardStdio())
 	if err != nil {
 		t.Fatalf("operation start: %v", err)
 	}
-	completed, err := instances.Await(ctx, instanceId, instance.Status.OperationNumber)
-	if err != nil {
-		t.Fatalf("Await after operation: %v", err)
-	}
-	return completed
+	return awaitOperation(t, instances, ctx, instanceId, instance.Status.OperationNumber)
 }
 
 func TestNewSecretRepository(t *testing.T) {
@@ -146,10 +148,7 @@ func TestSecretRepository_Instances_AwaitAcrossLookups(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	completed, err := repo.Instances("s1").Await(ctx, started.Id, started.Status.OperationNumber)
-	if err != nil {
-		t.Fatalf("Await: %v", err)
-	}
+	completed := awaitOperation(t, repo.Instances("s1"), ctx, started.Id, started.Status.OperationNumber)
 	if completed.Status.CompletedAt == nil {
 		t.Fatal("expected completedAt after Await from a separate Instances() lookup")
 	}
@@ -174,10 +173,7 @@ func TestInstanceRepository_Create_stdinReachesSubprocess(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	_, err = instances.Await(ctx, instance.Id, instance.Status.OperationNumber)
-	if err != nil {
-		t.Fatalf("Await: %v", err)
-	}
+	awaitOperation(t, instances, ctx, instance.Id, instance.Status.OperationNumber)
 	data, err := os.ReadFile(out)
 	if err != nil {
 		t.Fatalf("read captured file: %v", err)
@@ -267,7 +263,7 @@ func TestInstanceRepository_History(t *testing.T) {
 
 	created := createInstance(t, instances, ctx, executor.OperationParameters{Reason: "create", StartedBy: "user"})
 
-	ops, err := instances.History(ctx, created.Id, 0, 10)
+	ops, err := instances.Operations(created.Id).List(ctx, 0, 10)
 	if err != nil {
 		t.Fatalf("History: %v", err)
 	}
@@ -336,9 +332,7 @@ func TestInstanceRepository_ExpectedOperationNumber(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Activate with Forced should ignore ExpectedOperationNumber mismatch: %v", err)
 	}
-	if _, err := instances.Await(ctx, started.Id, started.Status.OperationNumber); err != nil {
-		t.Fatalf("Await after forced Activate: %v", err)
-	}
+	awaitOperation(t, instances, ctx, started.Id, started.Status.OperationNumber)
 }
 
 func TestInstanceRepository_Create_validateReason(t *testing.T) {
@@ -350,9 +344,7 @@ func TestInstanceRepository_Create_validateReason(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create (short reason): %v", err)
 	}
-	if _, err := instances.Await(ctx, instance.Id, instance.Status.OperationNumber); err != nil {
-		t.Fatalf("Await: %v", err)
-	}
+	awaitOperation(t, instances, ctx, instance.Id, instance.Status.OperationNumber)
 
 	// maxReasonLen is 256 in newTestRepo
 	longReason := string(make([]byte, 257))

@@ -2,9 +2,7 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"strconv"
@@ -12,24 +10,18 @@ import (
 	"time"
 
 	"github.com/eliasvasylenko/secret-agent/internal/auth"
-	"github.com/eliasvasylenko/secret-agent/internal/command"
 	"github.com/eliasvasylenko/secret-agent/internal/executor"
 	"github.com/eliasvasylenko/secret-agent/internal/secrets"
 	"github.com/eliasvasylenko/secret-agent/internal/store"
 )
 
-// defaultStreamReadChunk is used when MaxBytes is unset (0): each stream poll reads up to this many bytes.
-const defaultMaxBytes = 1 << 10
-
-// DefaultStdioPollDuration is the maximum time a process/io round may block per stream read.
+// DefaultMaxPollDuration is the maximum time an operation result poll may block.
 const DefaultMaxPollDuration = 5 * time.Second
 
 type Controller struct {
-	secretStore  store.Secrets
+	secretStore  store.Store
 	operations   sync.Map
 	middleware   func(perms auth.Permissions, next http.HandlerFunc) http.Handler
-	newStream    func() Stream
-	maxBytes     int
 	operationTtl time.Duration
 }
 
@@ -39,10 +31,7 @@ type operationMapKey struct {
 	operationNumber int
 }
 
-func NewController(secretStore store.Secrets, limiter limiter, permissions permissions, maxBytes int, operationTtl time.Duration) *Controller {
-	if maxBytes <= 0 {
-		maxBytes = defaultMaxBytes
-	}
+func NewController(secretStore store.Store, limiter limiter, permissions permissions, operationTtl time.Duration) *Controller {
 	limiterKey := func(r *http.Request) string {
 		return identityFromContext(r.Context()).Principal
 	}
@@ -53,8 +42,6 @@ func NewController(secretStore store.Secrets, limiter limiter, permissions permi
 		secretStore:  secretStore,
 		operations:   sync.Map{},
 		middleware:   middleware,
-		newStream:    func() Stream { return newStream() },
-		maxBytes:     maxBytes,
 		operationTtl: operationTtl,
 	}
 }
@@ -100,13 +87,13 @@ func (c *Controller) buildHandler(registerHandler func(pattern string, handler h
 		auth.Permissions{auth.Instances: auth.Read},
 		c.operationResult,
 	))
-	registerHandler("DELETE /secrets/{secretId}/instances/{instanceId}/operations/{opNumber}/process", c.middleware(
+	registerHandler("POST /secrets/{secretId}/instances/{instanceId}/operations/{opNumber}/attach/{stream}", c.middleware(
 		auth.Permissions{auth.Instances: auth.Write},
-		c.cancelOperation,
+		c.attachProcess,
 	))
-	registerHandler("POST /secrets/{secretId}/instances/{instanceId}/operations/{opNumber}/process/io", c.middleware(
+	registerHandler("DELETE /secrets/{secretId}/instances/{instanceId}/operations/{opNumber}", c.middleware(
 		auth.Permissions{auth.Instances: auth.Read},
-		c.exchangeStdio,
+		c.cancelOperation,
 	))
 }
 
@@ -161,21 +148,14 @@ func (s *Controller) createInstance(w http.ResponseWriter, r *http.Request) {
 		Reason:    operationParameters.Reason,
 		StartedBy: identity.Principal,
 	}
-	stdout := s.newStream()
-	stderr := s.newStream()
-	stdin := s.newStream()
-	stdio := command.Stdio{
-		Stdin:  stdin,
-		Stdout: stdout,
-		Stderr: stderr,
-	}
+	pipes, stdio := newOperationPipes()
 	instance, err := instances.Create(r.Context(), parameters, stdio)
 	if err != nil {
-		closeOperationStreams(stdout, stderr, stdin)
+		closeOperationPipes(pipes)
 		writeError(w, err)
 		return
 	}
-	s.trackOperation(identity.Principal, instance, stdout, stderr, stdin)
+	s.trackOperation(identity.Principal, instance, pipes)
 	writeResult(w, instance, http.StatusOK)
 }
 
@@ -200,7 +180,7 @@ func (s *Controller) getOperations(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	instances := s.secretStore.Instances(secretId)
-	operations, err := instances.History(r.Context(), instanceId, int(from), int(to))
+	operations, err := instances.Operations(instanceId).List(r.Context(), int(from), int(to))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -231,14 +211,7 @@ func (s *Controller) createOperation(w http.ResponseWriter, r *http.Request) {
 	}
 	instances := s.secretStore.Instances(secretId)
 
-	stdout := s.newStream()
-	stderr := s.newStream()
-	stdin := s.newStream()
-	stdio := command.Stdio{
-		Stdin:  stdin,
-		Stdout: stdout,
-		Stderr: stderr,
-	}
+	pipes, stdio := newOperationPipes()
 	var instance *secrets.Instance
 	switch operationParameters.Name {
 	case secrets.Activate:
@@ -250,34 +223,24 @@ func (s *Controller) createOperation(w http.ResponseWriter, r *http.Request) {
 	case secrets.Test:
 		instance, err = instances.Test(r.Context(), instanceId, parameters, stdio)
 	default:
-		closeOperationStreams(stdout, stderr, stdin)
+		closeOperationPipes(pipes)
 		writeError(w, NewErrorResponse(http.StatusBadRequest, fmt.Errorf("Cannot post operation %s", operationParameters.Name)))
 		return
 	}
 	if err != nil {
-		closeOperationStreams(stdout, stderr, stdin)
+		closeOperationPipes(pipes)
 		writeError(w, err)
 		return
 	}
 
-	s.trackOperation(identity.Principal, instance, stdout, stderr, stdin)
+	s.trackOperation(identity.Principal, instance, pipes)
 	writeResult(w, instance, http.StatusOK)
 }
 
-func closeOperationStreams(stdout, stderr, stdin Stream) {
-	_ = stdout.Close()
-	_ = stderr.Close()
-	if stdin != nil {
-		_ = stdin.Close()
-	}
-}
-
-// register stream handles for an in-flight operation and close them once the store reports completion.
-func (s *Controller) trackOperation(startedBy string, instance *secrets.Instance, stdout, stderr, stdin Stream) {
+// register pipe handles for an in-flight operation and close them once the store reports completion.
+func (s *Controller) trackOperation(startedBy string, instance *secrets.Instance, pipes *operationPipes) {
 	op := &operation{
-		Stdout:    stdout,
-		Stderr:    stderr,
-		Stdin:     stdin,
+		pipes:     pipes,
 		startedBy: startedBy,
 		done:      make(chan struct{}),
 	}
@@ -288,18 +251,10 @@ func (s *Controller) trackOperation(startedBy string, instance *secrets.Instance
 	go func() {
 		defer close(op.done)
 		instances := s.secretStore.Instances(instance.Secret.Id)
-		if _, err := instances.Await(context.Background(), instance.Id, opNumber); err != nil {
+		if _, _, err := instances.Operations(instance.Id).Await(context.Background(), opNumber); err != nil {
 			log.Printf("operation %d await: %v", opNumber, err)
 		}
-		if err := stdout.Close(); err != nil {
-			log.Printf("error closing stdout: %v", err)
-		}
-		if err := stderr.Close(); err != nil {
-			log.Printf("error closing stderr: %v", err)
-		}
-		if err := stdin.Close(); err != nil {
-			log.Printf("error closing stdin: %v", err)
-		}
+		closeOperationPipes(pipes)
 		time.AfterFunc(s.operationTtl, func() {
 			s.operations.Delete(key)
 		})
@@ -337,7 +292,7 @@ func (s *Controller) operationResult(w http.ResponseWriter, r *http.Request) {
 	}
 
 	instances := s.secretStore.Instances(secretId)
-	instance, err := instances.Await(ctx, instanceId, opNumber)
+	_, instance, err := instances.Operations(instanceId).Await(ctx, opNumber)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -355,120 +310,11 @@ func (s *Controller) cancelOperation(w http.ResponseWriter, r *http.Request) {
 	}
 
 	instances := s.secretStore.Instances(secretId)
-	if err := instances.Cancel(r.Context(), instanceId, opNumber); err != nil {
+	if err := instances.Operations(instanceId).Cancel(r.Context(), opNumber); err != nil {
 		writeError(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
-}
-
-func (s *Controller) exchangeStdio(w http.ResponseWriter, r *http.Request) {
-	secretId := r.PathValue("secretId")
-	instanceId := r.PathValue("instanceId")
-	opNumber, err := parsePath(r, "opNumber", strconv.Atoi)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-
-	identity := identityFromContext(r.Context())
-	if identity == nil {
-		writeError(w, NewErrorResponse(http.StatusInternalServerError, fmt.Errorf("identity not found in context")))
-		return
-	}
-	key := operationMapKey{secretId: secretId, instanceId: instanceId, operationNumber: opNumber}
-	load, ok := s.operations.Load(key)
-	if !ok {
-		writeError(w, NewErrorResponse(http.StatusNotFound, fmt.Errorf("operation %d not found", opNumber)))
-		return
-	}
-	op := load.(*operation)
-	if identity.Principal != op.startedBy {
-		writeError(w, NewErrorResponse(http.StatusForbidden, fmt.Errorf("operation %d was started by a different principal", opNumber)))
-		return
-	}
-
-	var req ExchangeIORequest
-	if err := readBody(r, &req); err != nil {
-		writeError(w, err)
-		return
-	}
-
-	maxBytes, err := parseQueryInt(r, "maxBytes", int64(s.maxBytes))
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	if maxBytes <= 0 {
-		maxBytes = int64(s.maxBytes)
-	}
-	maxWait, err := parseQuery(r, "maxWait", time.ParseDuration, DefaultMaxPollDuration)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-
-	var resp ExchangeIOResponse
-
-	if req.Stdin != nil {
-		if len(req.Stdin.Bytes) > 0 {
-			if err := validateStdinChunk(req.Stdin.Index, req.Stdin.Bytes, maxBytes); err != nil {
-				writeError(w, err)
-				return
-			}
-			if _, err := op.Stdin.AsyncWriter().WriteAt(req.Stdin.Bytes, req.Stdin.Index); err != nil {
-				writeError(w, NewErrorResponse(http.StatusInternalServerError, err))
-				return
-			}
-		}
-		if req.Stdin.Closed {
-			_ = op.Stdin.Close()
-		}
-		resp.Stdin = &ExchangeIndex{Index: req.Stdin.Index + int64(len(req.Stdin.Bytes))}
-		// Return promptly after stdin is delivered so the client can read more input.
-		maxWait = 0
-	}
-
-	ctx, cancel := context.WithTimeout(r.Context(), maxWait)
-	defer cancel()
-
-	var stdoutFrom int64
-	if req.Stdout != nil {
-		stdoutFrom = req.Stdout.Index
-	}
-	stdout, err := readStreamChunk(ctx, op.Stdout, stdoutFrom, maxBytes)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	resp.Stdout = exchangeStreamOut(stdoutFrom, stdout)
-	var stderrFrom int64
-	if req.Stderr != nil {
-		stderrFrom = req.Stderr.Index
-	}
-	chunk, err := readStreamChunk(ctx, op.Stderr, stderrFrom, maxBytes)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	resp.Stderr = exchangeStreamOut(stderrFrom, chunk)
-
-	if code := op.processExitCode(); code != nil {
-		resp.ExitCode = code
-	}
-
-	writeResult(w, resp, http.StatusOK)
-}
-
-func readBody(r *http.Request, v any) error {
-	bytes, err := io.ReadAll(r.Body)
-	if err == nil {
-		err = json.Unmarshal(bytes, v)
-	}
-	if err != nil {
-		return NewErrorResponse(http.StatusBadRequest, err)
-	}
-	return nil
 }
 
 func parseRange(r *http.Request) (int64, int64, error) {

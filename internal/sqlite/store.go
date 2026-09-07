@@ -177,7 +177,7 @@ func (s *SecretRespository) History(ctx context.Context, secretId string, startA
 	return operations, err
 }
 
-func (s *SecretRespository) Instances(secretId string) *InstanceRepository {
+func (s *SecretRespository) Instances(secretId string) store.Instances {
 	if v, ok := s.instanceRepos.Load(secretId); ok {
 		return v.(*InstanceRepository)
 	}
@@ -480,7 +480,41 @@ func (i *InstanceRepository) launchAsync(instance *secrets.Instance, operation s
 	}()
 }
 
-func (i *InstanceRepository) Await(ctx context.Context, instanceId string, operationNumber int) (*secrets.Instance, error) {
+func (i *InstanceRepository) Operations(instanceId string) store.Operations {
+	return &OperationsRepository{parent: i, instanceId: instanceId}
+}
+
+type OperationsRepository struct {
+	parent     *InstanceRepository
+	instanceId string
+}
+
+func (o *OperationsRepository) List(ctx context.Context, from int, to int) ([]*secrets.Operation, error) {
+	return o.parent.listOperations(ctx, o.instanceId, from, to)
+}
+
+func (o *OperationsRepository) Process(context.Context, int) (*store.Process, error) {
+	return nil, fmt.Errorf("process attach not implemented")
+}
+
+func (o *OperationsRepository) Await(ctx context.Context, operationNumber int) (store.Event, *secrets.Instance, error) {
+	instance, err := o.parent.await(ctx, o.instanceId, operationNumber)
+	if err != nil {
+		return nil, nil, err
+	}
+	event := store.NewCompletedEvent("", executor.OperationParameters{
+		Forced:    instance.Status.Forced,
+		Reason:    instance.Status.Reason,
+		StartedBy: instance.Status.StartedBy,
+	})
+	return event, instance, nil
+}
+
+func (o *OperationsRepository) Cancel(ctx context.Context, operationNumber int) error {
+	return o.parent.cancel(ctx, o.instanceId, operationNumber)
+}
+
+func (i *InstanceRepository) await(ctx context.Context, instanceId string, operationNumber int) (*secrets.Instance, error) {
 	key := operationKey{instanceId, operationNumber}
 	i.mu.Lock()
 	rt := i.operations[key]
@@ -513,7 +547,7 @@ func (i *InstanceRepository) Await(ctx context.Context, instanceId string, opera
 	return instance, nil
 }
 
-func (i *InstanceRepository) Cancel(ctx context.Context, instanceId string, operationNumber int) error {
+func (i *InstanceRepository) cancel(ctx context.Context, instanceId string, operationNumber int) error {
 	key := operationKey{instanceId, operationNumber}
 	i.mu.Lock()
 	rt := i.operations[key]
@@ -600,7 +634,7 @@ func completeOperation(ctx context.Context, db *sql.DB, secretId string, instanc
 	return commit()
 }
 
-func (i *InstanceRepository) History(ctx context.Context, instanceId string, startAt int, endAt int) ([]*secrets.Operation, error) {
+func (i *InstanceRepository) listOperations(ctx context.Context, instanceId string, startAt int, endAt int) ([]*secrets.Operation, error) {
 	rows, err := i.db.QueryContext(ctx, `
 		SELECT
 			id,
@@ -650,3 +684,7 @@ func syncPlanRevisions(ctx context.Context, db *sql.DB, secrets secrets.Secrets)
 	}
 	return nil
 }
+
+var _ store.Store = (*SecretRespository)(nil)
+var _ store.Instances = (*InstanceRepository)(nil)
+var _ store.Operations = (*OperationsRepository)(nil)

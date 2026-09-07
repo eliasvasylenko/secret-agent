@@ -1,7 +1,6 @@
 package server
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,17 +22,6 @@ type httpError struct {
 	Message string `json:"message"`
 }
 
-type StreamResponse struct {
-	Data     []byte `json:"data,omitempty"`
-	Complete bool   `json:"complete"`
-}
-
-// StdioResponse is returned by POST .../operations/{opNumber}/stdio.
-type StdioResponse struct {
-	Stdout StreamResponse `json:"stdout"`
-	Stderr StreamResponse `json:"stderr"`
-}
-
 func NewErrorResponse(code int, err error) *ErrorResponse {
 	var message string
 	if err != nil {
@@ -47,9 +35,8 @@ func NewErrorResponse(code int, err error) *ErrorResponse {
 func (r *ErrorResponse) Error() string {
 	if r.HttpError.Message == "" {
 		return fmt.Sprintf("%v %s", r.HttpError.Code, http.StatusText(r.HttpError.Code))
-	} else {
-		return fmt.Sprintf("%v %s - %s", r.HttpError.Code, http.StatusText(r.HttpError.Code), r.HttpError.Message)
 	}
+	return fmt.Sprintf("%v %s - %s", r.HttpError.Code, http.StatusText(r.HttpError.Code), r.HttpError.Message)
 }
 
 func writeResult(w http.ResponseWriter, value any, statusCode int) error {
@@ -80,18 +67,13 @@ func writeError(w http.ResponseWriter, err error) error {
 	return writeResult(w, response, response.HttpError.Code)
 }
 
-func readStreamChunk(ctx context.Context, stream Stream, fromByte int64, maxBytes int64) (StreamResponse, error) {
-	data := make([]byte, maxBytes)
-	reader := stream.AsyncReader(ctx)
-	n, err := reader.ReadAt(data, fromByte)
-	if err == io.EOF {
-		return StreamResponse{Data: data[:n], Complete: true}, nil
-	}
-	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-		return StreamResponse{Data: data[:n], Complete: false}, nil
+func readBody(r *http.Request, v any) error {
+	bytes, err := io.ReadAll(r.Body)
+	if err == nil {
+		err = json.Unmarshal(bytes, v)
 	}
 	if err != nil {
-		return StreamResponse{}, err
+		return NewErrorResponse(http.StatusBadRequest, err)
 	}
-	return StreamResponse{Data: data[:n], Complete: false}, nil
+	return nil
 }

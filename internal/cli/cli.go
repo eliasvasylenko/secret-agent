@@ -38,7 +38,7 @@ type CLI struct {
 	Serve           Serve           `cmd:"" help:"Serve the secret agent API"`
 
 	ctx         kongContext
-	secretStore store.Secrets
+	secretStore store.Store
 }
 
 type kongContext interface {
@@ -77,7 +77,7 @@ func (c *CLI) Run(ctx context.Context) {
 	case "history <secret-id>":
 		result, err = c.secretStore.History(ctx, c.History.SecretID, c.History.From, c.History.To)
 	case "history <secret-id> <instance-id>":
-		result, err = c.secretStore.Instances(c.History.SecretID).History(ctx, c.History.InstanceID, c.History.From, c.History.To)
+		result, err = c.secretStore.Instances(c.History.SecretID).Operations(c.History.InstanceID).List(ctx, c.History.From, c.History.To)
 	case "create <secret-id>":
 		result, err = c.startSecretOperation(ctx, c.Create, store.Instances.Create)
 	case "destroy <secret-id> <instance-id>":
@@ -118,18 +118,16 @@ func (c *CLI) Run(ctx context.Context) {
 	c.ctx.FatalIfErrorf(err)
 }
 
-// runCreateMutation starts a create operation and blocks on Await until it completes.
+// startSecretOperation starts an operation then Await until it completes.
 func (c *CLI) startSecretOperation(ctx context.Context, operation SecretCommand, start func(store.Instances, context.Context, executor.OperationParameters, command.Stdio) (*secrets.Instance, error)) (*secrets.Instance, error) {
-	stdioCtx, stopStdio := context.WithCancel(ctx)
-	defer stopStdio()
-
 	instances := c.secretStore.Instances(operation.SecretID)
 	stdio := command.Stdio{Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr}
-	instance, err := start(instances, stdioCtx, operation.parameters(), stdio)
+	instance, err := start(instances, ctx, operation.parameters(), stdio)
 	if err != nil {
 		return nil, err
 	}
-	return instances.Await(ctx, instance.Id, instance.Status.OperationNumber)
+	_, completed, err := instances.Operations(instance.Id).Await(ctx, instance.Status.OperationNumber)
+	return completed, err
 }
 
 func (c *CLI) startInstanceOperation(ctx context.Context, operation InstanceCommand, start func(store.Instances, context.Context, string, executor.OperationParameters, command.Stdio) (*secrets.Instance, error)) (*secrets.Instance, error) {

@@ -54,12 +54,23 @@ func (i *MockInstances) Deactivate(ctx context.Context, instanceId string, param
 func (i *MockInstances) Test(ctx context.Context, instanceId string, parameters executor.OperationParameters, stdio command.Stdio) (*secrets.Instance, error) {
 	return nextCall(&i.Mock, i.Test)(ctx, instanceId, parameters, stdio)
 }
-func (i *MockInstances) Await(ctx context.Context, instanceId string, operationNumber int) (*secrets.Instance, error) {
-	return nextCall(&i.Mock, i.Await)(ctx, instanceId, operationNumber)
+func (i *MockInstances) Operations(instanceId string) store.Operations {
+	return nextCall(&i.Mock, i.Operations)(instanceId)
 }
-func (i *MockInstances) Cancel(ctx context.Context, instanceId string, operationNumber int) error {
-	return nextCall(&i.Mock, i.Cancel)(ctx, instanceId, operationNumber)
+
+type MockOperations struct {
+	Mock
 }
-func (i *MockInstances) History(ctx context.Context, instanceId string, from int, to int) ([]*secrets.Operation, error) {
-	return nextCall(&i.Mock, i.History)(ctx, instanceId, from, to)
+
+func (o *MockOperations) List(ctx context.Context, from int, to int) ([]*secrets.Operation, error) {
+	return nextCall(&o.Mock, o.List)(ctx, from, to)
+}
+func (o *MockOperations) Process(ctx context.Context, operationNumber int) (*store.Process, error) {
+	return nextCall(&o.Mock, o.Process)(ctx, operationNumber)
+}
+func (o *MockOperations) Await(ctx context.Context, operationNumber int) (store.Event, *secrets.Instance, error) {
+	return nextCall(&o.Mock, o.Await)(ctx, operationNumber)
+}
+func (o *MockOperations) Cancel(ctx context.Context, operationNumber int) error {
+	return nextCall(&o.Mock, o.Cancel)(ctx, operationNumber)
 }

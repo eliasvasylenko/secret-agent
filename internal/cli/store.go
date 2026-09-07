@@ -26,7 +26,7 @@ func (s sqliteSecrets) Instances(secretId string) store.Instances {
 	return s.SecretRespository.Instances(secretId)
 }
 
-func NewStore(ctx context.Context, socket string, secretsFile string, dbFile string, debug bool, maxReasonLen int) (store.Secrets, error) {
+func NewStore(ctx context.Context, socket string, secretsFile string, dbFile string, debug bool, maxReasonLen int) (store.Store, error) {
 	if socket != "" {
 		store := client.NewSecretStore(socket)
 		return clientSecrets{
