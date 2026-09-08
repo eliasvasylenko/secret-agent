@@ -9,7 +9,12 @@ import (
 	"github.com/eliasvasylenko/secret-agent/internal/secrets"
 )
 
-type Store interface {
+type Agent interface {
+	Catalog() Catalog
+	Runner(secretId string) Runner
+}
+
+type Catalog interface {
 	Secrets() Secrets
 	Instances() Instances
 	Operations() Operations
@@ -21,23 +26,30 @@ type Secrets interface {
 }
 
 type Instances interface {
-	List(ctx context.Context, secretId *string, from int, to int) (secrets.Instances, error)
+	List(ctx context.Context, secretId *string, from, to int) (secrets.Instances, error)
 	Get(ctx context.Context, instanceId string) (*secrets.Instance, error)
 	GetActive(ctx context.Context, secretId string) (*secrets.Instance, error)
 }
 
 type Operations interface {
-	Start(ctx context.Context, op string, parameters executor.OperationParameters, proposer Proposer, stdio command.Stdio) (*secrets.Instance, error)
-	List(ctx context.Context, secretId *string, instanceId *string, from int, to int) ([]*secrets.Operation, error)
+	List(ctx context.Context, secretId, instanceId *string, from, to int) ([]*secrets.Operation, error)
 }
 
-type OperationResult struct {
-	Instance *secrets.Instance
-	ExitCode int
+type Runner interface {
+	Run(
+		ctx context.Context,
+		name secrets.OperationName,
+		instanceId string,
+		params executor.OperationParameters,
+		proposer Proposer,
+		stdio command.Stdio,
+	) (startedInstance *secrets.Instance, wait Wait, err error)
 }
+
+type Wait func(ctx context.Context) (completedInstance *secrets.Instance, err error)
 
 type Proposer interface {
-	Propose(ctx context.Context, op string, parameters executor.OperationParameters) error
+	Propose(ctx context.Context, name secrets.OperationName, params executor.OperationParameters) error
 }
 
 type StaleOperationError struct {

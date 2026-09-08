@@ -8,9 +8,11 @@ Detailed plan to migrate secret-agent to the architecture in [`design.md`](desig
 
 ---
 
-## Phase 0 — Lock API shapes (discovery)
+## Phase 0 — Lock API shapes (discovery) ✅
 
 Goal: written decisions before large refactors. No requirement to implement yet.
+
+**Done:** [`design.md` § Decisions](design.md#decisions-phase-0), [`http-api.md`](http-api.md), [`internal/ops/doc.go`](../internal/ops/doc.go). Review and confirm before Phase 1.
 
 ### 0.1 Store surface
 
@@ -22,7 +24,7 @@ Decide and document in `design.md` (append “Decisions” section):
 | `Target` | struct `{SecretID, InstanceID}` vs encode in `Run` args | InstanceID empty for create |
 | Op name type | `secrets.OperationName` vs string | Prefer typed |
 | History | `Catalog.Operations().List(...)` vs `Runner` doesn’t list | List is read-only |
-| `Run` return | `*Run` + `Wait(ctx)` vs callback `onStarted(*Instance)` + block | See 0.2 |
+| `Run` return | `(*Instance, Wait, error)` — see design.md §0.1 |
 
 **Deliverable:** `docs/design.md` “Decisions” with chosen signatures (copy-pasteable Go).
 
@@ -96,18 +98,17 @@ Decide slot states: `waiting_attach` → `waiting_start` → `running` → `done
 
 ---
 
-## Phase 1 — Store interfaces (`internal/store`)
+## Phase 1 — Store interfaces (`internal/store`) ✅
 
 Goal: stable interfaces; compile with stub mocks only.
 
 1. Replace `Store` / `Operations` / `Start` with:
-   - `Catalog` (or `Agent.Catalog()`): `Secrets`, `Instances`, `Operations.List`
-   - `Runner`: `Run(name, target, params, proposer, stdio) (*Run, error)`
-   - `Run.Wait(ctx) (OperationResult, error)`
-2. Add `Target`, use `secrets.OperationName`, `Proposer.Propose(ctx, name, params)`.
-3. Keep error types (`StaleOperationError`, `UnknownOperationError`).
-4. Update `internal/mocks` to match (minimal compile stubs).
-5. **Do not** update sqlite/client/server yet — expect repo broken except `store` + `mocks` package tests.
+   - `Agent`: `Catalog()` + `Runner(secretId)`
+   - `Catalog`: `Secrets`, `Instances` (incl. `GetActive`), `Operations.List`
+   - `Runner`: `Run(...) (*secrets.Instance, Wait, error)`; `Wait` joins background work (callable multiple times)
+2. Use `secrets.OperationName` on `Proposer.Propose`; keep `StaleOperationError`, `UnknownOperationError`.
+3. Update `internal/mocks` to match (minimal compile stubs).
+4. **Do not** update sqlite/client/server yet — expect repo broken except `store` + `mocks` package tests.
 
 **Verification:** `go build ./internal/store/... ./internal/mocks/...`
 
@@ -117,7 +118,7 @@ Goal: stable interfaces; compile with stub mocks only.
 
 Goal: typed entry points for CLI/tests without touching HTTP.
 
-1. Create `internal/ops` with wrappers calling `Runner.Run` + `Wait`.
+1. Create `internal/ops` with wrappers: `inst, wait, err := runner.Run(...); return wait(ctx)`.
 2. Unit tests with mock `Runner` (optional, light).
 
 **Verification:** `go test ./internal/ops/...`
@@ -131,17 +132,14 @@ Goal: in-process agent path works end-to-end without HTTP.
 1. Refactor `SecretRespository`:
    - Implement `Catalog` accessors (`Secrets()`, `Instances()`, `Operations().List` only).
    - Implement `Runner(secretId)` (or single repo implementing `Runner` with target).
-2. **No HTTP attach slot** — `Run`:
-   - Persist op (existing `startOperation` tx logic).
-   - Return `*Run` with initial `Instance`.
-   - `Wait`: start subprocess with caller stdio (delay until Wait — per design), `completeOperation`, return `OperationResult` + exit code.
+2. **No HTTP attach slot** — `Run` persists then starts **`Execute` in background**; **`Wait`** joins; failure → `failedAt` + typed error.
 3. Remove old `Create(..., stdio)` on `InstanceRepository`, `Await`, `Cancel`, nested `Operations(instanceId)` methods.
-4. `Proposer`: accept on `Run`, store on run state, no invoke until executor hook exists.
+4. `Proposer`: passed into background execute; no invoke until executor hook exists.
 5. Rewrite `internal/sqlite/store_test.go` via `ops` or direct `Runner`.
 
 **Discovery during implementation:**
 
-- Orphan row if `Run` returns but `Wait` never called — accept for v1 or add slot cleanup timer?
+- Orphan row if caller never joins — **background still completes** op; row reaches terminal state. Orphan **attach slot** before POST still possible.
 - `GetActive` / list filters with `secretId *string` nil = all secrets.
 
 **Verification:** `go test ./internal/sqlite/...`
@@ -180,10 +178,8 @@ Goal: `client` implements `store.Runner` using attach + POST + Wait.
 
 1. Refactor `SecretClient` → implement `Catalog`.
 2. `Runner(secretId)`:
-   - Open 3 upgrades to new attach paths (principal implicit).
-   - POST start with `RunRequest`.
-   - Return `*Run` with `Instance` from response body.
-   - `Wait`: pump stdio on conn ctx; on disconnect return error; collect completion (how — see discovery).
+   - Open attach upgrades, POST start.
+   - Return accepted `*Instance` + **`Wait`** join (background pump already running; server executes after POST).
 3. **Discovery:** how client learns op finished without `/result`:
    - Option A: attach conn EOF + server closes pipes when done; client infers from copy return + GET instance.
    - Option B: small JSON “done” frame on control stream (later).
@@ -219,10 +215,10 @@ Goal: `client` implements `store.Runner` using attach + POST + Wait.
 
 Only after local path solid.
 
-1. **Executor hook** — script calls agent API to propose dependent op; invokes slot’s `Proposer`.
-2. **HTTP control channel** — decide 4th upgrade vs mux; request/response envelope for `Propose`.
-3. **Originating principal** — `RunRequest` or header; policy on secret plan.
-4. Same-host Nix e2e (`plan-process-io.md` phase 2, revised).
+1. **Executor hook** — parent script on A calls `Proposer.Propose` for dependent op on B.
+2. **John ↔ B authorisation** — A may forward a pipe; John authenticates to B directly; B records OK; **no A MITM** (see `design.md` § Proposer).
+3. **HTTP control channel** — carry `Propose` prompts/responses (4th upgrade vs mux); distinct from stdio attach A↔B.
+4. Same-host Nix e2e (revised; see `design.md` § Federation).
 
 ---
 
