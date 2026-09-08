@@ -13,7 +13,7 @@ import (
 	"github.com/eliasvasylenko/secret-agent/internal/marshal"
 	"github.com/eliasvasylenko/secret-agent/internal/secrets"
 	"github.com/eliasvasylenko/secret-agent/internal/server"
-	"github.com/eliasvasylenko/secret-agent/internal/store"
+	"github.com/eliasvasylenko/secret-agent/internal/backend"
 )
 
 type CLI struct {
@@ -38,7 +38,7 @@ type CLI struct {
 	Serve           Serve           `cmd:"" help:"Serve the secret agent API"`
 
 	ctx         kongContext
-	secretStore store.Store
+	secretStore backend.Backend
 }
 
 type kongContext interface {
@@ -79,15 +79,15 @@ func (c *CLI) Run(ctx context.Context) {
 	case "history <secret-id> <instance-id>":
 		result, err = c.secretStore.Instances(c.History.SecretID).Operations(c.History.InstanceID).List(ctx, c.History.From, c.History.To)
 	case "create <secret-id>":
-		result, err = c.startSecretOperation(ctx, c.Create, store.Instances.Create)
+		result, err = c.startSecretOperation(ctx, c.Create, backend.Instances.Create)
 	case "destroy <secret-id> <instance-id>":
-		result, err = c.startInstanceOperation(ctx, c.Destroy, store.Instances.Destroy)
+		result, err = c.startInstanceOperation(ctx, c.Destroy, backend.Instances.Destroy)
 	case "activate <secret-id> <instance-id>":
-		result, err = c.startInstanceOperation(ctx, c.Activate, store.Instances.Activate)
+		result, err = c.startInstanceOperation(ctx, c.Activate, backend.Instances.Activate)
 	case "deactivate <secret-id> <instance-id>":
-		result, err = c.startInstanceOperation(ctx, c.Deactivate, store.Instances.Deactivate)
+		result, err = c.startInstanceOperation(ctx, c.Deactivate, backend.Instances.Deactivate)
 	case "test <secret-id> <instance-id>":
-		result, err = c.startInstanceOperation(ctx, c.Test, store.Instances.Test)
+		result, err = c.startInstanceOperation(ctx, c.Test, backend.Instances.Test)
 	case "serve":
 		permissionsConfig, err := server.LoadPermissions(c.PermissionsFile)
 		c.ctx.FatalIfErrorf(err)
@@ -119,7 +119,7 @@ func (c *CLI) Run(ctx context.Context) {
 }
 
 // startSecretOperation starts an operation then Await until it completes.
-func (c *CLI) startSecretOperation(ctx context.Context, operation SecretCommand, start func(store.Instances, context.Context, executor.OperationParameters, command.Stdio) (*secrets.Instance, error)) (*secrets.Instance, error) {
+func (c *CLI) startSecretOperation(ctx context.Context, operation SecretCommand, start func(backend.Instances, context.Context, executor.OperationParameters, command.Stdio) (*secrets.Instance, error)) (*secrets.Instance, error) {
 	instances := c.secretStore.Instances(operation.SecretID)
 	stdio := command.Stdio{Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr}
 	instance, err := start(instances, ctx, operation.parameters(), stdio)
@@ -130,8 +130,8 @@ func (c *CLI) startSecretOperation(ctx context.Context, operation SecretCommand,
 	return completed, err
 }
 
-func (c *CLI) startInstanceOperation(ctx context.Context, operation InstanceCommand, start func(store.Instances, context.Context, string, executor.OperationParameters, command.Stdio) (*secrets.Instance, error)) (*secrets.Instance, error) {
-	return c.startSecretOperation(ctx, operation.SecretCommand, func(instances store.Instances, ctx context.Context, parameters executor.OperationParameters, stdio command.Stdio) (*secrets.Instance, error) {
+func (c *CLI) startInstanceOperation(ctx context.Context, operation InstanceCommand, start func(backend.Instances, context.Context, string, executor.OperationParameters, command.Stdio) (*secrets.Instance, error)) (*secrets.Instance, error) {
+	return c.startSecretOperation(ctx, operation.SecretCommand, func(instances backend.Instances, ctx context.Context, parameters executor.OperationParameters, stdio command.Stdio) (*secrets.Instance, error) {
 		return start(instances, ctx, operation.InstanceID, parameters, stdio)
 	})
 }

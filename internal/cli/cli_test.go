@@ -10,7 +10,7 @@ import (
 
 	"github.com/eliasvasylenko/secret-agent/internal/mocks"
 	sec "github.com/eliasvasylenko/secret-agent/internal/secrets"
-	"github.com/eliasvasylenko/secret-agent/internal/store"
+	"github.com/eliasvasylenko/secret-agent/internal/backend"
 	"github.com/google/go-cmp/cmp"
 )
 
@@ -81,7 +81,7 @@ func TestRun_instances(t *testing.T) {
 	defer mockStore.Mock.Validate(t)
 	mockInstances := &mocks.MockInstances{}
 	defer mockInstances.Mock.Validate(t)
-	instancesReturn := func(secretId string) store.Instances {
+	instancesReturn := func(secretId string) backend.Instances {
 		if secretId != "my-secret" {
 			t.Errorf("Instances called with secretId=%q, want my-secret", secretId)
 		}

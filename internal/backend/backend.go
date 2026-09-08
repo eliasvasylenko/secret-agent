@@ -1,4 +1,4 @@
-package store
+package backend
 
 import (
 	"context"
@@ -9,7 +9,7 @@ import (
 	"github.com/eliasvasylenko/secret-agent/internal/secrets"
 )
 
-type Agent interface {
+type Backend interface {
 	Catalog() Catalog
 	Runner(secretId string) Runner
 }
@@ -43,10 +43,16 @@ type Runner interface {
 		params executor.OperationParameters,
 		proposer Proposer,
 		stdio command.Stdio,
-	) (startedInstance *secrets.Instance, wait Wait, err error)
+	) (startedInstance *secrets.Instance, handle Handle, err error)
 }
 
-type Wait func(ctx context.Context) (completedInstance *secrets.Instance, err error)
+// Handle joins background work started before Run returned.
+type Handle interface {
+	// Wait blocks until completion. ctx abandons waiting only.
+	Wait(ctx context.Context) (completedInstance *secrets.Instance, err error)
+	// Cancel stops the in-flight op.
+	Cancel(ctx context.Context) error
+}
 
 type Proposer interface {
 	Propose(ctx context.Context, name secrets.OperationName, params executor.OperationParameters) error

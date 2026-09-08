@@ -15,13 +15,13 @@ import (
 	"github.com/eliasvasylenko/secret-agent/internal/executor"
 	"github.com/eliasvasylenko/secret-agent/internal/secrets"
 	"github.com/eliasvasylenko/secret-agent/internal/server"
-	"github.com/eliasvasylenko/secret-agent/internal/store"
+	"github.com/eliasvasylenko/secret-agent/internal/backend"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 )
 
-// Ensure that *InstanceClient satisfies the store.Instances interface.
-var _ store.Instances = (*InstanceClient)(nil)
+// Ensure that *InstanceClient satisfies the backend.Instances interface.
+var _ backend.Instances = (*InstanceClient)(nil)
 
 // cmp options for comparing secrets types that contain unexported fields.
 var cmpSecretOpts = cmp.Options{

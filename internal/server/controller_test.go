@@ -18,7 +18,7 @@ import (
 	"github.com/eliasvasylenko/secret-agent/internal/executor"
 	"github.com/eliasvasylenko/secret-agent/internal/mocks"
 	"github.com/eliasvasylenko/secret-agent/internal/secrets"
-	"github.com/eliasvasylenko/secret-agent/internal/store"
+	"github.com/eliasvasylenko/secret-agent/internal/backend"
 	"github.com/google/go-cmp/cmp"
 )
 
@@ -32,21 +32,21 @@ func (noopLimiter) Middleware(_ func(*http.Request) string, next http.Handler) h
 // expectStoreInstances registers two Instances lookups: one for the HTTP handler
 // and one for trackOperation's background await goroutine.
 func expectStoreInstances(mockStore *mocks.MockSecrets, mockInstances *mocks.MockInstances) {
-	fn := func(secretId string) store.Instances { return mockInstances }
+	fn := func(secretId string) backend.Instances { return mockInstances }
 	mocks.Expect(&mockStore.Mock, mockStore.Instances, fn)
 	mocks.Expect(&mockStore.Mock, mockStore.Instances, fn)
 }
 
-func expectOperationAwait(mockInstances *mocks.MockInstances, mockOperations *mocks.MockOperations, execDone chan struct{}, instance *secrets.Instance, await func(context.Context, int) (store.Event, *secrets.Instance, error)) {
-	mocks.Expect(&mockInstances.Mock, mockInstances.Operations, func(instanceId string) store.Operations {
+func expectOperationAwait(mockInstances *mocks.MockInstances, mockOperations *mocks.MockOperations, execDone chan struct{}, instance *secrets.Instance, await func(context.Context, int) (backend.Event, *secrets.Instance, error)) {
+	mocks.Expect(&mockInstances.Mock, mockInstances.Operations, func(instanceId string) backend.Operations {
 		return mockOperations
 	})
 	if await == nil {
-		await = func(context.Context, int) (store.Event, *secrets.Instance, error) {
+		await = func(context.Context, int) (backend.Event, *secrets.Instance, error) {
 			if execDone != nil {
 				defer close(execDone)
 			}
-			return store.NewCompletedEvent("", executor.OperationParameters{}), instance, nil
+			return backend.NewCompletedEvent("", executor.OperationParameters{}), instance, nil
 		}
 	}
 	mocks.Expect(&mockOperations.Mock, mockOperations.Await, await)
@@ -65,7 +65,7 @@ func (p noopPermissions) Middleware(_ auth.Permissions, next http.Handler) http.
 	})
 }
 
-func newTestController(t *testing.T, store store.Store, identity *auth.Identity) (*Controller, *http.ServeMux) {
+func newTestController(t *testing.T, secretBackend backend.Backend, identity *auth.Identity) (*Controller, *http.ServeMux) {
 	t.Helper()
 	c := NewController(store, noopLimiter{}, noopPermissions{identity: identity}, 5*time.Minute)
 	mux := http.NewServeMux()
@@ -132,7 +132,7 @@ func TestController_listInstances(t *testing.T) {
 	defer mockStore.Mock.Validate(t)
 	mockInstances := &mocks.MockInstances{}
 	defer mockInstances.Mock.Validate(t)
-	mocks.Expect(&mockStore.Mock, mockStore.Instances, func(secretId string) store.Instances {
+	mocks.Expect(&mockStore.Mock, mockStore.Instances, func(secretId string) backend.Instances {
 		if secretId != "sid" {
 			t.Errorf("Instances secretId = %q", secretId)
 		}
@@ -165,7 +165,7 @@ func TestController_getInstance(t *testing.T) {
 	defer mockStore.Mock.Validate(t)
 	mockInstances := &mocks.MockInstances{}
 	defer mockInstances.Mock.Validate(t)
-	mocks.Expect(&mockStore.Mock, mockStore.Instances, func(secretId string) store.Instances {
+	mocks.Expect(&mockStore.Mock, mockStore.Instances, func(secretId string) backend.Instances {
 		return mockInstances
 	})
 	mocks.Expect(&mockInstances.Mock, mockInstances.Get, func(ctx context.Context, instanceId string) (*secrets.Instance, error) {
@@ -254,10 +254,10 @@ func TestController_attachProcess_stdinReachesSubprocess(t *testing.T) {
 		}()
 		return instance, nil
 	})
-	expectOperationAwait(mockInstances, mockOperations, execDone, instance, func(context.Context, int) (store.Event, *secrets.Instance, error) {
+	expectOperationAwait(mockInstances, mockOperations, execDone, instance, func(context.Context, int) (backend.Event, *secrets.Instance, error) {
 		<-stdinRead
 		defer close(execDone)
-		return store.NewCompletedEvent("", executor.OperationParameters{}), instance, nil
+		return backend.NewCompletedEvent("", executor.OperationParameters{}), instance, nil
 	})
 
 	_, mux := newTestController(t, mockStore, &auth.Identity{Principal: "test-user"})
@@ -446,10 +446,10 @@ func TestController_getOperations(t *testing.T) {
 	defer mockInstances.Mock.Validate(t)
 	mockOperations := &mocks.MockOperations{}
 	defer mockOperations.Mock.Validate(t)
-	mocks.Expect(&mockStore.Mock, mockStore.Instances, func(secretId string) store.Instances {
+	mocks.Expect(&mockStore.Mock, mockStore.Instances, func(secretId string) backend.Instances {
 		return mockInstances
 	})
-	mocks.Expect(&mockInstances.Mock, mockInstances.Operations, func(instanceId string) store.Operations {
+	mocks.Expect(&mockInstances.Mock, mockInstances.Operations, func(instanceId string) backend.Operations {
 		if instanceId != "i1" {
 			t.Errorf("Operations instanceId=%s", instanceId)
 		}
@@ -487,15 +487,15 @@ func TestController_operationResult_withoutTrackedOperation(t *testing.T) {
 	defer mockInstances.Mock.Validate(t)
 	mockOperations := &mocks.MockOperations{}
 	defer mockOperations.Mock.Validate(t)
-	mocks.Expect(&mockStore.Mock, mockStore.Instances, func(secretId string) store.Instances {
+	mocks.Expect(&mockStore.Mock, mockStore.Instances, func(secretId string) backend.Instances {
 		return mockInstances
 	})
 	instance := &secrets.Instance{Id: "i1", Secret: secrets.Secret{Id: "sid", Version: 1}, Status: secrets.Status{OperationNumber: 1}}
-	mocks.Expect(&mockInstances.Mock, mockInstances.Operations, func(instanceId string) store.Operations {
+	mocks.Expect(&mockInstances.Mock, mockInstances.Operations, func(instanceId string) backend.Operations {
 		return mockOperations
 	})
-	mocks.Expect(&mockOperations.Mock, mockOperations.Await, func(ctx context.Context, opNumber int) (store.Event, *secrets.Instance, error) {
-		return store.NewCompletedEvent("", executor.OperationParameters{}), instance, nil
+	mocks.Expect(&mockOperations.Mock, mockOperations.Await, func(ctx context.Context, opNumber int) (backend.Event, *secrets.Instance, error) {
+		return backend.NewCompletedEvent("", executor.OperationParameters{}), instance, nil
 	})
 
 	_, mux := newTestController(t, mockStore, nil)
@@ -516,21 +516,21 @@ func TestController_operationResult(t *testing.T) {
 	defer mockInstances.Mock.Validate(t)
 	mockOperations := &mocks.MockOperations{}
 	defer mockOperations.Mock.Validate(t)
-	mocks.Expect(&mockStore.Mock, mockStore.Instances, func(secretId string) store.Instances {
+	mocks.Expect(&mockStore.Mock, mockStore.Instances, func(secretId string) backend.Instances {
 		return mockInstances
 	})
 	instance := &secrets.Instance{Id: "i1", Secret: secrets.Secret{Id: "sid", Version: 1}, Status: secrets.Status{OperationNumber: 1}}
-	mocks.Expect(&mockInstances.Mock, mockInstances.Operations, func(instanceId string) store.Operations {
+	mocks.Expect(&mockInstances.Mock, mockInstances.Operations, func(instanceId string) backend.Operations {
 		if instanceId != "i1" {
 			t.Errorf("Operations instanceId=%q", instanceId)
 		}
 		return mockOperations
 	})
-	mocks.Expect(&mockOperations.Mock, mockOperations.Await, func(ctx context.Context, opNumber int) (store.Event, *secrets.Instance, error) {
+	mocks.Expect(&mockOperations.Mock, mockOperations.Await, func(ctx context.Context, opNumber int) (backend.Event, *secrets.Instance, error) {
 		if opNumber != 1 {
 			t.Errorf("Await opNumber=%d", opNumber)
 		}
-		return store.NewCompletedEvent("", executor.OperationParameters{}), instance, nil
+		return backend.NewCompletedEvent("", executor.OperationParameters{}), instance, nil
 	})
 
 	c, mux := newTestController(t, mockStore, nil)

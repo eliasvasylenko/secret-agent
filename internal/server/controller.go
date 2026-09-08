@@ -12,14 +12,14 @@ import (
 	"github.com/eliasvasylenko/secret-agent/internal/auth"
 	"github.com/eliasvasylenko/secret-agent/internal/executor"
 	"github.com/eliasvasylenko/secret-agent/internal/secrets"
-	"github.com/eliasvasylenko/secret-agent/internal/store"
+	"github.com/eliasvasylenko/secret-agent/internal/backend"
 )
 
 // DefaultMaxPollDuration is the maximum time an operation result poll may block.
 const DefaultMaxPollDuration = 5 * time.Second
 
 type Controller struct {
-	secretStore  store.Store
+	secretStore  backend.Backend
 	operations   sync.Map
 	middleware   func(perms auth.Permissions, next http.HandlerFunc) http.Handler
 	operationTtl time.Duration
@@ -31,7 +31,7 @@ type operationMapKey struct {
 	operationNumber int
 }
 
-func NewController(secretStore store.Store, limiter limiter, permissions permissions, operationTtl time.Duration) *Controller {
+func NewController(secretStore backend.Backend, limiter limiter, permissions permissions, operationTtl time.Duration) *Controller {
 	limiterKey := func(r *http.Request) string {
 		return identityFromContext(r.Context()).Principal
 	}

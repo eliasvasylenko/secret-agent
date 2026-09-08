@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/eliasvasylenko/secret-agent/internal/store"
+	"github.com/eliasvasylenko/secret-agent/internal/backend"
 )
 
 type Server struct {
@@ -24,7 +24,7 @@ type ServerConfig struct {
 	OutputTTL     time.Duration
 }
 
-func New(config ServerConfig, secretStore store.Store, permissions *Permissions) *Server {
+func New(config ServerConfig, secretStore backend.Backend, permissions *Permissions) *Server {
 	limiter := NewLimiter(config.RequestLimit, config.RequestWindow)
 	return &Server{
 		config:     config,

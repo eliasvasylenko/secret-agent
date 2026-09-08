@@ -2,7 +2,7 @@
 
 Detailed plan to migrate secret-agent to the architecture in [`design.md`](design.md). Work is ordered so each phase produces a compilable, testable increment where possible.
 
-**Current state:** branch has HTTP 101 attach (per-stream) but old store/controller/sqlite/client shapes; `store.go` is a partial sketch; tree does not compile against it.
+**Current state:** Phases 0–3 done (sqlite implements `backend.Backend` with `Handle`). `internal/server` and `internal/cli` still use the old store API — tree does not fully compile until Phases 4–6.
 
 **Out of scope for early phases:** federation wire format, `Proposer` behaviour inside scripts, aggregate web API, SSH transport.
 
@@ -24,11 +24,11 @@ Decide and document in `design.md` (append “Decisions” section):
 | `Target` | struct `{SecretID, InstanceID}` vs encode in `Run` args | InstanceID empty for create |
 | Op name type | `secrets.OperationName` vs string | Prefer typed |
 | History | `Catalog.Operations().List(...)` vs `Runner` doesn’t list | List is read-only |
-| `Run` return | `(*Instance, Wait, error)` — see design.md §0.1 |
+| `Run` return | `(*Instance, Handle, error)` — see design.md §0.1 |
 
 **Deliverable:** `docs/design.md` “Decisions” with chosen signatures (copy-pasteable Go).
 
-### 0.2 `Run` / `Wait` contract
+### 0.2 `Run` / `Handle` contract
 
 Write pseudo-code for three implementations:
 
@@ -39,7 +39,7 @@ Write pseudo-code for three implementations:
 Resolve:
 
 - Does `Runner.Run` take `stdio` + `proposer`, or does HTTP server ignore those params (slot already bound)?
-- Who calls `Wait` on server — nobody (slot goroutine); client/sqlite only?
+- Who calls `Handle.Wait` on server — nobody (slot goroutine); client/sqlite only?
 - Exit code parsing: add helper in `command` or `executor`?
 
 **Deliverable:** sequence diagram (server + client) in `design.md` or here; explicit “ctx must not cross” rule for server POST handler.
@@ -91,56 +91,61 @@ Decide slot states: `waiting_attach` → `waiting_start` → `running` → `done
 ### 0.6 Porcelain package
 
 - Package name: `internal/ops` (confirm).
-- Functions: `Create`, `Destroy`, `Activate`, `Deactivate`, `Test` taking `store.Runner` + ids + params + proposer + stdio.
-- Whether porcelain wraps `Run`+immediate `Wait` for CLI convenience.
+- Functions: `Create`, `Destroy`, `Activate`, `Deactivate`, `Test` taking `backend.Runner` + ids + params + proposer + stdio.
+- Whether porcelain wraps `Run`+immediate `Handle.Wait` for CLI convenience.
 
 **Deliverable:** `ops` package doc comment only (empty package OK).
 
 ---
 
-## Phase 1 — Store interfaces (`internal/store`) ✅
+## Phase 1 — Backend interfaces (`internal/backend`) ✅
 
 Goal: stable interfaces; compile with stub mocks only.
 
 1. Replace `Store` / `Operations` / `Start` with:
-   - `Agent`: `Catalog()` + `Runner(secretId)`
+   - `Backend`: `Catalog()` + `Runner(secretId)`
    - `Catalog`: `Secrets`, `Instances` (incl. `GetActive`), `Operations.List`
-   - `Runner`: `Run(...) (*secrets.Instance, Wait, error)`; `Wait` joins background work (callable multiple times)
+   - `Runner`: `Run(...) (*secrets.Instance, Handle, error)`; `Handle.Wait` joins; `Handle.Cancel` stops the op
 2. Use `secrets.OperationName` on `Proposer.Propose`; keep `StaleOperationError`, `UnknownOperationError`.
 3. Update `internal/mocks` to match (minimal compile stubs).
 4. **Do not** update sqlite/client/server yet — expect repo broken except `store` + `mocks` package tests.
 
-**Verification:** `go build ./internal/store/... ./internal/mocks/...`
+**Verification:** `go build ./internal/backend/... ./internal/mocks/...`
 
 ---
 
-## Phase 2 — Porcelain (`internal/ops`)
+## Phase 2 — Porcelain (`internal/ops`) ✅
 
 Goal: typed entry points for CLI/tests without touching HTTP.
 
-1. Create `internal/ops` with wrappers: `inst, wait, err := runner.Run(...); return wait(ctx)`.
+1. Create `internal/ops` with wrappers: `inst, handle, err := runner.Run(...); return handle.Wait(ctx)`.
 2. Unit tests with mock `Runner` (optional, light).
 
 **Verification:** `go test ./internal/ops/...`
 
 ---
 
-## Phase 3 — Sqlite runner
+## Phase 3 — Sqlite runner ✅
 
 Goal: in-process agent path works end-to-end without HTTP.
 
-1. Refactor `SecretRespository`:
+1. Refactor sqlite into `Repository` (persistence) + `Backend` (`backend.Backend` adapter):
    - Implement `Catalog` accessors (`Secrets()`, `Instances()`, `Operations().List` only).
    - Implement `Runner(secretId)` (or single repo implementing `Runner` with target).
-2. **No HTTP attach slot** — `Run` persists then starts **`Execute` in background**; **`Wait`** joins; failure → `failedAt` + typed error.
+2. **No HTTP attach slot** — `Run` persists then starts **`Execute` in background**; **`Handle.Wait`** joins; **`Handle.Cancel`** stops execute ctx; failure → `failedAt` + typed error.
 3. Remove old `Create(..., stdio)` on `InstanceRepository`, `Await`, `Cancel`, nested `Operations(instanceId)` methods.
-4. `Proposer`: passed into background execute; no invoke until executor hook exists.
-5. Rewrite `internal/sqlite/store_test.go` via `ops` or direct `Runner`.
+4. `Proposer`: accepted on `Run` but not invoked until executor hook exists (Phase 8); `_ = proposer` in sqlite today.
+5. Rewrite `internal/sqlite/backend_test.go` via `ops` or direct `Runner`.
+6. **`Open` / `Backend` / `Repository`** — persistence in `repo.go`, thin `backend.Backend` adapter in `backend.go` (not “store”).
 
 **Discovery during implementation:**
 
 - Orphan row if caller never joins — **background still completes** op; row reaches terminal state. Orphan **attach slot** before POST still possible.
 - `GetActive` / list filters with `secretId *string` nil = all secrets.
+- **No global op registry** — do not use `map[opNumber]…` + mutex for join/cancel; each `Run` returns an **`opHandle`** closure (channel + `execCancel`).
+- **`Handle.Wait` abandon is repeatable** — `wait(ctx)` ctx expiry abandons waiting only; op keeps running; a later `Handle.Wait` can still join. **`ops`** additionally calls **`Handle.Cancel`** when wait ctx dies (CLI Ctrl+C policy).
+- **`syncPlanRevisions`** — pre-existing; pins instance plan version in DB at create/update (not new Phase 3 logic).
+- Secret-level op history: **`Catalog.Operations().List(ctx, &secretId, nil, from, to)`** — CLI `History` command migrates here in Phase 6 (replaces old `Backend.History`).
 
 **Verification:** `go test ./internal/sqlite/...`
 
@@ -154,14 +159,14 @@ Goal: attach-before-start, per `(secretId, principal)`, no reattach.
 2. New attach routes: `/secrets/{secretId}/attach/{stream}` (drop op number from path).
 3. Attach handler:
    - Create or join slot for `(secretId, principal)`.
-   - Claim stream once; disconnect → cancel slot ctx, fail op if running.
+   - Claim stream once; disconnect → **`Handle.Cancel`** / slot execute ctx cancel, fail op if running.
 4. Refactor `createInstance` / `createOperation`:
    - Under `r.Context()`: validate slot exists + attach ready, persist op, return `Instance` JSON.
    - **Do not** pass `r.Context()` to executor.
    - Start executor on slot ctx using existing pipes.
 5. Remove `trackOperation` background await, `/result` poll, old attach paths keyed by opNumber (unless temporarily kept behind flag — prefer delete).
 6. Rename wire DTOs (`RunRequest`, etc.); map to `executor.OperationParameters`.
-7. Controller depends on `store.Catalog` for reads; start path uses catalog/runner or inlined store calls — **decide in 0.1** whether server holds `store.Agent` or talks to sqlite directly today.
+7. Controller depends on `backend.Catalog` for reads; start path uses catalog/runner or inlined sqlite calls — server holds sqlite directly today, not full `Backend` on wire handlers.
 
 **Discovery during implementation:**
 
@@ -174,12 +179,12 @@ Goal: attach-before-start, per `(secretId, principal)`, no reattach.
 
 ## Phase 5 — HTTP client runner
 
-Goal: `client` implements `store.Runner` using attach + POST + Wait.
+Goal: `client` implements `backend.Runner` using attach + POST + `Handle`.
 
-1. Refactor `SecretClient` → implement `Catalog`.
+1. Refactor `SecretClient` → implement `backend.Backend` (`Catalog` + `Runner`).
 2. `Runner(secretId)`:
    - Open attach upgrades, POST start.
-   - Return accepted `*Instance` + **`Wait`** join (background pump already running; server executes after POST).
+   - Return accepted `*Instance` + **`Handle`** (background pump already running; server executes after POST; **`Cancel`** tears down attach).
 3. **Discovery:** how client learns op finished without `/result`:
    - Option A: attach conn EOF + server closes pipes when done; client infers from copy return + GET instance.
    - Option B: small JSON “done” frame on control stream (later).
@@ -193,7 +198,7 @@ Goal: `client` implements `store.Runner` using attach + POST + Wait.
 
 ## Phase 6 — CLI + serve wiring
 
-1. `NewStore` returns type with `Catalog()` + `Runner(secretId)`.
+1. `NewStore` returns `backend.Backend` (sqlite or HTTP client).
 2. CLI read commands → `Catalog`.
 3. CLI mutating commands → `ops.Create` etc. with terminal stdio + noop `Proposer`.
 4. `serve` passes sqlite repo (implements catalog + runner) into server.
@@ -253,7 +258,8 @@ Phases 3 and 4 can proceed in parallel after Phase 1 if two people; Phase 5 need
 | Risk | Mitigation |
 |------|------------|
 | Client can’t detect op completion without `/result` | Decide in Phase 0.2 / 5; prototype early |
-| Start/Wait awkward on server | Server never exposes `Wait`; slot goroutine only |
+| Start/Handle awkward on server | Server never exposes `Handle` to wire; slot goroutine only |
+| Global op map for join/cancel by op number | **`Handle` closure per `Run`** — no registry (Phase 3 lesson) |
 | Large bang refactor | Phase 1 mocks; phase 3 sqlite before client |
 | `Run` API still wrong after Phase 1 | Phase 0 must finish first; cheap to change only `store` |
 | Tests assume old `Create(..., stdio)` | Rewrite tests per phase, not in one go |

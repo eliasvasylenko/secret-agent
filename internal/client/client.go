@@ -15,7 +15,7 @@ import (
 	"github.com/eliasvasylenko/secret-agent/internal/executor"
 	"github.com/eliasvasylenko/secret-agent/internal/secrets"
 	"github.com/eliasvasylenko/secret-agent/internal/server"
-	"github.com/eliasvasylenko/secret-agent/internal/store"
+	"github.com/eliasvasylenko/secret-agent/internal/backend"
 )
 
 type SecretClient struct {
@@ -120,7 +120,7 @@ func (c *SecretClient) History(ctx context.Context, secretId string, from int, t
 	return Do[[]*secrets.Operation](c.client, req, err)
 }
 
-func (c *SecretClient) Instances(secretId string) store.Instances {
+func (c *SecretClient) Instances(secretId string) backend.Instances {
 	return &InstanceClient{
 		parent:   c,
 		secretId: secretId,
@@ -257,5 +257,5 @@ func (rw attachReadWriter) Write(p []byte) (int, error) {
 	return rw.w.Write(p)
 }
 
-var _ store.Store = (*SecretClient)(nil)
-var _ store.Instances = (*InstanceClient)(nil)
+var _ backend.Backend = (*SecretClient)(nil)
+var _ backend.Instances = (*InstanceClient)(nil)

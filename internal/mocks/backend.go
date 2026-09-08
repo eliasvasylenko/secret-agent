@@ -3,21 +3,21 @@ package mocks
 import (
 	"context"
 
+	"github.com/eliasvasylenko/secret-agent/internal/backend"
 	"github.com/eliasvasylenko/secret-agent/internal/command"
 	"github.com/eliasvasylenko/secret-agent/internal/executor"
 	"github.com/eliasvasylenko/secret-agent/internal/secrets"
-	"github.com/eliasvasylenko/secret-agent/internal/store"
 )
 
-type MockAgent struct {
+type MockBackend struct {
 	Mock
 }
 
-func (a *MockAgent) Catalog() store.Catalog {
+func (a *MockBackend) Catalog() backend.Catalog {
 	return nextCall(&a.Mock, a.Catalog)()
 }
 
-func (a *MockAgent) Runner(secretId string) store.Runner {
+func (a *MockBackend) Runner(secretId string) backend.Runner {
 	return nextCall(&a.Mock, a.Runner)(secretId)
 }
 
@@ -25,15 +25,15 @@ type MockCatalog struct {
 	Mock
 }
 
-func (c *MockCatalog) Secrets() store.Secrets {
+func (c *MockCatalog) Secrets() backend.Secrets {
 	return nextCall(&c.Mock, c.Secrets)()
 }
 
-func (c *MockCatalog) Instances() store.Instances {
+func (c *MockCatalog) Instances() backend.Instances {
 	return nextCall(&c.Mock, c.Instances)()
 }
 
-func (c *MockCatalog) Operations() store.Operations {
+func (c *MockCatalog) Operations() backend.Operations {
 	return nextCall(&c.Mock, c.Operations)()
 }
 
@@ -82,8 +82,8 @@ func (r *MockRunner) Run(
 	name secrets.OperationName,
 	instanceId string,
 	params executor.OperationParameters,
-	proposer store.Proposer,
+	proposer backend.Proposer,
 	stdio command.Stdio,
-) (*secrets.Instance, store.Wait, error) {
+) (*secrets.Instance, backend.Handle, error) {
 	return nextCall(&r.Mock, r.Run)(ctx, name, instanceId, params, proposer, stdio)
 }

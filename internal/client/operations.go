@@ -12,7 +12,7 @@ import (
 	"github.com/eliasvasylenko/secret-agent/internal/executor"
 	"github.com/eliasvasylenko/secret-agent/internal/secrets"
 	"github.com/eliasvasylenko/secret-agent/internal/server"
-	"github.com/eliasvasylenko/secret-agent/internal/store"
+	"github.com/eliasvasylenko/secret-agent/internal/backend"
 )
 
 type OperationsClient struct {
@@ -20,7 +20,7 @@ type OperationsClient struct {
 	instanceId string
 }
 
-func (c *InstanceClient) Operations(instanceId string) store.Operations {
+func (c *InstanceClient) Operations(instanceId string) backend.Operations {
 	return &OperationsClient{
 		parent:     c,
 		instanceId: instanceId,
@@ -40,11 +40,11 @@ func (c *OperationsClient) List(ctx context.Context, from int, to int) ([]*secre
 	return Do[[]*secrets.Operation](c.parent.parent.client, req, err)
 }
 
-func (c *OperationsClient) Process(context.Context, int) (*store.Process, error) {
+func (c *OperationsClient) Process(context.Context, int) (*backend.Process, error) {
 	return nil, fmt.Errorf("process attach not implemented")
 }
 
-func (c *OperationsClient) Await(ctx context.Context, operationNumber int) (store.Event, *secrets.Instance, error) {
+func (c *OperationsClient) Await(ctx context.Context, operationNumber int) (backend.Event, *secrets.Instance, error) {
 	maxWait := server.DefaultMaxPollDuration
 	path := fmt.Sprintf("/secrets/%s/instances/%s/operations/%d/result",
 		c.parent.secretId, c.instanceId, operationNumber)
@@ -61,7 +61,7 @@ func (c *OperationsClient) Await(ctx context.Context, operationNumber int) (stor
 		req.URL.RawQuery = query.Encode()
 		instance, err := Do[*secrets.Instance](c.parent.parent.client, req, nil)
 		if err == nil {
-			event := store.NewCompletedEvent("", executor.OperationParameters{
+			event := backend.NewCompletedEvent("", executor.OperationParameters{
 				Forced:    instance.Status.Forced,
 				Reason:    instance.Status.Reason,
 				StartedBy: instance.Status.StartedBy,
@@ -99,4 +99,4 @@ func (c *OperationsClient) Cancel(ctx context.Context, operationNumber int) erro
 	return nil
 }
 
-var _ store.Operations = (*OperationsClient)(nil)
+var _ backend.Operations = (*OperationsClient)(nil)
