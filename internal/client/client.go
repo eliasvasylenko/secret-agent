@@ -156,7 +156,7 @@ func (c *InstanceClient) GetActive(ctx context.Context) (*secrets.Instance, erro
 }
 
 func (c *InstanceClient) Create(ctx context.Context, parameters executor.OperationParameters, stdio command.Stdio) (*secrets.Instance, error) {
-	body := server.OperationParameters{
+	body := server.OperationRequest{
 		Env:    parameters.Env,
 		Forced: parameters.Forced,
 		Reason: parameters.Reason,
@@ -190,9 +190,9 @@ func (c *InstanceClient) Test(ctx context.Context, instanceId string, parameters
 }
 
 func (c *InstanceClient) startOperation(ctx context.Context, instanceId string, name secrets.OperationName, parameters executor.OperationParameters, stdio command.Stdio) (*secrets.Instance, error) {
-	body := server.CreateOperationParameters{
+	body := server.NamedOperationRequest{
 		Name: name,
-		OperationParameters: server.OperationParameters{
+		OperationRequest: server.OperationRequest{
 			Env:    parameters.Env,
 			Forced: parameters.Forced,
 			Reason: parameters.Reason,

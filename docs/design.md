@@ -7,7 +7,9 @@ Concise record of settled constraints and open tensions. Supersedes parts of `pl
 - **Secret** — versioned plan (scripts for create/activate/…).
 - **Instance** — deployed copy of a secret; many instances, **one active** per secret.
 - **Operation** (`secrets.Operation`) — audit record: op number, name, status, timestamps. Not the same as HTTP attach state.
-- **Per secret**, mutating work is effectively **serial** for a given principal; reads (`List`/`Get`) are unconstrained.
+- Attach discovery is serial only while assembling one unnamed pending slot per
+  `(secretId, principal)`. Consuming that slot does **not** serialize operation execution.
+  Reads (`List`/`Get`) are unconstrained.
 
 ## Layering
 
@@ -18,13 +20,14 @@ Concise record of settled constraints and open tensions. Supersedes parts of `pl
 | **Porcelain** | `ops` (separate) | Typed `Create`/`Activate`/… calling `Runner.Run`. CLI imports `ops`, not raw runner. |
 | **HTTP** | `server` | Attach routes + JSON start; maps to runner semantics. |
 | **Execute** | `executor` | Run subprocess; **`executor.OperationParameters`** is the single domain params type. |
-| **Wire DTOs** | `server` | JSON request bodies only (e.g. `RunRequest`); map to `executor.OperationParameters` + peer identity. |
+| **Wire DTOs** | `server` | JSON request bodies only (e.g. `OperationRequest`); map to `executor.OperationParameters` + peer identity. |
 
 ## HTTP attach (current direction)
 
 - **Attach before start**: open stdio upgrades, then POST start/run.
 - **Slot key**: `(secretId, principal)` — principal from transport (Unix peer creds), not request body.
-- **One slot per (secret, principal)**; no reattach; **disconnect = cancel** op.
+- **One pending slot per (secret, principal)**; POST consumes it, allowing the next
+  slot to attach while the previous operation runs. No reattach to a consumed slot.
 - Routes (target shape): `POST /secrets/{secretId}/attach/{stdin|stdout|stderr}` → then `POST …/instances` or `…/operations`.
 - Server in-memory type: **`attachSlot`** (not `operation`) — pipes, attach claims, `startedBy`. Registry keyed by `(secretId, principal)` until op number exists.
 
@@ -61,23 +64,25 @@ Runner.Run(...) (instance *secrets.Instance, handle Handle, err error)
 | Path | What starts in background when `Run` succeeds |
 |------|-----------------------------------------------|
 | **sqlite** | Goroutine: `executor.Execute` + complete op in DB |
-| **HTTP client** | Goroutine: pump attach (server already `StartExecute` after POST) |
-| **HTTP server** | Slot `StartExecute` after POST response (no `Wait` on wire) |
+| **HTTP client** | Goroutines: attach pumps; POST invokes the server runner |
+| **HTTP server** | `Runner.Run` starts execute before returning the accepted snapshot |
 
 **`Handle.Wait` = join:** blocks until background work completes. **`wait(ctx)`** ctx abandons **waiting only** — the op keeps running; **`Handle.Wait` may be called again** on the same handle to join later. **`Handle.Cancel`** stops the op. If `Run` returns `err != nil`, **`handle` is nil**.
 
-**Start (HTTP POST)** runs under **`r.Context()`** only long enough to validate, persist op, return `Instance`. Request ends; that ctx must **not** bound subprocess or attach pumps. **Run (async)** uses attach-slot / execute ctx; slot **`Cancel`** = attach disconnect.
+**`Runner.Run(ctx, …)`:** `ctx` covers **this call only** (accept / persist). It must not outlive `Run` as the execute or attach-pump lifetime — that would be surprising, and HTTP POST’s `r.Context()` ends when the response is written. Background work is joined/stopped via **`Handle`**. Passing `r.Context()` into `Run` is correct.
+
+**Start (HTTP POST)** uses **`r.Context()`** as that accept ctx. Request ends; subprocess and attach copies use **attach-slot / execute ctx**. Slot **`Cancel`** = stdout/stderr disconnect (or any stream drop before POST). Stdin EOF while running closes the process stdin; it does not cancel the op.
 
 ### Unified invariant (both backend implementations)
 
 **Subprocess starts when I/O is ready at the end of accept — never when the caller first calls `wait`.**
 
-If HTTP only started the op on `wait`, attach-before-start would be pointless (you could POST, attach, then “really start” on await). Attach-first exists precisely so **streams are connected before `Execute`**, with start triggered by **POST + slot `StartExecute`**, not by the client’s join.
+If HTTP only started the op on `wait`, attach-before-start would be pointless (you could POST, attach, then “really start” on await). Attach-first exists precisely so **streams are connected before `Execute`**, with start triggered by the server's **`Runner.Run`** call during POST, not by the client’s join.
 
 | | When is I/O ready? | When does `Execute` start? | What does `Handle.Wait` do? |
 |--|-------------------|---------------------------|------------------------------|
 | **sqlite** | `Run` has `command.Stdio` in-process | **`launch`** goroutine before `Run` returns | Join on per-Run `opHandle.done` channel |
-| **HTTP** | Attach upgrades done + POST accepted | **Server** `StartExecute` after POST (client pump goroutine runs in parallel) | Join pump + terminal instance |
+| **HTTP** | Attach upgrades done before POST | **Server** `Runner.Run` starts execute before returning the POST snapshot | Join pump + terminal instance |
 
 **Historical “delay until attach” (Jul 2025):** for **HTTP / federation**, not sqlite. Problems it solved:
 
@@ -97,7 +102,7 @@ Failure: **`failedAt`** in store, `err != nil` — **`errors.As`** for typed exi
 ## Parameters naming
 
 - **`executor.OperationParameters`** — domain (reason, forced, env, startedBy, expectedOpNumber).
-- **`server.RunRequest`** (rename from `OperationParameters`) — JSON subset; controller sets `StartedBy` from identity.
+- **`server.OperationRequest`** / **`NamedOperationRequest`** — JSON subset; controller sets `StartedBy` from identity.
 
 ## Proposer
 
@@ -160,7 +165,7 @@ Example: John runs an op on **host A**; the script triggers a dependent op on **
 
 **How (Phase 8 — not v1):** A is starter+attacher on B for **stdio of B’s script**. **John’s consent** is a separate leg: A’s `Proposer` may **forward a pipe** so John authenticates **directly to B** and B records OK. B then allows A’s attach/start (or unblocks a pending proposal). A must not be able to MITM that leg — see **Proposer** § threat model. Reject designs where A submits a bearer “John approved” token B cannot cryptographically or session-wise tie to John.
 
-**Implications for attach-before-start:** unchanged for A↔B stdio — A attach slot, POST, `StartExecute`. **Authorisation** may complete inside `Propose` (blocking parent on A) before A POSTs start on B, or B holds start until John’s OK is on record — exact ordering TBD in Phase 8.
+**Implications for attach-before-start:** unchanged for A↔B stdio — A attaches streams, then POST invokes B's `Runner.Run`. **Authorisation** may complete inside `Propose` (blocking parent on A) before A POSTs start on B, or B holds start until John’s OK is on record — exact ordering TBD in Phase 8.
 
 **Audit:** B’s op records `startedBy = A`; John’s involvement is in the **authorisation proof** and/or parent op on A (reason chain, proposer log), not as B’s transport principal.
 
@@ -256,7 +261,7 @@ type Proposer interface {
 | Phase | Who | What runs |
 |-------|-----|-----------|
 | **Accept** | `Runner.Run` (sync) | Persist op; HTTP client: attach + POST. Return accepted `*Instance` + **`Handle`**. |
-| **Background** | Goroutine / slot (async) | Sqlite: `Execute` + DB complete. HTTP client: pump attach. Server: slot `StartExecute` after POST. |
+| **Background** | Goroutine / slot (async) | Sqlite/server runner: `Execute` + DB complete. HTTP client: pump attach. |
 | **Join** | `Handle.Wait(ctx)` | Block until background done; return terminal `(instance, err)`. Abandoning wait (`ctx` done) does **not** stop the op; call **`Wait` again** to re-join. **`Handle.Cancel`** is the only op-stop path on the handle (porcelain may call **`Cancel`** when wait ctx dies — CLI policy). |
 
 **Do not:** maintain a global `map[opNumber]operationRuntime` (or similar) for join/cancel lookup. Each successful **`Run`** returns a **`Handle`** that closes over that op’s goroutine state (`done` channel, execute ctx, terminal snapshot). Idempotent re-**`Wait`** after completion is fine; multi-caller join before done is not a hard HTTP requirement.
@@ -266,10 +271,10 @@ type Proposer interface {
 | Implementation | `Run(..., stdio, proposer)` | Background | `Handle` |
 |----------------|----------------------------|------------|----------|
 | **sqlite** | Passed into background `Execute` goroutine started before `Run` returns | **`Execute`** | `Wait` joins; `Cancel` stops execute ctx |
-| **HTTP client** | Attach in `Run`; pump uses stdio in background goroutine | **Pump attach** (server executes after POST) | `Wait` joins pump; `Cancel` tears down attach |
-| **HTTP server POST** | Slot pipes bound before POST | **`StartExecute` on slot** after response | Not exposed on wire; slot disconnect → **`Cancel`** |
+| **HTTP client** | Attach in `Run`; pump uses stdio in background goroutines | **Pump attach** (POST starts server runner) | `Wait` joins pump; `Cancel` tears down attach |
+| **HTTP server POST** | Slot pipes bound before POST | **`Runner.Run`** starts execute before returning | Handle kept by slot; disconnect → **`Cancel`** |
 
-**Context rule (mandatory):** POST handler uses **`r.Context()`** only until op row + instance snapshot are persisted and JSON is written. **`Execute` and attach copy loops use `attachSlot.slotCtx`**, cancelled on stream disconnect or slot teardown. Never pass `r.Context()` into subprocess or attach pumps.
+**Context rule (mandatory):** `Runner.Run(ctx)` uses `ctx` only for accept. **`Execute` and attach copy loops use the handle/slot lifetime**, cancelled on slot teardown. Never retain `Run`’s ctx (including `r.Context()`) for subprocess or attach pumps.
 
 **Exit code:** subprocess non-zero → **`failedAt`** in DB + typed error from **`Handle.Wait`**. No **`ExitCode`** field on backend results.
 
@@ -335,17 +340,15 @@ func (r *sqliteRunner) Run(ctx, name, instanceId, params, proposer, stdio) (*sec
 
 ```go
 func (c *Controller) startOp(w, r, secretId, instanceId, name, params) {
-    slot := c.slots.get(secretId, principal(r))
-    if slot == nil || !slot.Ready() { return 409 }
-    ctx := r.Context()
-    inst, err := c.agent.Runner(secretId).Begin(ctx, name, instanceId, params) // or internal beginOp
+    slot := c.slots.take(secretId, principal(r))
+    inst, handle, err := c.agent.Runner(secretId).Run(
+        r.Context(), name, instanceId, params, noopProposer{}, slot.pipes.Stdio(),
+    )
     if err != nil { return err }
+    slot.watch(handle)
     writeJSON(w, inst)
-    slot.StartExecute(slot.slotCtx, inst, name, params) // uses slot.pipes, not r.Context()
 }
 ```
-
-(`Begin` is the persist-only half of `Run`; may live as unexported helper on sqlite runner until Phase 1 names it.)
 
 #### Pseudo-code — HTTP client
 
@@ -371,13 +374,12 @@ sequenceDiagram
     C->>S: POST attach/stdin,stdout,stderr (Upgrade)
     S->>Slot: create slot(principal)
     C->>S: POST …/operations (r.Context)
-    S->>DB: begin op
+    S->>DB: Runner.Run (accept + start background execute)
     DB-->>S: Instance
     S-->>C: 200 Instance JSON
-    S->>Slot: StartExecute(slotCtx)
     Note over C,S: POST ctx ends
     Note over C: Run starts pump goroutine
-    Slot->>Slot: Execute + copy loops
+    Slot->>Slot: Handle + copy loops remain active
     Slot-->>C: pipe EOF on done
     C->>C: wait(ctx) joins pump; returns instance + err
 ```
@@ -388,16 +390,16 @@ sequenceDiagram
 sequenceDiagram
     participant H as POST handler
     participant RC as r.Context
-    participant Slot as slotCtx
-    participant E as executor
+    participant R as Runner
+    participant Op as background op
 
-    H->>RC: beginOp (persist)
-    RC-->>H: ok
+    H->>R: Run(RC, ..., slot stdio)
+    R->>RC: persist
+    R->>Op: start with independent execute ctx
+    R-->>H: Instance + Handle
     H-->>H: write response
     Note over RC: cancelled when handler returns
-    H->>Slot: StartExecute (async)
-    Slot->>E: Execute(slotCtx, pipes)
-    Note over E: NOT using RC
+    Note over Op: NOT using RC; stopped via Handle.Cancel
 ```
 
 ### 0.3 HTTP routes
@@ -407,7 +409,7 @@ See [`http-api.md`](http-api.md). Summary:
 - **Remove** op-number attach paths, **`/result` long-poll**, **`DELETE …/operations/{n}`**.
 - **Attach before start** on `/secrets/{secretId}/attach/{stdin|stdout|stderr}`.
 - **v1 readiness:** require **stdout + stderr** attached before POST; **stdin required** if we want one simple rule — **require all three streams** for v1 (stricter, easier to reason about).
-- Status codes: **404** no slot, **409** busy / not ready, **426** missing Upgrade, **403** wrong principal.
+- Status codes: **404** no pending slot, **409** not ready / stream already claimed, **426** missing Upgrade, **403** wrong principal.
 
 ### 0.5 `attachSlot` state machine
 
@@ -420,25 +422,29 @@ type attachSlotKey struct {
 }
 
 type attachSlot struct {
-    key       attachSlotKey
-    startedBy string // same as key.principal for v1
-    slotCtx   context.Context
-    cancel    context.CancelFunc
-    pipes     processPipes
-    claims    attachClaims // which streams connected
-    opNumber  int          // set after POST start
-    // executor goroutine handle
+    key     attachSlotKey
+    pipes   attachPipes
+    ctx     context.Context // attach-copy lifetime
+    cancel  context.CancelFunc
+    claimed map[attachStream]bool
 }
 ```
 
-| State | Meaning | Transitions |
-|-------|---------|-------------|
-| **`waiting_attach`** | Slot exists; not all required streams connected | → **`ready`** when stdin+stdout+stderr claimed |
-| **`ready`** | All streams attached; waiting for POST start | → **`running`** on POST success; → **removed** on disconnect before POST |
-| **`running`** | Op persisted; subprocess + copy loops active | → **`done`** on normal exit; → **`cancelled`** on disconnect / slot cancel |
-| **`done` / `cancelled`** | Terminal; pipes closed; slot removed from map | — |
+The controller map contains **pending slots only**. Attach calls **`claim(stream)`** on
+the pending slot. Both claims and take run under the single controller registry lock.
+POST atomically **takes and removes** a ready slot, then invokes `Runner.Run` with its
+stdio. A new set of attaches may immediately create the next
+pending slot for the same `(secretId, principal)` while the previous operation runs.
 
-**On disconnect in `running`:** `cancel()` slotCtx → kill subprocess → mark op failed in DB → close all pipe ends → delete slot.
+The consumed slot remains reachable only by its attach handlers and completion
+watcher. It needs no mutex: cancellation is represented by its context, and the watcher
+owns the handle. **`close()`** cancels that context and closes the pipes; if close raced
+with `Runner.Run`, the watcher observes the already-cancelled context and cancels the
+new handle. There is no unclaim/repair path: attach setup or `Run` failure discards
+that slot.
+
+**On stdout/stderr disconnect after take:** close slot → `Handle.Cancel` → kill
+subprocess and mark op failed. Successful stdin EOF only closes process stdin.
 
 **Orphan `ready` slot:** defer timeout (Phase 7+); Phase 0 notes only.
 

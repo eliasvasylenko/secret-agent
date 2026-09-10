@@ -5,13 +5,16 @@ import (
 	"github.com/eliasvasylenko/secret-agent/internal/secrets"
 )
 
-type OperationParameters struct {
+// OperationRequest is the JSON body for POST …/instances (create).
+// Maps to executor.OperationParameters; server sets StartedBy from transport identity.
+type OperationRequest struct {
 	Env    command.Environment `json:"env"`
 	Forced bool                `json:"forced"`
 	Reason string              `json:"reason"`
 }
 
-type CreateOperationParameters struct {
-	Name                secrets.OperationName `json:"name"`
-	OperationParameters `json:""`
+// NamedOperationRequest is OperationRequest plus name for POST …/instances/{id}/operations.
+type NamedOperationRequest struct {
+	Name             secrets.OperationName `json:"name"`
+	OperationRequest `json:""`
 }

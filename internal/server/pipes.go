@@ -6,7 +6,7 @@ import (
 	"github.com/eliasvasylenko/secret-agent/internal/command"
 )
 
-type operationPipes struct {
+type attachPipes struct {
 	stdinR  io.ReadCloser
 	stdinW  io.WriteCloser
 	stdoutR io.ReadCloser
@@ -15,11 +15,11 @@ type operationPipes struct {
 	stderrW io.WriteCloser
 }
 
-func newOperationPipes() (*operationPipes, command.Stdio) {
+func newAttachPipes() *attachPipes {
 	stdinR, stdinW := io.Pipe()
 	stdoutR, stdoutW := io.Pipe()
 	stderrR, stderrW := io.Pipe()
-	pipes := &operationPipes{
+	return &attachPipes{
 		stdinR:  stdinR,
 		stdinW:  stdinW,
 		stdoutR: stdoutR,
@@ -27,15 +27,17 @@ func newOperationPipes() (*operationPipes, command.Stdio) {
 		stderrR: stderrR,
 		stderrW: stderrW,
 	}
-	stdio := command.Stdio{
-		Stdin:  stdinR,
-		Stdout: stdoutW,
-		Stderr: stderrW,
-	}
-	return pipes, stdio
 }
 
-func closeOperationPipes(p *operationPipes) {
+func (p *attachPipes) Stdio() command.Stdio {
+	return command.Stdio{
+		Stdin:  p.stdinR,
+		Stdout: p.stdoutW,
+		Stderr: p.stderrW,
+	}
+}
+
+func closeAttachPipes(p *attachPipes) {
 	if p == nil {
 		return
 	}

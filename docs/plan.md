@@ -2,7 +2,7 @@
 
 Detailed plan to migrate secret-agent to the architecture in [`design.md`](design.md). Work is ordered so each phase produces a compilable, testable increment where possible.
 
-**Current state:** Phases 0–3 done (sqlite implements `backend.Backend` with `Handle`). `internal/server` and `internal/cli` still use the old store API — tree does not fully compile until Phases 4–6.
+**Current state:** Phases 0–4 done (server attach-before-start + `Catalog` reads). `internal/client` still uses old attach-after-POST flow; `internal/cli` still uses old store API — tree does not fully compile until Phases 5–6.
 
 **Out of scope for early phases:** federation wire format, `Proposer` behaviour inside scripts, aggregate web API, SSH transport.
 
@@ -52,7 +52,7 @@ Finalize path matrix:
 |--------|--------|--------------|
 | Attach stdin/stdout/stderr | POST+Upgrade | `/secrets/{secretId}/attach/{stream}` |
 | Create | POST | `/secrets/{secretId}/instances` |
-| Instance op | POST | `/secrets/{secretId}/instances/{instanceId}/operations` body `{name, ...RunRequest}` |
+| Instance op | POST | `/secrets/{secretId}/instances/{instanceId}/operations` body `{name, ...OperationRequest}` |
 | List ops | GET | `/secrets/{secretId}/instances/{instanceId}/operations` or filtered list |
 
 Decide:
@@ -65,8 +65,8 @@ Decide:
 
 ### 0.4 Wire DTOs
 
-- Rename `server.OperationParameters` → `RunRequest`.
-- Rename `CreateOperationParameters` → `StartOperationRequest` (or fold into one type with `name` field).
+- Rename `server.OperationParameters` → `OperationRequest`.
+- Rename `CreateOperationParameters` → `NamedOperationRequest`.
 - Document JSON examples for create vs activate.
 
 **Deliverable:** small `docs/http-api.md` or section in `design.md`.
@@ -78,13 +78,14 @@ Rename `operation` → `attachSlot`; define:
 ```go
 type attachSlotKey struct { secretId, principal string }
 type attachSlot struct {
-    pipes, startedBy, slotCtx, cancel
-    attach claims; optional opNumber after start
-    // subprocess / executor goroutine
+    pipes, ctx, cancel
+    attach claims
 }
 ```
 
-Decide slot states: `waiting_attach` → `waiting_start` → `running` → `done`.
+Controller map holds pending slots only. POST atomically takes/removes a ready slot;
+claims and take share the controller registry lock. After take, the slot needs no lock:
+its watcher owns the handle and reacts to the slot cancellation context.
 
 **Deliverable:** state machine bullet list + what each transition triggers.
 
@@ -151,7 +152,7 @@ Goal: in-process agent path works end-to-end without HTTP.
 
 ---
 
-## Phase 4 — HTTP server attach slot + routes
+## Phase 4 — HTTP server attach slot + routes ✅
 
 Goal: attach-before-start, per `(secretId, principal)`, no reattach.
 
@@ -159,13 +160,14 @@ Goal: attach-before-start, per `(secretId, principal)`, no reattach.
 2. New attach routes: `/secrets/{secretId}/attach/{stream}` (drop op number from path).
 3. Attach handler:
    - Create or join slot for `(secretId, principal)`.
-   - Claim stream once; disconnect → **`Handle.Cancel`** / slot execute ctx cancel, fail op if running.
+   - Claim stream once; stdout/stderr disconnect (or any drop before POST) → **`Handle.Cancel`**. Stdin EOF while running does not cancel.
+   - POST consumes/removes the pending slot, so another slot may attach while that op runs.
 4. Refactor `createInstance` / `createOperation`:
    - Under `r.Context()`: validate slot exists + attach ready, persist op, return `Instance` JSON.
    - **Do not** pass `r.Context()` to executor.
    - Start executor on slot ctx using existing pipes.
 5. Remove `trackOperation` background await, `/result` poll, old attach paths keyed by opNumber (unless temporarily kept behind flag — prefer delete).
-6. Rename wire DTOs (`RunRequest`, etc.); map to `executor.OperationParameters`.
+6. Rename wire DTOs (`OperationRequest`, `NamedOperationRequest`); map to `executor.OperationParameters`.
 7. Controller depends on `backend.Catalog` for reads; start path uses catalog/runner or inlined sqlite calls — server holds sqlite directly today, not full `Backend` on wire handlers.
 
 **Discovery during implementation:**

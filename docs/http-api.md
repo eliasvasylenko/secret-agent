@@ -1,10 +1,13 @@
 # HTTP API (target)
 
-Wire format for the attach-before-start model. Domain logic uses `executor.OperationParameters`; JSON uses **`RunRequest`** only.
+Wire format for the attach-before-start model. Domain logic uses `executor.OperationParameters`; JSON uses **`OperationRequest`** / **`NamedOperationRequest`**.
 
 Principal is always from transport (Unix peer credentials), never from the request body.
 
-Attach slot key: **`(secretId, principal)`**. One in-flight slot per pair; no reattach; stream disconnect cancels the op.
+Pending attach slot key: **`(secretId, principal)`**. POST atomically consumes that
+slot; subsequent attaches may prepare another operation while the consumed one runs.
+**Stdout/stderr disconnect** (or any stream drop **before POST**) cancels the associated
+op. **Stdin EOF while running** closes process stdin only.
 
 ---
 
@@ -37,7 +40,7 @@ Attach slot key: **`(secretId, principal)`**. One in-flight slot per pair; no re
 |---------|-------------|
 | `POST …/operations/{opNumber}/attach/{stream}` | Attach before op number exists |
 | `GET …/operations/{opNumber}/result` (long-poll) | Attach stream EOF + GET instance |
-| `DELETE …/operations/{opNumber}` | Attach disconnect cancels op |
+| `DELETE …/operations/{opNumber}` | Stdout/stderr disconnect cancels op |
 
 ---
 
@@ -45,7 +48,7 @@ Attach slot key: **`(secretId, principal)`**. One in-flight slot per pair; no re
 
 **v1 rule:** POST start is rejected (**409**) until **stdout and stderr** are attached. **Stdin** attach required only when the operation’s script may read stdin (server may always require all three for simplicity in v1 — see design decisions).
 
-When POST succeeds, response returns initial **`Instance`** JSON (op accepted, `startedAt` set). Subprocess runs **after** response, under **attach-slot context**, not under the POST request context.
+When POST succeeds, response returns initial **`Instance`** JSON (op accepted, `startedAt` set). `Runner.Run` starts the subprocess before returning that snapshot, using an execute context independent of the POST request context.
 
 ---
 
@@ -56,14 +59,14 @@ When POST succeeds, response returns initial **`Instance`** JSON (op accepted, `
 | 101 | Attach upgrade OK |
 | 426 | Attach without Upgrade header |
 | 404 | No attach slot / unknown secret or instance |
-| 409 | Slot busy (op already running for this principal+secret); stream already claimed |
+| 409 | Pending slot not ready; stream already claimed |
 | 403 | Attach/start principal ≠ slot `startedBy` |
 
 ---
 
 ## JSON types (wire)
 
-### `RunRequest` (replaces `server.OperationParameters`)
+### `OperationRequest`
 
 ```json
 {
@@ -77,13 +80,13 @@ When POST succeeds, response returns initial **`Instance`** JSON (op accepted, `
 
 ### Create — `POST /secrets/{secretId}/instances`
 
-Body: `RunRequest` only.
+Body: `OperationRequest` only.
 
 Response **200**: `secrets.Instance` with new `id`, `status.operationNumber`, `status.startedAt`, etc.
 
 ### Instance operation — `POST …/instances/{instanceId}/operations`
 
-Body: **`StartOperationRequest`**
+Body: **`NamedOperationRequest`**
 
 ```json
 {

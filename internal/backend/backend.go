@@ -36,6 +36,9 @@ type Operations interface {
 }
 
 type Runner interface {
+	// Run persists the operation and starts background work before returning.
+	// ctx covers this invocation only (accept / persist). Implementations must
+	// not use it as the lifetime of execute or I/O pumps; Handle.Cancel stops that work.
 	Run(
 		ctx context.Context,
 		name secrets.OperationName,

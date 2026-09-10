@@ -3,35 +3,24 @@ package server
 import (
 	"context"
 	"fmt"
-	"log"
 	"net/http"
 	"strconv"
 	"sync"
-	"time"
 
 	"github.com/eliasvasylenko/secret-agent/internal/auth"
+	"github.com/eliasvasylenko/secret-agent/internal/backend"
 	"github.com/eliasvasylenko/secret-agent/internal/executor"
 	"github.com/eliasvasylenko/secret-agent/internal/secrets"
-	"github.com/eliasvasylenko/secret-agent/internal/backend"
 )
 
-// DefaultMaxPollDuration is the maximum time an operation result poll may block.
-const DefaultMaxPollDuration = 5 * time.Second
-
 type Controller struct {
-	secretStore  backend.Backend
-	operations   sync.Map
-	middleware   func(perms auth.Permissions, next http.HandlerFunc) http.Handler
-	operationTtl time.Duration
+	secretStore backend.Backend
+	slotsMu     sync.Mutex
+	slots       map[attachSlotKey]*attachSlot
+	middleware  func(perms auth.Permissions, next http.HandlerFunc) http.Handler
 }
 
-type operationMapKey struct {
-	secretId        string
-	instanceId      string
-	operationNumber int
-}
-
-func NewController(secretStore backend.Backend, limiter limiter, permissions permissions, operationTtl time.Duration) *Controller {
+func NewController(secretStore backend.Backend, limiter limiter, permissions permissions) *Controller {
 	limiterKey := func(r *http.Request) string {
 		return identityFromContext(r.Context()).Principal
 	}
@@ -39,10 +28,9 @@ func NewController(secretStore backend.Backend, limiter limiter, permissions per
 		return permissions.Middleware(perms, limiter.Middleware(limiterKey, next))
 	}
 	return &Controller{
-		secretStore:  secretStore,
-		operations:   sync.Map{},
-		middleware:   middleware,
-		operationTtl: operationTtl,
+		secretStore: secretStore,
+		slots:       make(map[attachSlotKey]*attachSlot),
+		middleware:  middleware,
 	}
 }
 
@@ -52,6 +40,12 @@ type limiter interface {
 
 type permissions interface {
 	Middleware(perms auth.Permissions, next http.Handler) http.Handler
+}
+
+type noopProposer struct{}
+
+func (noopProposer) Propose(context.Context, secrets.OperationName, executor.OperationParameters) error {
+	return nil
 }
 
 func (c *Controller) buildHandler(registerHandler func(pattern string, handler http.Handler)) {
@@ -71,6 +65,10 @@ func (c *Controller) buildHandler(registerHandler func(pattern string, handler h
 		auth.Permissions{auth.Instances: auth.Write},
 		c.createInstance,
 	))
+	registerHandler("GET /secrets/{secretId}/active", c.middleware(
+		auth.Permissions{auth.Instances: auth.Read},
+		c.getActiveInstance,
+	))
 	registerHandler("GET /secrets/{secretId}/instances/{instanceId}", c.middleware(
 		auth.Permissions{auth.Instances: auth.Read},
 		c.getInstance,
@@ -83,22 +81,14 @@ func (c *Controller) buildHandler(registerHandler func(pattern string, handler h
 		auth.Permissions{auth.Secrets: auth.Write, auth.Instances: auth.Write},
 		c.createOperation,
 	))
-	registerHandler("GET /secrets/{secretId}/instances/{instanceId}/operations/{opNumber}/result", c.middleware(
-		auth.Permissions{auth.Instances: auth.Read},
-		c.operationResult,
-	))
-	registerHandler("POST /secrets/{secretId}/instances/{instanceId}/operations/{opNumber}/attach/{stream}", c.middleware(
+	registerHandler("POST /secrets/{secretId}/attach/{stream}", c.middleware(
 		auth.Permissions{auth.Instances: auth.Write},
-		c.attachProcess,
-	))
-	registerHandler("DELETE /secrets/{secretId}/instances/{instanceId}/operations/{opNumber}", c.middleware(
-		auth.Permissions{auth.Instances: auth.Read},
-		c.cancelOperation,
+		c.attachSecret,
 	))
 }
 
 func (s *Controller) listSecrets(w http.ResponseWriter, r *http.Request) {
-	secs, err := s.secretStore.List(r.Context())
+	secs, err := s.secretStore.Catalog().Secrets().List(r.Context())
 	if err != nil {
 		writeError(w, NewErrorResponse(http.StatusBadRequest, err))
 		return
@@ -108,7 +98,7 @@ func (s *Controller) listSecrets(w http.ResponseWriter, r *http.Request) {
 
 func (s *Controller) getSecret(w http.ResponseWriter, r *http.Request) {
 	secretId := r.PathValue("secretId")
-	secret, err := s.secretStore.Get(r.Context(), secretId)
+	secret, err := s.secretStore.Catalog().Secrets().Get(r.Context(), secretId)
 	if err != nil {
 		writeError(w, NewErrorResponse(http.StatusBadRequest, err))
 		return
@@ -118,9 +108,12 @@ func (s *Controller) getSecret(w http.ResponseWriter, r *http.Request) {
 
 func (s *Controller) listInstances(w http.ResponseWriter, r *http.Request) {
 	secretId := r.PathValue("secretId")
-	instances := s.secretStore.Instances(secretId)
 	from, to, err := parseRange(r)
-	insts, err := instances.List(r.Context(), int(from), int(to))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	insts, err := s.secretStore.Catalog().Instances().List(r.Context(), &secretId, int(from), int(to))
 	if err != nil {
 		writeError(w, NewErrorResponse(http.StatusBadRequest, err))
 		return
@@ -130,40 +123,38 @@ func (s *Controller) listInstances(w http.ResponseWriter, r *http.Request) {
 
 func (s *Controller) createInstance(w http.ResponseWriter, r *http.Request) {
 	secretId := r.PathValue("secretId")
-	instances := s.secretStore.Instances(secretId)
-	var operationParameters OperationParameters
-	err := readBody(r, &operationParameters)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
 	identity := identityFromContext(r.Context())
 	if identity == nil {
-		writeError(w, NewErrorResponse(http.StatusInternalServerError, fmt.Errorf("identity not found in context")))
+		writeError(w, NewErrorResponse(http.StatusUnauthorized, fmt.Errorf("identity not found in context")))
 		return
 	}
-	parameters := executor.OperationParameters{
-		Env:       operationParameters.Env,
-		Forced:    operationParameters.Forced,
-		Reason:    operationParameters.Reason,
-		StartedBy: identity.Principal,
-	}
-	pipes, stdio := newOperationPipes()
-	instance, err := instances.Create(r.Context(), parameters, stdio)
-	if err != nil {
-		closeOperationPipes(pipes)
+
+	var opRequest OperationRequest
+	if err := readBody(r, &opRequest); err != nil {
 		writeError(w, err)
 		return
 	}
-	s.trackOperation(identity.Principal, instance, pipes)
+	s.startAttachedRun(w, r, secretId, "", secrets.Create, executor.OperationParameters{
+		Env:       opRequest.Env,
+		Forced:    opRequest.Forced,
+		Reason:    opRequest.Reason,
+		StartedBy: identity.Principal,
+	})
+}
+
+func (s *Controller) getActiveInstance(w http.ResponseWriter, r *http.Request) {
+	secretId := r.PathValue("secretId")
+	instance, err := s.secretStore.Catalog().Instances().GetActive(r.Context(), secretId)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
 	writeResult(w, instance, http.StatusOK)
 }
 
 func (s *Controller) getInstance(w http.ResponseWriter, r *http.Request) {
-	secretId := r.PathValue("secretId")
 	instanceId := r.PathValue("instanceId")
-	instances := s.secretStore.Instances(secretId)
-	instance, err := instances.Get(r.Context(), instanceId)
+	instance, err := s.secretStore.Catalog().Instances().Get(r.Context(), instanceId)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -179,8 +170,7 @@ func (s *Controller) getOperations(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	instances := s.secretStore.Instances(secretId)
-	operations, err := instances.Operations(instanceId).List(r.Context(), int(from), int(to))
+	operations, err := s.secretStore.Catalog().Operations().List(r.Context(), &secretId, &instanceId, int(from), int(to))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -191,130 +181,64 @@ func (s *Controller) getOperations(w http.ResponseWriter, r *http.Request) {
 func (s *Controller) createOperation(w http.ResponseWriter, r *http.Request) {
 	secretId := r.PathValue("secretId")
 	instanceId := r.PathValue("instanceId")
-	var operationParameters CreateOperationParameters
-	err := readBody(r, &operationParameters)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
 
 	identity := identityFromContext(r.Context())
 	if identity == nil {
 		writeError(w, NewErrorResponse(http.StatusUnauthorized, fmt.Errorf("identity not found in context")))
 		return
 	}
-	parameters := executor.OperationParameters{
-		Env:       operationParameters.Env,
-		Forced:    operationParameters.Forced,
-		Reason:    operationParameters.Reason,
+
+	var namedRequest NamedOperationRequest
+	if err := readBody(r, &namedRequest); err != nil {
+		writeError(w, err)
+		return
+	}
+	if !isInstanceOperation(namedRequest.Name) {
+		writeError(w, NewErrorResponse(http.StatusBadRequest, fmt.Errorf("cannot post operation %s", namedRequest.Name)))
+		return
+	}
+	s.startAttachedRun(w, r, secretId, instanceId, namedRequest.Name, executor.OperationParameters{
+		Env:       namedRequest.Env,
+		Forced:    namedRequest.Forced,
+		Reason:    namedRequest.Reason,
 		StartedBy: identity.Principal,
-	}
-	instances := s.secretStore.Instances(secretId)
+	})
+}
 
-	pipes, stdio := newOperationPipes()
-	var instance *secrets.Instance
-	switch operationParameters.Name {
-	case secrets.Activate:
-		instance, err = instances.Activate(r.Context(), instanceId, parameters, stdio)
-	case secrets.Deactivate:
-		instance, err = instances.Deactivate(r.Context(), instanceId, parameters, stdio)
-	case secrets.Destroy:
-		instance, err = instances.Destroy(r.Context(), instanceId, parameters, stdio)
-	case secrets.Test:
-		instance, err = instances.Test(r.Context(), instanceId, parameters, stdio)
+func isInstanceOperation(name secrets.OperationName) bool {
+	switch name {
+	case secrets.Activate, secrets.Deactivate, secrets.Destroy, secrets.Test:
+		return true
 	default:
-		closeOperationPipes(pipes)
-		writeError(w, NewErrorResponse(http.StatusBadRequest, fmt.Errorf("Cannot post operation %s", operationParameters.Name)))
-		return
+		return false
 	}
+}
+
+func (s *Controller) startAttachedRun(
+	w http.ResponseWriter,
+	r *http.Request,
+	secretId, instanceId string,
+	name secrets.OperationName,
+	parameters executor.OperationParameters,
+) {
+	identity := identityFromContext(r.Context())
+	slot, err := s.takeSlot(secretId, identity.Principal)
 	if err != nil {
-		closeOperationPipes(pipes)
 		writeError(w, err)
 		return
 	}
 
-	s.trackOperation(identity.Principal, instance, pipes)
+	// r.Context() is the accept ctx for Run (persist only); execute uses Handle.
+	instance, handle, err := s.secretStore.Runner(secretId).Run(
+		r.Context(), name, instanceId, parameters, noopProposer{}, slot.pipes.Stdio(),
+	)
+	if err != nil {
+		slot.close()
+		writeError(w, err)
+		return
+	}
+	slot.watch(handle)
 	writeResult(w, instance, http.StatusOK)
-}
-
-// register pipe handles for an in-flight operation and close them once the store reports completion.
-func (s *Controller) trackOperation(startedBy string, instance *secrets.Instance, pipes *operationPipes) {
-	op := &operation{
-		pipes:     pipes,
-		startedBy: startedBy,
-		done:      make(chan struct{}),
-	}
-	opNumber := instance.Status.OperationNumber
-	key := operationMapKey{secretId: instance.Secret.Id, instanceId: instance.Id, operationNumber: opNumber}
-	s.operations.Store(key, op)
-
-	go func() {
-		defer close(op.done)
-		instances := s.secretStore.Instances(instance.Secret.Id)
-		if _, _, err := instances.Operations(instance.Id).Await(context.Background(), opNumber); err != nil {
-			log.Printf("operation %d await: %v", opNumber, err)
-		}
-		closeOperationPipes(pipes)
-		time.AfterFunc(s.operationTtl, func() {
-			s.operations.Delete(key)
-		})
-	}()
-}
-
-func (s *Controller) operationResult(w http.ResponseWriter, r *http.Request) {
-	secretId := r.PathValue("secretId")
-	instanceId := r.PathValue("instanceId")
-	opNumber, err := parsePath(r, "opNumber", strconv.Atoi)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-
-	key := operationMapKey{secretId: secretId, instanceId: instanceId, operationNumber: opNumber}
-	load, ok := s.operations.Load(key)
-
-	maxWait, err := parseQuery(r, "maxWait", time.ParseDuration, DefaultMaxPollDuration)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	ctx, cancel := context.WithTimeout(r.Context(), maxWait)
-	defer cancel()
-
-	if ok {
-		op := load.(*operation)
-		select {
-		case <-op.done:
-		case <-ctx.Done():
-			writeError(w, NewErrorResponse(http.StatusRequestTimeout, ctx.Err()))
-			return
-		}
-	}
-
-	instances := s.secretStore.Instances(secretId)
-	_, instance, err := instances.Operations(instanceId).Await(ctx, opNumber)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-	writeResult(w, instance, http.StatusOK)
-}
-
-func (s *Controller) cancelOperation(w http.ResponseWriter, r *http.Request) {
-	secretId := r.PathValue("secretId")
-	instanceId := r.PathValue("instanceId")
-	opNumber, err := parsePath(r, "opNumber", strconv.Atoi)
-	if err != nil {
-		writeError(w, err)
-		return
-	}
-
-	instances := s.secretStore.Instances(secretId)
-	if err := instances.Operations(instanceId).Cancel(r.Context(), opNumber); err != nil {
-		writeError(w, err)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
 }
 
 func parseRange(r *http.Request) (int64, int64, error) {
@@ -336,20 +260,6 @@ func parseQuery[T any](r *http.Request, name string, parser func(s string) (T, e
 		return defaultValue, nil
 	}
 	value, err := parser(valueString)
-	if err != nil {
-		var empty T
-		return empty, NewErrorResponse(http.StatusBadRequest, fmt.Errorf("failed to parse '%s' - %w", name, err))
-	}
-	return value, nil
-}
-
-func parsePath[T any](r *http.Request, name string, parser func(s string) (T, error)) (T, error) {
-	numString := r.PathValue(name)
-	if numString == "" {
-		var empty T
-		return empty, NewErrorResponse(http.StatusBadRequest, fmt.Errorf("missing required parameter: %s", name))
-	}
-	value, err := parser(numString)
 	if err != nil {
 		var empty T
 		return empty, NewErrorResponse(http.StatusBadRequest, fmt.Errorf("failed to parse '%s' - %w", name, err))
