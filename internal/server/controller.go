@@ -57,33 +57,33 @@ func (c *Controller) buildHandler(registerHandler func(pattern string, handler h
 		auth.Permissions{auth.Secrets: auth.Read},
 		c.getSecret,
 	))
-	registerHandler("GET /secrets/{secretId}/instances", c.middleware(
-		auth.Permissions{auth.Instances: auth.Read},
-		c.listInstances,
-	))
-	registerHandler("POST /secrets/{secretId}/instances", c.middleware(
-		auth.Permissions{auth.Instances: auth.Write},
-		c.createInstance,
-	))
 	registerHandler("GET /secrets/{secretId}/active", c.middleware(
 		auth.Permissions{auth.Instances: auth.Read},
 		c.getActiveInstance,
 	))
-	registerHandler("GET /secrets/{secretId}/instances/{instanceId}", c.middleware(
-		auth.Permissions{auth.Instances: auth.Read},
-		c.getInstance,
-	))
-	registerHandler("GET /secrets/{secretId}/instances/{instanceId}/operations", c.middleware(
-		auth.Permissions{auth.Instances: auth.Read},
-		c.getOperations,
-	))
-	registerHandler("POST /secrets/{secretId}/instances/{instanceId}/operations", c.middleware(
-		auth.Permissions{auth.Secrets: auth.Write, auth.Instances: auth.Write},
-		c.createOperation,
-	))
 	registerHandler("POST /secrets/{secretId}/attach/{stream}", c.middleware(
 		auth.Permissions{auth.Instances: auth.Write},
 		c.attachSecret,
+	))
+	registerHandler("GET /instances", c.middleware(
+		auth.Permissions{auth.Instances: auth.Read},
+		c.listInstances,
+	))
+	registerHandler("GET /instances/{instanceId}", c.middleware(
+		auth.Permissions{auth.Instances: auth.Read},
+		c.getInstance,
+	))
+	registerHandler("POST /instances", c.middleware(
+		auth.Permissions{auth.Instances: auth.Write},
+		c.createInstance,
+	))
+	registerHandler("GET /operations", c.middleware(
+		auth.Permissions{auth.Instances: auth.Read},
+		c.listOperations,
+	))
+	registerHandler("POST /operations", c.middleware(
+		auth.Permissions{auth.Secrets: auth.Write, auth.Instances: auth.Write},
+		c.createOperation,
 	))
 }
 
@@ -107,13 +107,13 @@ func (s *Controller) getSecret(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Controller) listInstances(w http.ResponseWriter, r *http.Request) {
-	secretId := r.PathValue("secretId")
 	from, to, err := parseRange(r)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	insts, err := s.secretStore.Catalog().Instances().List(r.Context(), &secretId, int(from), int(to))
+	secretId := optionalQuery(r, "secretId")
+	insts, err := s.secretStore.Catalog().Instances().List(r.Context(), secretId, int(from), int(to))
 	if err != nil {
 		writeError(w, NewErrorResponse(http.StatusBadRequest, err))
 		return
@@ -122,22 +122,25 @@ func (s *Controller) listInstances(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Controller) createInstance(w http.ResponseWriter, r *http.Request) {
-	secretId := r.PathValue("secretId")
 	identity := identityFromContext(r.Context())
 	if identity == nil {
 		writeError(w, NewErrorResponse(http.StatusUnauthorized, fmt.Errorf("identity not found in context")))
 		return
 	}
 
-	var opRequest OperationRequest
-	if err := readBody(r, &opRequest); err != nil {
+	var request SecretOperationRequest
+	if err := readBody(r, &request); err != nil {
 		writeError(w, err)
 		return
 	}
-	s.startAttachedRun(w, r, secretId, "", secrets.Create, executor.OperationParameters{
-		Env:       opRequest.Env,
-		Forced:    opRequest.Forced,
-		Reason:    opRequest.Reason,
+	if request.SecretId == "" {
+		writeError(w, NewErrorResponse(http.StatusBadRequest, fmt.Errorf("secretId required")))
+		return
+	}
+	s.startAttachedRun(w, r, request.SecretId, "", secrets.Create, executor.OperationParameters{
+		Env:       request.Env,
+		Forced:    request.Forced,
+		Reason:    request.Reason,
 		StartedBy: identity.Principal,
 	})
 }
@@ -162,15 +165,15 @@ func (s *Controller) getInstance(w http.ResponseWriter, r *http.Request) {
 	writeResult(w, instance, http.StatusOK)
 }
 
-func (s *Controller) getOperations(w http.ResponseWriter, r *http.Request) {
-	secretId := r.PathValue("secretId")
-	instanceId := r.PathValue("instanceId")
+func (s *Controller) listOperations(w http.ResponseWriter, r *http.Request) {
 	from, to, err := parseRange(r)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	operations, err := s.secretStore.Catalog().Operations().List(r.Context(), &secretId, &instanceId, int(from), int(to))
+	secretId := optionalQuery(r, "secretId")
+	instanceId := optionalQuery(r, "instanceId")
+	operations, err := s.secretStore.Catalog().Operations().List(r.Context(), secretId, instanceId, int(from), int(to))
 	if err != nil {
 		writeError(w, err)
 		return
@@ -179,28 +182,42 @@ func (s *Controller) getOperations(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Controller) createOperation(w http.ResponseWriter, r *http.Request) {
-	secretId := r.PathValue("secretId")
-	instanceId := r.PathValue("instanceId")
-
 	identity := identityFromContext(r.Context())
 	if identity == nil {
 		writeError(w, NewErrorResponse(http.StatusUnauthorized, fmt.Errorf("identity not found in context")))
 		return
 	}
 
-	var namedRequest NamedOperationRequest
-	if err := readBody(r, &namedRequest); err != nil {
+	var request InstanceOperationRequest
+	if err := readBody(r, &request); err != nil {
 		writeError(w, err)
 		return
 	}
-	if !isInstanceOperation(namedRequest.Name) {
-		writeError(w, NewErrorResponse(http.StatusBadRequest, fmt.Errorf("cannot post operation %s", namedRequest.Name)))
+	if !isInstanceOperation(request.Name) {
+		writeError(w, NewErrorResponse(http.StatusBadRequest, fmt.Errorf("cannot post operation %s", request.Name)))
 		return
 	}
-	s.startAttachedRun(w, r, secretId, instanceId, namedRequest.Name, executor.OperationParameters{
-		Env:       namedRequest.Env,
-		Forced:    namedRequest.Forced,
-		Reason:    namedRequest.Reason,
+	if request.InstanceId == "" {
+		writeError(w, NewErrorResponse(http.StatusBadRequest, fmt.Errorf("instanceId required")))
+		return
+	}
+
+	// The secret comes from the instance, so a request cannot consume one
+	// secret's attach slot while operating on another secret's instance.
+	instance, err := s.secretStore.Catalog().Instances().Get(r.Context(), request.InstanceId)
+	if err != nil {
+		writeError(w, NewErrorResponse(http.StatusNotFound, err))
+		return
+	}
+	if instance == nil {
+		writeError(w, NewErrorResponse(http.StatusNotFound, fmt.Errorf("unknown instance %s", request.InstanceId)))
+		return
+	}
+
+	s.startAttachedRun(w, r, instance.Secret.Id, request.InstanceId, request.Name, executor.OperationParameters{
+		Env:       request.Env,
+		Forced:    request.Forced,
+		Reason:    request.Reason,
 		StartedBy: identity.Principal,
 	})
 }
@@ -248,6 +265,15 @@ func parseRange(r *http.Request) (int64, int64, error) {
 	}
 	to, err := parseQueryInt(r, "to", 32)
 	return from, to, err
+}
+
+// optionalQuery returns nil when the filter is absent, meaning "unfiltered".
+func optionalQuery(r *http.Request, name string) *string {
+	value := r.URL.Query().Get(name)
+	if value == "" {
+		return nil
+	}
+	return &value
 }
 
 func parseQueryInt(r *http.Request, name string, defaultValue int64) (int64, error) {

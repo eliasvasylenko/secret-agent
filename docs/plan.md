@@ -2,7 +2,7 @@
 
 Detailed plan to migrate secret-agent to the architecture in [`design.md`](design.md). Work is ordered so each phase produces a compilable, testable increment where possible.
 
-**Current state:** Phases 0–4 done (server attach-before-start + `Catalog` reads). `internal/client` still uses old attach-after-POST flow; `internal/cli` still uses old store API — tree does not fully compile until Phases 5–6.
+**Current state:** Phases 0–5 done. `internal/cli` still uses the old store API — tree does not fully compile until Phase 6.
 
 **Out of scope for early phases:** federation wire format, `Proposer` behaviour inside scripts, aggregate web API, SSH transport.
 
@@ -51,9 +51,9 @@ Finalize path matrix:
 | Action | Method | Path (draft) |
 |--------|--------|--------------|
 | Attach stdin/stdout/stderr | POST+Upgrade | `/secrets/{secretId}/attach/{stream}` |
-| Create | POST | `/secrets/{secretId}/instances` |
-| Instance op | POST | `/secrets/{secretId}/instances/{instanceId}/operations` body `{name, ...OperationRequest}` |
-| List ops | GET | `/secrets/{secretId}/instances/{instanceId}/operations` or filtered list |
+| Create | POST | `/instances` body `{secretId, ...OperationRequest}` |
+| Instance op | POST | `/operations` body `{instanceId, name, ...OperationRequest}` |
+| List ops | GET | `/operations?secretId=&instanceId=` |
 
 Decide:
 
@@ -66,7 +66,7 @@ Decide:
 ### 0.4 Wire DTOs
 
 - Rename `server.OperationParameters` → `OperationRequest`.
-- Rename `CreateOperationParameters` → `NamedOperationRequest`.
+- Rename `CreateOperationParameters` → `SecretOperationRequest` / `InstanceOperationRequest`.
 - Document JSON examples for create vs activate.
 
 **Deliverable:** small `docs/http-api.md` or section in `design.md`.
@@ -167,7 +167,7 @@ Goal: attach-before-start, per `(secretId, principal)`, no reattach.
    - **Do not** pass `r.Context()` to executor.
    - Start executor on slot ctx using existing pipes.
 5. Remove `trackOperation` background await, `/result` poll, old attach paths keyed by opNumber (unless temporarily kept behind flag — prefer delete).
-6. Rename wire DTOs (`OperationRequest`, `NamedOperationRequest`); map to `executor.OperationParameters`.
+6. Rename wire DTOs (`OperationRequest`, `SecretOperationRequest`, `InstanceOperationRequest`); map to `executor.OperationParameters`.
 7. Controller depends on `backend.Catalog` for reads; start path uses catalog/runner or inlined sqlite calls — server holds sqlite directly today, not full `Backend` on wire handlers.
 
 **Discovery during implementation:**
@@ -179,7 +179,7 @@ Goal: attach-before-start, per `(secretId, principal)`, no reattach.
 
 ---
 
-## Phase 5 — HTTP client runner
+## Phase 5 — HTTP client runner ✅
 
 Goal: `client` implements `backend.Runner` using attach + POST + `Handle`.
 
@@ -187,10 +187,9 @@ Goal: `client` implements `backend.Runner` using attach + POST + `Handle`.
 2. `Runner(secretId)`:
    - Open attach upgrades, POST start.
    - Return accepted `*Instance` + **`Handle`** (background pump already running; server executes after POST; **`Cancel`** tears down attach).
-3. **Discovery:** how client learns op finished without `/result`:
-   - Option A: attach conn EOF + server closes pipes when done; client infers from copy return + GET instance.
-   - Option B: small JSON “done” frame on control stream (later).
-   - Option C: keep `/result` temporarily for client only (reluctant — document choice).
+3. **Discovery:** attach conn EOF + GET instance (`Wait`). `Cancel` closes attach conns (stdout/stderr disconnect). No `/result`.
+
+5. **Flattened routes:** `/instances` and `/operations` are root collections; `secretId` / `instanceId` move to query (reads) or body (creates). Attach and `active` stay under `/secrets/{secretId}`.
 
 4. Remove old `InstanceClient.Create(..., stdio)` + `runAttach` split if fully subsumed by `Runner`.
 

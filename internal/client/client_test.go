@@ -1,29 +1,28 @@
 package client
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/eliasvasylenko/secret-agent/internal/backend"
 	"github.com/eliasvasylenko/secret-agent/internal/command"
 	"github.com/eliasvasylenko/secret-agent/internal/executor"
 	"github.com/eliasvasylenko/secret-agent/internal/secrets"
 	"github.com/eliasvasylenko/secret-agent/internal/server"
-	"github.com/eliasvasylenko/secret-agent/internal/backend"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 )
 
-// Ensure that *InstanceClient satisfies the backend.Instances interface.
-var _ backend.Instances = (*InstanceClient)(nil)
-
-// cmp options for comparing secrets types that contain unexported fields.
 var cmpSecretOpts = cmp.Options{
 	cmpopts.IgnoreUnexported(secrets.Secret{}, command.Command{}),
 }
@@ -32,31 +31,15 @@ var cmpInstanceOpts = cmp.Options{
 	cmpopts.IgnoreUnexported(time.Time{}),
 }
 
-// stubClient implements httpClient. Attach streams use a separate unix dial path.
 type stubClient struct {
-	status       int
-	body         string
-	resultStatus int
-	resultBody   string
-	doErr        error
-	lastReq      atomic.Pointer[http.Request]
+	status  int
+	body    string
+	doErr   error
+	lastReq atomic.Pointer[http.Request]
 }
 
 func (s *stubClient) Do(req *http.Request) (*http.Response, error) {
-	if strings.Contains(req.URL.Path, "/result") {
-		status := s.resultStatus
-		body := s.resultBody
-		if status == 0 {
-			status = 408
-			body = `{"error":{"status":408,"message":"timeout"}}`
-		}
-		return &http.Response{
-			StatusCode: status,
-			Body:       io.NopCloser(bytes.NewReader([]byte(body))),
-		}, nil
-	}
-	first := s.lastReq.CompareAndSwap(nil, req)
-	if !first {
+	if !s.lastReq.CompareAndSwap(nil, req) {
 		return nil, fmt.Errorf("stub: unexpected request %s %s", req.Method, req.URL.Path)
 	}
 	if s.doErr != nil {
@@ -68,8 +51,33 @@ func (s *stubClient) Do(req *http.Request) (*http.Response, error) {
 	}, nil
 }
 
-// requestString returns a deterministic string representation of the request for comparison.
-// Go's encoding/json uses struct field order and sorts map keys, so client request bodies are deterministic.
+type recordingClient struct {
+	mu       sync.Mutex
+	requests []string
+	handler  func(req *http.Request) (*http.Response, error)
+}
+
+func (r *recordingClient) Do(req *http.Request) (*http.Response, error) {
+	body, _ := io.ReadAll(req.Body)
+	req.Body = io.NopCloser(bytes.NewReader(body))
+	r.mu.Lock()
+	r.requests = append(r.requests, req.Method+" "+req.URL.RequestURI()+"\n"+string(body))
+	handler := r.handler
+	r.mu.Unlock()
+	if handler != nil {
+		return handler(req)
+	}
+	return &http.Response{StatusCode: 500, Body: io.NopCloser(bytes.NewReader(nil))}, nil
+}
+
+func (r *recordingClient) got() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]string, len(r.requests))
+	copy(out, r.requests)
+	return out
+}
+
 func requestString(req *http.Request) string {
 	if req == nil {
 		return ""
@@ -77,6 +85,8 @@ func requestString(req *http.Request) string {
 	body, _ := io.ReadAll(req.Body)
 	return req.Method + " " + req.URL.RequestURI() + "\n" + string(body)
 }
+
+func ptr[T any](v T) *T { return &v }
 
 func TestBuildRequest(t *testing.T) {
 	ctx := context.Background()
@@ -165,11 +175,11 @@ func TestDo_nonJSONErrorResponse(t *testing.T) {
 	}
 }
 
-func TestSecretClient_List(t *testing.T) {
+func TestCatalog_SecretsList(t *testing.T) {
 	ctx := context.Background()
 	stub := &stubClient{status: 200, body: `{"items":[{"id":"x","version":1}]}`}
 	c := &SecretClient{client: stub}
-	got, err := c.List(ctx)
+	got, err := c.Catalog().Secrets().List(ctx)
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -182,11 +192,11 @@ func TestSecretClient_List(t *testing.T) {
 	}
 }
 
-func TestSecretClient_Get(t *testing.T) {
+func TestCatalog_SecretsGet(t *testing.T) {
 	ctx := context.Background()
 	stub := &stubClient{status: 200, body: `{"id":"my-secret","version":1}`}
 	c := &SecretClient{client: stub}
-	got, err := c.Get(ctx, "my-secret")
+	got, err := c.Catalog().Secrets().Get(ctx, "my-secret")
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -199,17 +209,17 @@ func TestSecretClient_Get(t *testing.T) {
 	}
 }
 
-func TestInstanceClient_List(t *testing.T) {
+func TestCatalog_InstancesList(t *testing.T) {
 	ctx := context.Background()
 	stub := &stubClient{status: 200, body: `{"items":[]}`}
-	parent := &SecretClient{client: stub}
-	c := &InstanceClient{parent: parent, secretId: "sid"}
-	got, err := c.List(ctx, 0, 10)
+	c := &SecretClient{client: stub}
+	got, err := c.Catalog().Instances().List(ctx, ptr("sid"), 0, 10)
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if gotReq := requestString(stub.lastReq.Load()); gotReq != "GET /secrets/sid/instances\n" {
-		t.Errorf("request:\n%s", cmp.Diff("GET /secrets/sid/instances\n", gotReq))
+	wantReq := "GET /instances?from=0&secretId=sid&to=10\n"
+	if gotReq := requestString(stub.lastReq.Load()); gotReq != wantReq {
+		t.Errorf("request:\n%s", cmp.Diff(wantReq, gotReq))
 	}
 	want := secrets.Instances{}
 	if !cmp.Equal(got, want, cmpInstanceOpts) {
@@ -217,17 +227,16 @@ func TestInstanceClient_List(t *testing.T) {
 	}
 }
 
-func TestInstanceClient_Get(t *testing.T) {
+func TestCatalog_InstancesGet(t *testing.T) {
 	ctx := context.Background()
 	stub := &stubClient{status: 200, body: `{"id":"i1","secret":{"id":"s1","version":1},"status":{}}`}
-	parent := &SecretClient{client: stub}
-	c := &InstanceClient{parent: parent, secretId: "sid"}
-	got, err := c.Get(ctx, "i1")
+	c := &SecretClient{client: stub}
+	got, err := c.Catalog().Instances().Get(ctx, "i1")
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if gotReq := requestString(stub.lastReq.Load()); gotReq != "GET /secrets/sid/instances/i1\n" {
-		t.Errorf("request:\n%s", cmp.Diff("GET /secrets/sid/instances/i1\n", gotReq))
+	if gotReq := requestString(stub.lastReq.Load()); gotReq != "GET /instances/i1\n" {
+		t.Errorf("request:\n%s", cmp.Diff("GET /instances/i1\n", gotReq))
 	}
 	want := &secrets.Instance{Id: "i1", Secret: secrets.Secret{Id: "s1", Version: 1}, Status: secrets.Status{}}
 	if !cmp.Equal(got, want, cmpInstanceOpts) {
@@ -235,73 +244,11 @@ func TestInstanceClient_Get(t *testing.T) {
 	}
 }
 
-func TestInstanceClient_Create(t *testing.T) {
-	ctx := context.Background()
-	stub := &stubClient{status: 200, body: `{"id":"new-id","secret":{"id":"s1","version":1},"operationNumber":1,"status":{}}`}
-	parent := &SecretClient{client: stub}
-	c := &InstanceClient{parent: parent, secretId: "sid"}
-	params := executor.OperationParameters{Reason: "test", StartedBy: "user"}
-	started, err := c.Create(ctx, params, command.Stdio{Stdout: io.Discard, Stderr: io.Discard})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	want := &secrets.Instance{Id: "new-id", Secret: secrets.Secret{Id: "s1", Version: 1}, Status: secrets.Status{}}
-	if !cmp.Equal(started, want, cmpInstanceOpts) {
-		t.Errorf("Create returned instance:\n%s", cmp.Diff(want, started, cmpInstanceOpts))
-	}
-	wantReq := "POST /secrets/sid/instances\n" + `{"env":null,"forced":false,"reason":"test"}` + "\n"
-	if gotReq := requestString(stub.lastReq.Load()); gotReq != wantReq {
-		t.Errorf("request:\n%s", cmp.Diff(wantReq, gotReq))
-	}
-}
-
-func TestInstanceClient_Create_hasNoInputField(t *testing.T) {
-	ctx := context.Background()
-	stub := &stubClient{status: 200, body: `{"id":"new-id","secret":{"id":"s1","version":1},"operationNumber":1,"status":{}}`}
-	parent := &SecretClient{client: stub}
-	c := &InstanceClient{parent: parent, secretId: "sid"}
-	params := executor.OperationParameters{Reason: "test", StartedBy: "user"}
-	_, err := c.Create(ctx, params, command.Stdio{})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	req := stub.lastReq.Load()
-	if req == nil {
-		t.Fatal("no request recorded")
-	}
-	body, err := io.ReadAll(req.Body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(body), "input") {
-		t.Fatalf("create POST body must not include input; got %s", body)
-	}
-}
-
-func TestSecretClient_History(t *testing.T) {
-	ctx := context.Background()
-	stub := &stubClient{status: 200, body: `[]`}
-	c := &SecretClient{client: stub}
-	got, err := c.History(ctx, "sid", 0, 10)
-	if err != nil {
-		t.Fatalf("History: %v", err)
-	}
-	wantReq := "GET /secrets/sid/operations?from=0&to=10\n"
-	if gotReq := requestString(stub.lastReq.Load()); gotReq != wantReq {
-		t.Errorf("request:\n%s", cmp.Diff(wantReq, gotReq))
-	}
-	want := []*secrets.Operation{}
-	if !cmp.Equal(got, want, cmpInstanceOpts) {
-		t.Errorf("History response:\n%s", cmp.Diff(want, got, cmpInstanceOpts))
-	}
-}
-
-func TestInstanceClient_GetActive(t *testing.T) {
+func TestCatalog_GetActive(t *testing.T) {
 	ctx := context.Background()
 	stub := &stubClient{status: 200, body: `{"id":"active-id","secret":{"id":"s1","version":1},"status":{}}`}
-	parent := &SecretClient{client: stub}
-	c := &InstanceClient{parent: parent, secretId: "sid"}
-	got, err := c.GetActive(ctx)
+	c := &SecretClient{client: stub}
+	got, err := c.Catalog().Instances().GetActive(ctx, "sid")
 	if err != nil {
 		t.Fatalf("GetActive: %v", err)
 	}
@@ -315,147 +262,323 @@ func TestInstanceClient_GetActive(t *testing.T) {
 	}
 }
 
-func TestInstanceClient_Destroy(t *testing.T) {
-	ctx := context.Background()
-	stub := &stubClient{status: 200, body: `{"id":"i1","secret":{"id":"s1","version":1},"operationNumber":1,"status":{}}`}
-	parent := &SecretClient{client: stub}
-	c := &InstanceClient{parent: parent, secretId: "sid"}
-	params := executor.OperationParameters{Reason: "r", StartedBy: "user"}
-	started, err := c.Destroy(ctx, "i1", params, discardStdio())
-	if err != nil {
-		t.Fatalf("Destroy: %v", err)
-	}
-	want := &secrets.Instance{Id: "i1", Secret: secrets.Secret{Id: "s1", Version: 1}, Status: secrets.Status{}}
-	if !cmp.Equal(started, want, cmpInstanceOpts) {
-		t.Errorf("Destroy returned instance:\n%s", cmp.Diff(want, started, cmpInstanceOpts))
-	}
-	wantReq := "POST /secrets/sid/instances/i1/operations\n" + `{"name":"destroy","env":null,"forced":false,"reason":"r"}` + "\n"
-	if gotReq := requestString(stub.lastReq.Load()); gotReq != wantReq {
-		t.Errorf("request:\n%s", cmp.Diff(wantReq, gotReq))
-	}
-}
-
-func discardStdio() command.Stdio {
-	return command.Stdio{Stdout: io.Discard, Stderr: io.Discard}
-}
-
-func TestInstanceClient_Activate(t *testing.T) {
-	ctx := context.Background()
-	stub := &stubClient{status: 200, body: `{"id":"i1","secret":{"id":"s1","version":1},"operationNumber":1,"status":{}}`}
-	parent := &SecretClient{client: stub}
-	c := &InstanceClient{parent: parent, secretId: "sid"}
-	params := executor.OperationParameters{Reason: "activate-reason", StartedBy: "user"}
-	started, err := c.Activate(ctx, "i1", params, discardStdio())
-	if err != nil {
-		t.Fatalf("Activate: %v", err)
-	}
-	want := &secrets.Instance{Id: "i1", Secret: secrets.Secret{Id: "s1", Version: 1}, Status: secrets.Status{}}
-	if !cmp.Equal(started, want, cmpInstanceOpts) {
-		t.Errorf("Activate returned instance:\n%s", cmp.Diff(want, started, cmpInstanceOpts))
-	}
-	wantReq := "POST /secrets/sid/instances/i1/operations\n" + `{"name":"activate","env":null,"forced":false,"reason":"activate-reason"}` + "\n"
-	if gotReq := requestString(stub.lastReq.Load()); gotReq != wantReq {
-		t.Errorf("request:\n%s", cmp.Diff(wantReq, gotReq))
-	}
-}
-
-func TestInstanceClient_Deactivate(t *testing.T) {
-	ctx := context.Background()
-	stub := &stubClient{status: 200, body: `{"id":"i1","secret":{"id":"s1","version":1},"operationNumber":1,"status":{}}`}
-	parent := &SecretClient{client: stub}
-	c := &InstanceClient{parent: parent, secretId: "sid"}
-	params := executor.OperationParameters{Reason: "deact", StartedBy: "user"}
-	started, err := c.Deactivate(ctx, "i1", params, discardStdio())
-	if err != nil {
-		t.Fatalf("Deactivate: %v", err)
-	}
-	want := &secrets.Instance{Id: "i1", Secret: secrets.Secret{Id: "s1", Version: 1}, Status: secrets.Status{}}
-	if !cmp.Equal(started, want, cmpInstanceOpts) {
-		t.Errorf("Deactivate returned instance:\n%s", cmp.Diff(want, started, cmpInstanceOpts))
-	}
-	wantReq := "POST /secrets/sid/instances/i1/operations\n" + `{"name":"deactivate","env":null,"forced":false,"reason":"deact"}` + "\n"
-	if gotReq := requestString(stub.lastReq.Load()); gotReq != wantReq {
-		t.Errorf("request:\n%s", cmp.Diff(wantReq, gotReq))
-	}
-}
-
-func TestInstanceClient_Await_retriesUntilComplete(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	stub := &resultRetryStub{}
-	parent := &SecretClient{client: stub}
-	c := &InstanceClient{parent: parent, secretId: "sid"}
-	ops := &OperationsClient{parent: c, instanceId: "i1"}
-
-	_, got, err := ops.Await(ctx, 1)
-	if err != nil {
-		t.Fatalf("Await: %v", err)
-	}
-	if got.Id != "i1" {
-		t.Fatalf("instance id = %q", got.Id)
-	}
-	if stub.resultCalls.Load() < 2 {
-		t.Fatalf("result calls = %d, want at least 2", stub.resultCalls.Load())
-	}
-}
-
-type resultRetryStub struct {
-	resultCalls atomic.Int32
-}
-
-func (s *resultRetryStub) Do(req *http.Request) (*http.Response, error) {
-	if strings.Contains(req.URL.Path, "/result") {
-		if s.resultCalls.Add(1) == 1 {
-			return &http.Response{
-				StatusCode: 408,
-				Body:       io.NopCloser(bytes.NewReader([]byte(`{"error":{"status":408,"message":"timeout"}}`))),
-			}, nil
-		}
-		return &http.Response{
-			StatusCode: 200,
-			Body:       io.NopCloser(bytes.NewReader([]byte(`{"id":"i1","secret":{"id":"s1","version":1},"operationNumber":1,"status":{}}`))),
-		}, nil
-	}
-	return nil, fmt.Errorf("stub: unexpected request %s %s", req.Method, req.URL.Path)
-}
-
-func TestInstanceClient_Test(t *testing.T) {
-	ctx := context.Background()
-	stub := &stubClient{status: 200, body: `{"id":"i1","secret":{"id":"s1","version":1},"operationNumber":1,"status":{}}`}
-	parent := &SecretClient{client: stub}
-	c := &InstanceClient{parent: parent, secretId: "sid"}
-	params := executor.OperationParameters{Reason: "test-run", StartedBy: "user"}
-	started, err := c.Test(ctx, "i1", params, discardStdio())
-	if err != nil {
-		t.Fatalf("Test: %v", err)
-	}
-	want := &secrets.Instance{Id: "i1", Secret: secrets.Secret{Id: "s1", Version: 1}, Status: secrets.Status{}}
-	if !cmp.Equal(started, want, cmpInstanceOpts) {
-		t.Errorf("Test returned instance:\n%s", cmp.Diff(want, started, cmpInstanceOpts))
-	}
-	wantReq := "POST /secrets/sid/instances/i1/operations\n" + `{"name":"test","env":null,"forced":false,"reason":"test-run"}` + "\n"
-	if gotReq := requestString(stub.lastReq.Load()); gotReq != wantReq {
-		t.Errorf("request:\n%s", cmp.Diff(wantReq, gotReq))
-	}
-}
-
-func TestInstanceClient_History(t *testing.T) {
+func TestCatalog_OperationsList(t *testing.T) {
 	ctx := context.Background()
 	stub := &stubClient{status: 200, body: `[]`}
-	parent := &SecretClient{client: stub}
-	c := &InstanceClient{parent: parent, secretId: "sid"}
-	ops := &OperationsClient{parent: c, instanceId: "i1"}
-	got, err := ops.List(ctx, 5, 15)
+	c := &SecretClient{client: stub}
+	got, err := c.Catalog().Operations().List(ctx, ptr("sid"), ptr("i1"), 5, 15)
 	if err != nil {
-		t.Fatalf("History: %v", err)
+		t.Fatalf("List: %v", err)
 	}
-	wantReq := "GET /secrets/sid/instances/i1/operations?from=5&to=15\n"
+	wantReq := "GET /operations?from=5&instanceId=i1&secretId=sid&to=15\n"
 	if gotReq := requestString(stub.lastReq.Load()); gotReq != wantReq {
 		t.Errorf("request:\n%s", cmp.Diff(wantReq, gotReq))
 	}
 	want := []*secrets.Operation{}
 	if !cmp.Equal(got, want, cmpInstanceOpts) {
-		t.Errorf("History response:\n%s", cmp.Diff(want, got, cmpInstanceOpts))
+		t.Errorf("List response:\n%s", cmp.Diff(want, got, cmpInstanceOpts))
 	}
 }
+
+func TestCatalog_OperationsList_unfiltered(t *testing.T) {
+	ctx := context.Background()
+	stub := &stubClient{status: 200, body: `[]`}
+	c := &SecretClient{client: stub}
+	_, err := c.Catalog().Operations().List(ctx, nil, nil, 0, 10)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	wantReq := "GET /operations?from=0&to=10\n"
+	if gotReq := requestString(stub.lastReq.Load()); gotReq != wantReq {
+		t.Errorf("request:\n%s", cmp.Diff(wantReq, gotReq))
+	}
+}
+
+func TestCatalog_InstancesList_unfiltered(t *testing.T) {
+	ctx := context.Background()
+	stub := &stubClient{status: 200, body: `{"items":[]}`}
+	c := &SecretClient{client: stub}
+	_, err := c.Catalog().Instances().List(ctx, nil, 0, 10)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	wantReq := "GET /instances?from=0&to=10\n"
+	if gotReq := requestString(stub.lastReq.Load()); gotReq != wantReq {
+		t.Errorf("request:\n%s", cmp.Diff(wantReq, gotReq))
+	}
+}
+
+func holdAttach(t *testing.T) func(context.Context, string) (*attachConn, error) {
+	t.Helper()
+	return func(_ context.Context, _ string) (*attachConn, error) {
+		a, b := net.Pipe()
+		t.Cleanup(func() {
+			_ = a.Close()
+			_ = b.Close()
+		})
+		return &attachConn{Conn: a, reader: bufio.NewReader(a)}, nil
+	}
+}
+
+func TestRunner_Create_attachesBeforePOST(t *testing.T) {
+	ctx := context.Background()
+	var attached atomic.Int32
+	rec := &recordingClient{handler: func(req *http.Request) (*http.Response, error) {
+		if req.Method == http.MethodPost {
+			if attached.Load() != 3 {
+				t.Errorf("POST with %d attaches, want 3", attached.Load())
+			}
+			if req.URL.Path != "/instances" {
+				t.Errorf("path = %s", req.URL.Path)
+			}
+		}
+		return jsonResponse(200, `{"id":"new-id","secret":{"id":"s1","version":1},"status":{}}`), nil
+	}}
+	c := &SecretClient{client: rec, attach: func(ctx context.Context, path string) (*attachConn, error) {
+		if !strings.Contains(path, "/secrets/sid/attach/") {
+			t.Errorf("attach path = %s", path)
+		}
+		attached.Add(1)
+		return holdAttach(t)(ctx, path)
+	}}
+	params := executor.OperationParameters{Reason: "test", StartedBy: "user"}
+	started, handle, err := c.Runner("sid").Run(ctx, secrets.Create, "", params, nil, command.Stdio{})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	t.Cleanup(func() { _ = handle.Cancel(context.Background()) })
+	want := &secrets.Instance{Id: "new-id", Secret: secrets.Secret{Id: "s1", Version: 1}, Status: secrets.Status{}}
+	if !cmp.Equal(started, want, cmpInstanceOpts) {
+		t.Errorf("Run returned instance:\n%s", cmp.Diff(want, started, cmpInstanceOpts))
+	}
+	gots := rec.got()
+	if len(gots) < 1 {
+		t.Fatal("no requests")
+	}
+	wantReq := "POST /instances\n" + `{"secretId":"sid","env":null,"forced":false,"reason":"test"}` + "\n"
+	if gots[0] != wantReq {
+		t.Errorf("request:\n%s", cmp.Diff(wantReq, gots[0]))
+	}
+	if attached.Load() != 3 {
+		t.Fatalf("attaches = %d, want 3", attached.Load())
+	}
+}
+
+func TestRunner_Create_POSTBodyHasNoInput(t *testing.T) {
+	ctx := context.Background()
+	rec := &recordingClient{handler: func(*http.Request) (*http.Response, error) {
+		return jsonResponse(200, `{"id":"new-id","secret":{"id":"s1","version":1},"status":{}}`), nil
+	}}
+	c := &SecretClient{client: rec, attach: holdAttach(t)}
+	_, handle, err := c.Runner("sid").Run(ctx, secrets.Create, "", executor.OperationParameters{Reason: "test"}, nil, command.Stdio{})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	t.Cleanup(func() { _ = handle.Cancel(context.Background()) })
+	if strings.Contains(rec.got()[0], "input") {
+		t.Fatalf("create POST body must not include input; got %s", rec.got()[0])
+	}
+}
+
+func TestRunner_NamedOperation(t *testing.T) {
+	ctx := context.Background()
+	rec := &recordingClient{handler: func(*http.Request) (*http.Response, error) {
+		return jsonResponse(200, `{"id":"i1","secret":{"id":"s1","version":1},"status":{}}`), nil
+	}}
+	c := &SecretClient{client: rec, attach: holdAttach(t)}
+	params := executor.OperationParameters{Reason: "activate-reason", StartedBy: "user"}
+	_, handle, err := c.Runner("sid").Run(ctx, secrets.Activate, "i1", params, nil, command.Stdio{})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	t.Cleanup(func() { _ = handle.Cancel(context.Background()) })
+	wantReq := "POST /operations\n" + `{"instanceId":"i1","name":"activate","env":null,"forced":false,"reason":"activate-reason"}` + "\n"
+	if rec.got()[0] != wantReq {
+		t.Errorf("request:\n%s", cmp.Diff(wantReq, rec.got()[0]))
+	}
+}
+
+func TestRunner_Wait_getsInstanceAfterPumps(t *testing.T) {
+	ctx := context.Background()
+	peers := map[string]net.Conn{}
+	var peersMu sync.Mutex
+	rec := &recordingClient{handler: func(req *http.Request) (*http.Response, error) {
+		switch {
+		case req.Method == http.MethodPost:
+			return jsonResponse(200, `{"id":"i1","secret":{"id":"s1","version":1},"status":{}}`), nil
+		case strings.HasSuffix(req.URL.Path, "/instances/i1"):
+			return jsonResponse(200, `{"id":"i1","secret":{"id":"s1","version":1},"status":{"completedAt":"2024-01-01T00:00:00Z"}}`), nil
+		default:
+			return jsonResponse(500, `{"error":{"status":500,"message":"`+req.URL.Path+`"}}`), nil
+		}
+	}}
+	c := &SecretClient{client: rec, attach: func(_ context.Context, path string) (*attachConn, error) {
+		a, b := net.Pipe()
+		peersMu.Lock()
+		peers[path] = b
+		peersMu.Unlock()
+		t.Cleanup(func() {
+			_ = a.Close()
+			_ = b.Close()
+		})
+		return &attachConn{Conn: a, reader: bufio.NewReader(a)}, nil
+	}}
+
+	_, handle, err := c.Runner("sid").Run(ctx, secrets.Create, "", executor.OperationParameters{Reason: "r"}, nil, command.Stdio{})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	waitCtx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+	_, err = handle.Wait(waitCtx)
+	cancel()
+	if err == nil {
+		t.Fatal("Wait returned before pumps finished")
+	}
+
+	peersMu.Lock()
+	for _, p := range peers {
+		_ = p.Close()
+	}
+	peersMu.Unlock()
+
+	final, err := handle.Wait(ctx)
+	if err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	if final.Id != "i1" || final.Status.CompletedAt == nil {
+		t.Fatalf("final = %+v", final)
+	}
+}
+
+func TestRunner_Wait_successWithoutCancel(t *testing.T) {
+	ctx := context.Background()
+	var stdoutBuf bytes.Buffer
+	attachPeers := map[string]net.Conn{}
+
+	rec := &recordingClient{handler: func(req *http.Request) (*http.Response, error) {
+		switch {
+		case req.Method == http.MethodPost:
+			return jsonResponse(200, `{"id":"i1","secret":{"id":"s1","version":1},"status":{}}`), nil
+		case req.URL.Path == "/instances/i1":
+			return jsonResponse(200, `{"id":"i1","secret":{"id":"s1","version":1},"status":{"completedAt":"2024-01-01T00:00:00Z"}}`), nil
+		default:
+			return jsonResponse(500, `{"error":{"status":500,"message":"unexpected"}}`), fmt.Errorf("unexpected %s %s", req.Method, req.URL.Path)
+		}
+	}}
+	c := &SecretClient{client: rec, attach: func(_ context.Context, path string) (*attachConn, error) {
+		client, server := net.Pipe()
+		attachPeers[path] = server
+		t.Cleanup(func() {
+			_ = client.Close()
+			_ = server.Close()
+		})
+		return &attachConn{Conn: client, reader: bufio.NewReader(client)}, nil
+	}}
+
+	_, handle, err := c.Runner("sid").Run(ctx, secrets.Create, "", executor.OperationParameters{Reason: "r"}, nil, command.Stdio{
+		Stdin:  strings.NewReader("hello-in"),
+		Stdout: &stdoutBuf,
+		Stderr: io.Discard,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	stdinPeer := attachPeers["/secrets/sid/attach/stdin"]
+	stdoutPeer := attachPeers["/secrets/sid/attach/stdout"]
+	stderrPeer := attachPeers["/secrets/sid/attach/stderr"]
+	if stdinPeer == nil || stdoutPeer == nil || stderrPeer == nil {
+		t.Fatal("missing attach peer")
+	}
+	go func() { _, _ = io.Copy(io.Discard, stdinPeer) }()
+	if _, err := stdoutPeer.Write([]byte("hello-out")); err != nil {
+		t.Fatalf("write stdout peer: %v", err)
+	}
+	_ = stdoutPeer.Close()
+	_ = stderrPeer.Close()
+
+	final, err := handle.Wait(ctx)
+	if err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	if final.Status.CompletedAt == nil {
+		t.Fatalf("final = %+v, want completedAt", final)
+	}
+	if stdoutBuf.String() != "hello-out" {
+		t.Fatalf("stdout = %q", stdoutBuf.String())
+	}
+}
+
+func TestRunner_closesAttachOnPOSTFailure(t *testing.T) {
+	ctx := context.Background()
+	stdinClient, stdinServer := net.Pipe()
+	t.Cleanup(func() { _ = stdinServer.Close() })
+
+	attachN := 0
+	c := &SecretClient{
+		client: &recordingClient{handler: func(*http.Request) (*http.Response, error) {
+			return jsonResponse(400, `{"error":{"status":400,"message":"bad"}}`), nil
+		}},
+		attach: func(_ context.Context, path string) (*attachConn, error) {
+			attachN++
+			if strings.HasSuffix(path, "/stdin") {
+				return &attachConn{Conn: stdinClient, reader: bufio.NewReader(stdinClient)}, nil
+			}
+			a, b := net.Pipe()
+			t.Cleanup(func() {
+				_ = a.Close()
+				_ = b.Close()
+			})
+			return &attachConn{Conn: a, reader: bufio.NewReader(a)}, nil
+		},
+	}
+
+	_, _, err := c.Runner("sid").Run(ctx, secrets.Create, "", executor.OperationParameters{Reason: "r"}, nil, command.Stdio{})
+	if err == nil {
+		t.Fatal("want POST error")
+	}
+	if attachN != 3 {
+		t.Fatalf("attaches = %d, want 3 before failed POST", attachN)
+	}
+
+	buf := make([]byte, 1)
+	_, readErr := stdinServer.Read(buf)
+	if readErr != io.EOF {
+		t.Fatalf("stdin server read = %v, want EOF after Run cleanup", readErr)
+	}
+}
+
+func TestRunner_Wait_failedAt(t *testing.T) {
+	ctx := context.Background()
+	rec := &recordingClient{handler: func(req *http.Request) (*http.Response, error) {
+		if req.Method == http.MethodPost {
+			return jsonResponse(200, `{"id":"i1","secret":{"id":"s1","version":1},"status":{}}`), nil
+		}
+		return jsonResponse(200, `{"id":"i1","secret":{"id":"s1","version":1},"status":{"failedAt":"2024-01-01T00:00:00Z"}}`), nil
+	}}
+	c := &SecretClient{client: rec, attach: holdAttach(t)}
+	_, handle, err := c.Runner("sid").Run(ctx, secrets.Create, "", executor.OperationParameters{Reason: "r"}, nil, command.Stdio{})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if err := handle.Cancel(ctx); err != nil {
+		t.Fatalf("Cancel: %v", err)
+	}
+	final, err := handle.Wait(ctx)
+	if err == nil {
+		t.Fatal("Wait = nil, want failed error")
+	}
+	if final == nil || final.Status.FailedAt == nil {
+		t.Fatal("expected failedAt")
+	}
+}
+
+func jsonResponse(status int, body string) *http.Response {
+	return &http.Response{
+		StatusCode: status,
+		Body:       io.NopCloser(bytes.NewReader([]byte(body))),
+	}
+}
+
+var _ backend.Backend = (*SecretClient)(nil)

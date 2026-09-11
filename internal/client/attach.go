@@ -27,65 +27,57 @@ func upgradeAttach(ctx context.Context, socket, path string) (*attachConn, error
 	if err != nil {
 		return nil, err
 	}
+	armed := true
+	defer func() {
+		if armed {
+			_ = conn.Close()
+		}
+	}()
 
-	request := fmt.Sprintf(
-		"POST %s HTTP/1.1\r\nHost: unix\r\nConnection: Upgrade\r\nUpgrade: %s\r\nContent-Length: 0\r\n\r\n",
-		path,
-		server.AttachUpgradeProtocol,
-	)
-	if _, err := conn.Write([]byte(request)); err != nil {
-		conn.Close()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://unix"+path, http.NoBody)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", server.AttachUpgradeProtocol)
+	if err := req.Write(conn); err != nil {
 		return nil, err
 	}
 
 	reader := bufio.NewReader(conn)
-	response, err := http.ReadResponse(reader, &http.Request{Method: http.MethodPost})
+	response, err := http.ReadResponse(reader, req)
 	if err != nil {
-		conn.Close()
 		return nil, err
 	}
 	if response.Body != nil {
-		response.Body.Close()
+		_ = response.Body.Close()
 	}
 	if response.StatusCode != http.StatusSwitchingProtocols {
-		conn.Close()
 		return nil, fmt.Errorf("attach upgrade: status %d", response.StatusCode)
 	}
 
+	armed = false
 	return &attachConn{Conn: conn, reader: reader}, nil
 }
 
-func copyAttach(ctx context.Context, conn *attachConn, direction attachDirection, stream io.ReadWriter) error {
-	done := make(chan error, 1)
-	go func() {
-		var err error
-		switch direction {
-		case attachWrite:
-			_, err = io.Copy(conn, stream)
-		case attachRead:
-			_, err = io.Copy(stream, conn)
-		}
-		conn.Close()
-		done <- err
-	}()
-
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case err := <-done:
-		if err != nil && !isClosedPipe(err) {
-			return err
-		}
-		return nil
-	}
+func copyAttachWrite(conn *attachConn, src io.Reader) error {
+	defer conn.Close()
+	_, err := io.Copy(conn, src)
+	return ignoreClosedPipe(err)
 }
 
-type attachDirection int
+func copyAttachRead(conn *attachConn, dst io.Writer) error {
+	defer conn.Close()
+	_, err := io.Copy(dst, conn)
+	return ignoreClosedPipe(err)
+}
 
-const (
-	attachWrite attachDirection = iota
-	attachRead
-)
+func ignoreClosedPipe(err error) error {
+	if err != nil && !isClosedPipe(err) {
+		return err
+	}
+	return nil
+}
 
 func isClosedPipe(err error) bool {
 	if err == nil {

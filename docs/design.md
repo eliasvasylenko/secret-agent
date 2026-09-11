@@ -28,7 +28,8 @@ Concise record of settled constraints and open tensions. Supersedes parts of `pl
 - **Slot key**: `(secretId, principal)` — principal from transport (Unix peer creds), not request body.
 - **One pending slot per (secret, principal)**; POST consumes it, allowing the next
   slot to attach while the previous operation runs. No reattach to a consumed slot.
-- Routes (target shape): `POST /secrets/{secretId}/attach/{stdin|stdout|stderr}` → then `POST …/instances` or `…/operations`.
+- Routes (target shape): `POST /secrets/{secretId}/attach/{stdin|stdout|stderr}` → then `POST /instances` or `/operations`.
+- Instances and operations are **root collections** (`/instances`, `/operations`) because instance ids are globally unique: a nested `secretId` would be ignored by the lookup, or worse, trusted for slot selection without being checked. Creates carry the parent id in the body (`secretId` / `instanceId`); catalog reads filter by query. `POST /operations` derives the secret from the instance. See [`http-api.md`](http-api.md).
 - Server in-memory type: **`attachSlot`** (not `operation`) — pipes, attach claims, `startedBy`. Registry keyed by `(secretId, principal)` until op number exists.
 
 ## Store `Run` — caller feedback & cancellation
@@ -102,7 +103,8 @@ Failure: **`failedAt`** in store, `err != nil` — **`errors.As`** for typed exi
 ## Parameters naming
 
 - **`executor.OperationParameters`** — domain (reason, forced, env, startedBy, expectedOpNumber).
-- **`server.OperationRequest`** / **`NamedOperationRequest`** — JSON subset; controller sets `StartedBy` from identity.
+- **`server.OperationRequest`** — JSON subset common to every operation request; controller sets `StartedBy` from identity.
+- **`server.SecretOperationRequest`** / **`InstanceOperationRequest`** — `OperationRequest` plus the parent id (`secretId` / `instanceId`); the instance form also carries `name`.
 
 ## Proposer
 
