@@ -1,18 +1,21 @@
-client
-- ssh keys?
-- oauth?
+# Architecture notes (scratch)
 
+> Informal notes only. For the maintained architecture, see [design.md](design.md),
+> [plan.md](plan.md), and [http-api.md](http-api.md).
 
+## Future directions (unscoped)
 
-service
-- local secrets
-- list of hosts
+**Client**
 
+- SSH transport?
+- OAuth?
 
+**Service**
 
-Canonical Server
-- list of hosts
-- aggregates secret list from across all hosts
-- 
+- Local secrets
+- List of hosts
 
+**Canonical server (aggregate)**
 
+- List of hosts
+- Aggregates secret list from across all hosts

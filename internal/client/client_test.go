@@ -102,13 +102,18 @@ func TestBuildRequest(t *testing.T) {
 		}
 	})
 	t.Run("with body", func(t *testing.T) {
-		body := map[string]string{"name": "create"}
-		req, err := BuildRequest(ctx, http.MethodPost, "/secrets/s1/instances", body)
+		body := server.SecretOperationRequest{
+			SecretId: "s1",
+			OperationRequest: server.OperationRequest{
+				Reason: "create",
+			},
+		}
+		req, err := BuildRequest(ctx, http.MethodPost, "/instances", body)
 		if err != nil {
 			t.Fatal(err)
 		}
 		got := requestString(req)
-		want := "POST /secrets/s1/instances\n" + `{"name":"create"}` + "\n"
+		want := "POST /instances\n" + `{"secretId":"s1","env":null,"forced":false,"reason":"create"}` + "\n"
 		if got != want {
 			t.Errorf("request:\n%s", cmp.Diff(want, got))
 		}
@@ -546,6 +551,28 @@ func TestRunner_closesAttachOnPOSTFailure(t *testing.T) {
 	_, readErr := stdinServer.Read(buf)
 	if readErr != io.EOF {
 		t.Fatalf("stdin server read = %v, want EOF after Run cleanup", readErr)
+	}
+}
+
+func TestRunner_Wait_notCompleted(t *testing.T) {
+	ctx := context.Background()
+	rec := &recordingClient{handler: func(req *http.Request) (*http.Response, error) {
+		if req.Method == http.MethodPost {
+			return jsonResponse(200, `{"id":"i1","secret":{"id":"s1","version":1},"status":{}}`), nil
+		}
+		return jsonResponse(200, `{"id":"i1","secret":{"id":"s1","version":1},"status":{"startedAt":"2024-01-01T00:00:00Z"}}`), nil
+	}}
+	c := &SecretClient{client: rec, attach: holdAttach(t)}
+	_, handle, err := c.Runner("sid").Run(ctx, secrets.Create, "", executor.OperationParameters{Reason: "r"}, nil, command.Stdio{})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if err := handle.Cancel(ctx); err != nil {
+		t.Fatalf("Cancel: %v", err)
+	}
+	_, err = handle.Wait(ctx)
+	if err == nil || !strings.Contains(err.Error(), "not completed") {
+		t.Fatalf("Wait = %v, want not completed error", err)
 	}
 }
 

@@ -189,5 +189,5 @@ type Serve struct {
 	ServerSocket  string        `short:"s" help:"Unix socket path for serving the HTTP API"`
 	RequestLimit  uint32        `short:"L" default:"100" help:"Maximum number of requests per request window"`
 	RequestWindow time.Duration `short:"W" default:"1m" help:"Window of time over which the request limit is enforced"`
-	OutputTTL     time.Duration `short:"T" default:"5m" help:"How long to retain operation output after completion"`
+	OutputTTL     time.Duration `short:"T" default:"5m" help:"Reserved: future orphan attach-slot timeout (unused)"`
 }

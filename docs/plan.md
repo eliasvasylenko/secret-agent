@@ -2,7 +2,7 @@
 
 Detailed plan to migrate secret-agent to the architecture in [`design.md`](design.md). Work is ordered so each phase produces a compilable, testable increment where possible.
 
-**Current state:** Phases 0–6 done. Phase 7 cleanup remains.
+**Current state:** Phases 0–7 done. Phase 8 (federation / Proposer wire) is next.
 
 **Out of scope for early phases:** federation wire format, `Proposer` behaviour inside scripts, aggregate web API, SSH transport.
 
@@ -208,11 +208,11 @@ Goal: `client` implements `backend.Runner` using attach + POST + `Handle`.
 
 ---
 
-## Phase 7 — Cleanup and docs
+## Phase 7 — Cleanup and docs ✅
 
-1. Delete or archive obsolete code paths (`client/operations.go` dead methods, old attach URLs).
-2. Mark `plan-process-io.md` deprecated; point to `design.md` + this plan.
-3. Update `docs/http-api.md` with final routes.
+1. Removed obsolete paths (`client/operations.go`, nested instance URLs, `/result` poll).
+2. `plan-process-io.md` deprecated; points to `design.md` + this plan + `http-api.md`.
+3. `docs/http-api.md` updated with final flat routes and wire DTO names.
 4. Optional: agent restart marks in-flight DB ops failed (deferred in design).
 
 ---
@@ -258,7 +258,7 @@ Phases 3 and 4 can proceed in parallel after Phase 1 if two people; Phase 5 need
 
 | Risk | Mitigation |
 |------|------------|
-| Client can’t detect op completion without `/result` | Decide in Phase 0.2 / 5; prototype early |
+| Client can’t detect op completion without `/result` | **Resolved** — attach EOF + GET instance (`Handle.Wait`) |
 | Start/Handle awkward on server | Server never exposes `Handle` to wire; slot goroutine only |
 | Global op map for join/cancel by op number | **`Handle` closure per `Run`** — no registry (Phase 3 lesson) |
 | Large bang refactor | Phase 1 mocks; phase 3 sqlite before client |

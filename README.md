@@ -17,6 +17,12 @@ Instead secret-agent declares only the secret **plans** (i.e. the scripts that d
 
 Homelabbers using NixOS. People who are willing to take a risk on something immature if it's interesting.
 
+## Architecture docs
+
+- [design.md](docs/design.md) — settled constraints, `Backend` / `Handle` contract
+- [plan.md](docs/plan.md) — implementation phases (0–7 complete)
+- [http-api.md](docs/http-api.md) — HTTP routes and wire JSON types
+
 ## How it works
 
 The secret-agent NixOS module will: 

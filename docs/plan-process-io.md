@@ -1,17 +1,23 @@
 # Process I/O and federated secret operations
 
-Design for stdio attach, multi-secret orchestration, and (later) a second control plane over SSH. This document reflects the architecture agreed in design discussion (May 2026).
+> **Deprecated (Sep 2026).** This document describes the superseded `process/io` long-poll
+> model and pre-attach-after-POST client flow. **Current architecture:**
+> [design.md](design.md), [plan.md](plan.md), [http-api.md](http-api.md).
+> Kept for historical federation sketches; Phase 8 may fold still-relevant ideas into
+> `design.md`.
 
-## Status
+Design for stdio attach, multi-secret orchestration, and (later) a second control plane over SSH. Written during design discussion (May 2026).
 
-| Area | State |
-|------|--------|
-| HTTP stdio streams (`POST …/process/io`) | Partially implemented (server + client polling loop) |
-| Decoupled start vs attach | Not implemented — client still attaches in-process after create |
-| Originating principal + attach token | Designed, not implemented |
-| Header-based principal (forward auth) | Designed, deferred |
-| Embedded SSH server + SSH `store` client | Designed, not started |
-| Same-host federated e2e (NixOS) | Planned first target |
+## Status (historical — not current)
+
+| Area | State at time of writing | Current (Phases 0–7) |
+|------|--------------------------|----------------------|
+| HTTP stdio (`POST …/process/io`) | Partially implemented | **Removed** — attach-before-start + `Handle` |
+| Decoupled start vs attach | Not implemented | **Done** — client attaches, then POST |
+| Originating principal + attach token | Designed | Deferred → Phase 8 |
+| Header-based principal (forward auth) | Designed, deferred | Deferred → Phase 8 |
+| Embedded SSH server + SSH client | Designed, not started | Phase 8 |
+| Same-host federated e2e (NixOS) | Planned | Phase 8 |
 
 ## Goals
 

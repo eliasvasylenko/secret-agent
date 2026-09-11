@@ -3,7 +3,7 @@
 # - stdin piped on the CLI is forwarded to the create script
 # - stdout and stderr from scripts are streamed back to the CLI
 # - stdout is streamed incrementally (partial output arrives before command completes)
-# - stdin arrives in multiple writes (chunked over process/io)
+# - stdin arrives in multiple writes (chunked over attach)
 # - stdin and stdout are exchanged concurrently (interleaved)
 { self, pkgs, ... }:
 pkgs.testers.runNixOSTest {

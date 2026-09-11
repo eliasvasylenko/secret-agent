@@ -144,8 +144,13 @@ func (h *runHandle) startJoin() {
 	go func() {
 		h.pumpWG.Wait()
 		inst, err := h.client.Catalog().Instances().Get(context.Background(), h.instanceId)
-		if err == nil && inst != nil && inst.Status.FailedAt != nil {
-			err = fmt.Errorf("operation failed")
+		if err == nil && inst != nil {
+			switch {
+			case inst.Status.FailedAt != nil:
+				err = fmt.Errorf("operation failed")
+			case inst.Status.CompletedAt == nil:
+				err = fmt.Errorf("operation not completed")
+			}
 		}
 		h.final = inst
 		h.waitErr = err

@@ -1,6 +1,6 @@
 # secret-agent design notes
 
-Concise record of settled constraints and open tensions. Supersedes parts of `plan-process-io.md` (that doc describes old `process/io` polling).
+Concise record of settled constraints and open tensions. Supersedes [`plan-process-io.md`](plan-process-io.md) (deprecated; old `process/io` polling).
 
 ## Domain model
 

@@ -1,6 +1,6 @@
-# HTTP API (target)
+# HTTP API
 
-Wire format for the attach-before-start model. Domain logic uses `executor.OperationParameters`; JSON uses **`OperationRequest`** / **`NamedOperationRequest`**.
+Wire format for the attach-before-start model. Domain logic uses `executor.OperationParameters`; JSON uses **`OperationRequest`** plus **`SecretOperationRequest`** / **`InstanceOperationRequest`**.
 
 Principal is always from transport (Unix peer credentials), never from the request body.
 
@@ -45,7 +45,7 @@ secret's attach slot while operating on another secret's instance. There is no
 `GET /operations/{n}`: `operationNumber` is reported per instance, so it is not used as a
 URL identifier.
 
-### Removed (vs current branch)
+### Removed (legacy)
 
 | Removed | Replacement |
 |---------|-------------|
@@ -53,6 +53,7 @@ URL identifier.
 | `GET …/operations/{opNumber}/result` (long-poll) | Attach stream EOF + GET instance |
 | `DELETE …/operations/{opNumber}` | Stdout/stderr disconnect cancels op |
 | `GET/POST /secrets/{secretId}/instances…` | Root `/instances`, `/operations` collections |
+| `POST …/process/io` | Attach upgrade streams |
 
 ---
 
@@ -95,7 +96,7 @@ Shared payload for starting any operation:
 
 ### Create — `POST /instances`
 
-Body: **`InstanceRequest`** — `OperationRequest` plus the owning secret.
+Body: **`SecretOperationRequest`** — `OperationRequest` plus the owning secret.
 
 ```json
 {
@@ -110,7 +111,7 @@ Missing `secretId` is **400**. Response **200**: `secrets.Instance` with new `id
 
 ### Instance operation — `POST /operations`
 
-Body: **`NamedOperationRequest`**
+Body: **`InstanceOperationRequest`**
 
 ```json
 {
@@ -144,4 +145,4 @@ Completion: server closes pipe ends when subprocess exits → attach reads/write
 
 ## Proposals (future)
 
-Dependent-secret authorization during run: **control messages** on a separate upgraded stream or mux (`/attach/control`). Not in v1 wire format.
+Dependent-secret authorization during run: **control messages** on a separate upgraded stream or mux (`/attach/control`). Not in v1 wire format. See `design.md` § Proposer and Phase 8 in `plan.md`.
