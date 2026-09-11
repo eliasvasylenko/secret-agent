@@ -2,7 +2,7 @@
 
 Detailed plan to migrate secret-agent to the architecture in [`design.md`](design.md). Work is ordered so each phase produces a compilable, testable increment where possible.
 
-**Current state:** Phases 0–5 done. `internal/cli` still uses the old store API — tree does not fully compile until Phase 6.
+**Current state:** Phases 0–6 done. Phase 7 cleanup remains.
 
 **Out of scope for early phases:** federation wire format, `Proposer` behaviour inside scripts, aggregate web API, SSH transport.
 
@@ -197,9 +197,9 @@ Goal: `client` implements `backend.Runner` using attach + POST + `Handle`.
 
 ---
 
-## Phase 6 — CLI + serve wiring
+## Phase 6 — CLI + serve wiring ✅
 
-1. `NewStore` returns `backend.Backend` (sqlite or HTTP client).
+1. `NewBackend` returns `backend.Backend` (sqlite or HTTP client).
 2. CLI read commands → `Catalog`.
 3. CLI mutating commands → `ops.Create` etc. with terminal stdio + noop `Proposer`.
 4. `serve` passes sqlite repo (implements catalog + runner) into server.

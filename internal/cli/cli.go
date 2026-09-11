@@ -8,12 +8,13 @@ import (
 	"time"
 
 	"github.com/alecthomas/kong"
+	"github.com/eliasvasylenko/secret-agent/internal/backend"
 	"github.com/eliasvasylenko/secret-agent/internal/command"
 	"github.com/eliasvasylenko/secret-agent/internal/executor"
 	"github.com/eliasvasylenko/secret-agent/internal/marshal"
+	"github.com/eliasvasylenko/secret-agent/internal/ops"
 	"github.com/eliasvasylenko/secret-agent/internal/secrets"
 	"github.com/eliasvasylenko/secret-agent/internal/server"
-	"github.com/eliasvasylenko/secret-agent/internal/backend"
 )
 
 type CLI struct {
@@ -37,8 +38,8 @@ type CLI struct {
 	Test            InstanceCommand `cmd:"" help:"Test an instance of a secret"`
 	Serve           Serve           `cmd:"" help:"Serve the secret agent API"`
 
-	ctx         kongContext
-	secretStore backend.Backend
+	ctx   kongContext
+	agent backend.Backend
 }
 
 type kongContext interface {
@@ -55,7 +56,7 @@ func NewCLI(ctx context.Context) *CLI {
 	}
 
 	var err error
-	c.secretStore, err = NewStore(ctx, c.ClientSocket, c.SecretsFile, c.DbFile, c.Debug, c.MaxReasonLength)
+	c.agent, err = NewBackend(ctx, c.ClientSocket, c.SecretsFile, c.DbFile, c.Debug, c.MaxReasonLength)
 	c.ctx.FatalIfErrorf(err)
 	return &c
 }
@@ -63,31 +64,36 @@ func NewCLI(ctx context.Context) *CLI {
 func (c *CLI) Run(ctx context.Context) {
 	var result any
 	var err error
+	catalog := c.agent.Catalog()
 	switch c.ctx.Command() {
 	case "secrets":
-		result, err = c.secretStore.List(ctx)
+		result, err = catalog.Secrets().List(ctx)
 	case "secret <secret-id>":
-		result, err = c.secretStore.Get(ctx, c.Secret.SecretID)
+		result, err = catalog.Secrets().Get(ctx, c.Secret.SecretID)
 	case "instances <secret-id>":
-		result, err = c.secretStore.Instances(c.Instances.SecretID).List(ctx, c.Instances.From, c.Instances.To)
+		secretId := c.Instances.SecretID
+		result, err = catalog.Instances().List(ctx, &secretId, c.Instances.From, c.Instances.To)
 	case "instance <secret-id> <instance-id>":
-		result, err = c.secretStore.Instances(c.Instance.SecretID).Get(ctx, c.Instance.InstanceID)
+		result, err = catalog.Instances().Get(ctx, c.Instance.InstanceID)
 	case "active <secret-id>":
-		result, err = c.secretStore.Instances(c.Active.SecretID).GetActive(ctx)
+		result, err = catalog.Instances().GetActive(ctx, c.Active.SecretID)
 	case "history <secret-id>":
-		result, err = c.secretStore.History(ctx, c.History.SecretID, c.History.From, c.History.To)
+		secretId := c.History.SecretID
+		result, err = catalog.Operations().List(ctx, &secretId, nil, c.History.From, c.History.To)
 	case "history <secret-id> <instance-id>":
-		result, err = c.secretStore.Instances(c.History.SecretID).Operations(c.History.InstanceID).List(ctx, c.History.From, c.History.To)
+		secretId := c.History.SecretID
+		instanceId := c.History.InstanceID
+		result, err = catalog.Operations().List(ctx, &secretId, &instanceId, c.History.From, c.History.To)
 	case "create <secret-id>":
-		result, err = c.startSecretOperation(ctx, c.Create, backend.Instances.Create)
+		result, err = ops.Create(ctx, c.agent.Runner(c.Create.SecretID), c.Create.parameters(), noopProposer{}, c.stdio())
 	case "destroy <secret-id> <instance-id>":
-		result, err = c.startInstanceOperation(ctx, c.Destroy, backend.Instances.Destroy)
+		result, err = ops.Destroy(ctx, c.agent.Runner(c.Destroy.SecretID), c.Destroy.InstanceID, c.Destroy.parameters(), noopProposer{}, c.stdio())
 	case "activate <secret-id> <instance-id>":
-		result, err = c.startInstanceOperation(ctx, c.Activate, backend.Instances.Activate)
+		result, err = ops.Activate(ctx, c.agent.Runner(c.Activate.SecretID), c.Activate.InstanceID, c.Activate.parameters(), noopProposer{}, c.stdio())
 	case "deactivate <secret-id> <instance-id>":
-		result, err = c.startInstanceOperation(ctx, c.Deactivate, backend.Instances.Deactivate)
+		result, err = ops.Deactivate(ctx, c.agent.Runner(c.Deactivate.SecretID), c.Deactivate.InstanceID, c.Deactivate.parameters(), noopProposer{}, c.stdio())
 	case "test <secret-id> <instance-id>":
-		result, err = c.startInstanceOperation(ctx, c.Test, backend.Instances.Test)
+		result, err = ops.Test(ctx, c.agent.Runner(c.Test.SecretID), c.Test.InstanceID, c.Test.parameters(), noopProposer{}, c.stdio())
 	case "serve":
 		permissionsConfig, err := server.LoadPermissions(c.PermissionsFile)
 		c.ctx.FatalIfErrorf(err)
@@ -97,7 +103,7 @@ func (c *CLI) Run(ctx context.Context) {
 			RequestWindow: c.Serve.RequestWindow,
 			OutputTTL:     c.Serve.OutputTTL,
 		}
-		server := server.New(config, c.secretStore, permissionsConfig)
+		server := server.New(config, c.agent, permissionsConfig)
 		err = server.Serve()
 	default:
 		panic(fmt.Errorf("unknown command: %s", c.ctx.Command()))
@@ -118,22 +124,14 @@ func (c *CLI) Run(ctx context.Context) {
 	c.ctx.FatalIfErrorf(err)
 }
 
-// startSecretOperation starts an operation then Await until it completes.
-func (c *CLI) startSecretOperation(ctx context.Context, operation SecretCommand, start func(backend.Instances, context.Context, executor.OperationParameters, command.Stdio) (*secrets.Instance, error)) (*secrets.Instance, error) {
-	instances := c.secretStore.Instances(operation.SecretID)
-	stdio := command.Stdio{Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr}
-	instance, err := start(instances, ctx, operation.parameters(), stdio)
-	if err != nil {
-		return nil, err
-	}
-	_, completed, err := instances.Operations(instance.Id).Await(ctx, instance.Status.OperationNumber)
-	return completed, err
+type noopProposer struct{}
+
+func (noopProposer) Propose(context.Context, secrets.OperationName, executor.OperationParameters) error {
+	return nil
 }
 
-func (c *CLI) startInstanceOperation(ctx context.Context, operation InstanceCommand, start func(backend.Instances, context.Context, string, executor.OperationParameters, command.Stdio) (*secrets.Instance, error)) (*secrets.Instance, error) {
-	return c.startSecretOperation(ctx, operation.SecretCommand, func(instances backend.Instances, ctx context.Context, parameters executor.OperationParameters, stdio command.Stdio) (*secrets.Instance, error) {
-		return start(instances, ctx, operation.InstanceID, parameters, stdio)
-	})
+func (c *CLI) stdio() command.Stdio {
+	return command.Stdio{Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr}
 }
 
 type Secrets struct{}
