@@ -17,7 +17,8 @@ const DefaultForwardAuthHeader = "X-Secret-Agent-User"
 var lookupUser = user.Lookup
 
 // ForwardAuth names Unix peers allowed to assert an end-user via an HTTP header.
-// The header is ignored unless the socket peer matches Peers.
+// Hop trust is peercreds: the header is ignored unless SO_PEERCRED matches Peers
+// (an allowlist of last hops, not a chain).
 type ForwardAuth struct {
 	Peers  []Entity `json:"peers,omitempty"`
 	Header string   `json:"header,omitempty"`

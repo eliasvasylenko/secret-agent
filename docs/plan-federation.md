@@ -104,10 +104,13 @@ Goal: A starts and attaches on B using HTTP client as principal A; stdio path un
 Goal: B gates child op on John’s consent; A cannot MITM. **Both hops:**
 
 1. **Introduce (same-host first)** — John dials B as himself (second Unix peer / later HTTPS or SSH). A only coordinates (`Propose` blocks until B has John’s OK).
-2. **Pipe** — A splices one opaque conn per call; John authenticates to **B’s** reverse
-   proxy or **B’s `sshd`** on that pipe (not to the agent). Needed when John cannot see B.
-3. **B records OK** — from peercreds, forward-auth header, or the SSH helper’s asserted name;
-   never from A’s say-so.
+2. **Pipe** — A splices one opaque conn per call toward **B’s** reverse proxy or
+   **B’s `sshd`** (not onto B’s agent socket). John authenticates to B on that pipe.
+   Needed when John cannot see B. If the inner hop is SSH, B’s `command=` is still
+   the stdio↔unix-socket splice; A’s `command=` (if any) is the splice to B:22 / B’s
+   proxy.
+3. **B records OK** — from peercreds, or from the name header when that Unix peer
+   matches `ForwardAuth.Peers`; never from A’s say-so.
 4. **Unblock** — parent on A continues only after B records OK; reject on timeout/deny.
 5. **Threat-model tests** — A cannot approve without the John leg; A as splicer cannot forge inner auth; replay/edited response fails.
 
@@ -135,7 +138,7 @@ Sketch only until Phase 5 is green. Outside authenticators are [plan-remote.md](
 | Item | Notes |
 |------|--------|
 | Cross-host **introduce** | John → B’s reverse proxy or B’s `sshd` |
-| Cross-host **pipe** | A splices; John still authenticates to B’s proxy/`sshd`; mix HTTPS outer × SSH inner (and the reverse) |
+| Cross-host **pipe** | A splices to B’s proxy/`sshd`; John still authenticates to B; mix HTTPS outer × SSH inner (and the reverse) |
 | Originating principal field | If needed for audit beyond transport `startedBy` |
 | Operation / attach timeouts | Orphan slot TTL (`OutputTTL` CLI flag reserved) |
 | Agent restart cleanup | Mark in-flight DB ops failed |

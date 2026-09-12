@@ -182,28 +182,35 @@ Example: John runs an op on **host A**; the script triggers a dependent op on **
 
 ## Remote transports
 
-The **application protocol is always HTTP** (catalog JSON + attach `101`). That is `internal/client` ↔ `internal/server`, not `Backend`.
+The **application protocol is always HTTP** (catalog JSON + attach `101`). That is `internal/client` ↔ `internal/server`, not `Backend`. SSH carries that HTTP on session stdio; it is not OpenSSH `-L` forwarding.
 
 **Authentication is always outside the agent.** The process only **authorises** (`Identify` + roles). Plan: [plan-remote.md](plan-remote.md).
 
 | Hop | How you get a `net.Conn` | Who authenticates | What the agent reads |
 |-----|--------------------------|-------------------|----------------------|
 | Local | Unix socket | Kernel (`SO_PEERCRED`) | `linux:{user}/{uid}` |
-| HTTPS | TLS to a reverse proxy, then Unix | Proxy (forward-auth, etc.) | Name header `X-Secret-Agent-User` (trusted hop) |
-| SSH | `ssh` to **OpenSSH** | `sshd` (pubkey) | Peercreds if the SSH user is a real unix user; otherwise the stdio helper asserts the same name header (Git-style `command=`) |
+| HTTPS | TLS to a reverse proxy, then Unix | Proxy (forward-auth, etc.) | Name header `X-Secret-Agent-User` if the Unix peer matches `ForwardAuth.Peers` |
+| SSH as a real unix user | `ssh eli@host`; `command=` splices stdio to the Unix socket | `sshd` (pubkey) | Peercreds of Eli (helper runs as Eli) |
+| SSH as a shared account | `ssh secret-agent@host`; `command=` encodes the person (Gitolite-style) | `sshd` (pubkey) | Name header, if that helper’s uid/name is in `ForwardAuth.Peers` |
 
 No embedded SSH server. No OIDC/JWT/TLS client-auth inside secret-agent.
 
-**HTTP Upgrade / reverse proxy:** Attach is HTTP `101` + `Upgrade`, same mechanism as WebSockets. Caddy `reverse_proxy` already forwards that. Custom protocol `secret-agent-process/1` should pass; confirm in e2e (do not add a matcher that only allows `websocket`).
+**`command=`** forces a stdio↔unix-socket splice (`socat` or a small helper). It does not run the CLI or `serve`. One `ssh` per REST call and per attach stream. `restrict` is correct for that shape; it is the wrong knob for `-L` / streamlocal.
+
+**Hop trust is peercreds.** `ForwardAuth` is “this Unix peer may assert the name header.” `Peers` is an allowlist of last hops, not a forwarded chain. The agent always trusts the innermost hop; outer hops are that hop’s problem (Caddy’s OIDC, `sshd`’s keys).
+
+**HTTP Upgrade / reverse proxy:** Attach is HTTP `101` + `Upgrade`, same mechanism as WebSockets. Caddy `reverse_proxy` already forwards that. Custom protocol `secret-agent-process/1` should pass; confirm in e2e (do not add a matcher that only allows `websocket`). The SSH splice carries the same bytes after `101`.
 
 **Peer credentials:** `SO_PEERCRED` is kernel metadata on **this** Unix socket. It is not in the byte stream and is **not forwarded** over a pipe, TCP, TLS, SSH, or WebSocket. Guardrails:
 
 - Call `Getpeercred` only on `*net.UnixConn`.
 - That uid is John only for a **direct** local (or SSH-as-that-unix-user) dial.
-- If the Unix peer is a **trusted hop** (reverse proxy or Git-style SSH helper), identity is the name header, not the hop’s uid as the end user.
+- If the Unix peer matches `ForwardAuth.Peers` (reverse proxy or shared-account SSH helper), identity is the name header, not the hop’s uid as the end user.
 - Never copy peercreds into the stream for a remote hop to replay.
 
-**Federation hops (both valid):** **Introduce** — John dials B the same way as a remote secret (HTTPS to B’s proxy, or `ssh` to B’s `sshd`). **Pipe** — A splices an opaque conn; John runs **outer-authn on B** through it (TLS to B’s proxy, or SSH to B’s `sshd`). A must splice, not reverse-proxy. Do not land a John-identity HTTP session on B’s peercred Unix socket via a splice (`SO_PEERCRED` would be A). See § Proposer.
+**Principal prefix:** `linux:{user}/{uid}` when identity is a resolved local user (peercreds, or a header name `user.Lookup` finds). `http:{name}` when the header name is not a local account — header identity, not “the transport was HTTP.”
+
+**Federation hops (both valid):** **Introduce** — John dials B as for a remote secret (HTTPS to B’s proxy, or `ssh` to B’s `sshd`). **Pipe** — A splices an opaque conn toward B’s proxy or `sshd` (A’s `command=` is not the agent splice). John authenticates **to B** on that pipe; B’s `command=` (if SSH) is still stdio onto B’s socket. A must splice, not reverse-proxy HTTP. Do not land a John-identity HTTP session on B’s peercred Unix socket via a splice (`SO_PEERCRED` would be A). See § Proposer.
 
 ## Open / deferred
 

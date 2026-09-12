@@ -3,10 +3,12 @@
 Wire format for the attach-before-start model. Domain logic uses `executor.OperationParameters`; JSON uses **`OperationRequest`** plus **`SecretOperationRequest`** / **`InstanceOperationRequest`**.
 
 Principal is always from transport, never from the request body. The agent does not
-authenticate. Local Unix: peer credentials. Remote HTTP: forward-auth header
-**`X-Secret-Agent-User`**, trusted because the Unix peer is a reverse proxy (or Git-style
-SSH helper). If that name is a local user, principal is `linux:{user}/{uid}`; otherwise
-`http:{name}`. SSH: OpenSSH authenticates; see [plan-remote.md](plan-remote.md).
+authenticate. Local Unix: peer credentials. Name header **`X-Secret-Agent-User`** is
+used only when `SO_PEERCRED` matches `ForwardAuth.Peers` (Caddy, or a shared-account
+SSH helper that injects the header). If that name is a local user, principal is
+`linux:{user}/{uid}`; otherwise `http:{name}` (not a local account — not “HTTPS vs
+SSH”). SSH as a real unix user: helper splice, identity from peercreds, no header.
+See [plan-remote.md](plan-remote.md).
 
 Attach uses HTTP `101` + `Upgrade: secret-agent-process/1` — the same Upgrade
 mechanism as WebSockets. Caddy `reverse_proxy` forwards it; e2e should confirm the

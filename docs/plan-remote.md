@@ -38,20 +38,24 @@ Unix peer credentials. Both later hops reuse these outside authenticators:
 | Question | Decision |
 |----------|----------|
 | Remote story | CLI on X talks to B (not only “ssh then local CLI”) |
-| Application | **Always HTTP** |
+| Application | **Always HTTP** (including over SSH stdio) |
 | Authn | **Always outside** the agent |
 | Local | Unix socket + `SO_PEERCRED` |
 | HTTPS | Reverse proxy (Caddy or anything) terminates TLS + forward-auth; agent on Unix; name header **`X-Secret-Agent-User`** |
-| SSH | **OpenSSH**, Git-style: `restrict,command=` stdio helper onto the Unix socket. Prefer `Match User` on the host `sshd` already running; optional dedicated `sshd` if port 22 stays closed. **No** `x/crypto/ssh` server in secret-agent |
-| SSH identity | SSH user is a real unix user → peercreds; or one `git`-style user and the helper asserts the name header (trusted hop, same as the reverse proxy) |
-| Pipe / mix-and-match | **Reserved** — [plan-federation.md](plan-federation.md) |
-| HTTP attach | `101` Upgrade through the reverse proxy (WebSocket-style) |
+| Hop trust | **Peercreds.** `ForwardAuth` honours the name header only when `SO_PEERCRED` matches `ForwardAuth.Peers`. Not “whoever can dial the socket.” |
+| `ForwardAuth.Peers` | Allowlist of **last hops** (OR), not a chain. Typically one process (Caddy). A second entry only if another local process independently dials the same socket and asserts the header. |
+| Header | One name for the agent (`X-Secret-Agent-User`, overridable). Hops are configured to set that; the agent is not a per-peer header polyglot. |
+| SSH | **OpenSSH**. **No** `x/crypto/ssh` in secret-agent. Prefer `Match User` on the host `sshd`; optional dedicated `sshd` if port 22 stays closed. |
+| SSH `command=` | Forces a **stdio↔unix-socket splice** (`socat` or a tiny helper). Not the CLI, not `serve` (already listening). HTTP (including attach `101`) lives **on** that stdio. One `ssh` per REST call and per attach stream. This is Git’s session-stdio shape, not `-L` / streamlocal forwarding (`restrict` disables forwarding). |
+| SSH identity | **Real unix user** (`ssh eli@host`) → helper runs as Eli → peercreds, no header. **Shared account** (`ssh secret-agent@host`, key maps to a person via `command=` argv, like Gitolite) → peercreds is the shared user; helper injects the same name header (trusted hop, same seam as Caddy). Git itself does not use a header; we translate `command=` into one because the agent speaks HTTP. |
+| Pipe / mix-and-match | **Reserved** — [plan-federation.md](plan-federation.md). A splices to B’s `sshd` or proxy (e.g. `command="nc B 22"` / `ProxyJump`). B’s `command=` is still the agent splice. A must not terminate HTTP. |
+| HTTP attach | `101` Upgrade through the reverse proxy (WebSocket-style), or through the SSH splice as raw stdio after `101` |
 | TLS in the agent | No |
 | Client | Each REST call and each attach **dials once** (unix, HTTPS, or `ssh` stdio) |
 
 Written into [design.md](design.md) § Remote transports.
 
-**Still TBD in implementation:** exact Nix `Match User` vs second `sshd`; helper binary vs `socat`; header name override (`forwardAuth.header`). Mux / keep-alive is an optional optimisation, not a primitive.
+**Still TBD in implementation:** exact Nix `Match User` vs second `sshd`; helper binary vs `socat`; whether the shared-account helper is HTTP-aware (header inject) or `setuid` then splice. Mux / keep-alive is an optional optimisation, not a primitive.
 
 ---
 
@@ -91,9 +95,11 @@ internal/server  (HTTP API; identity from peercreds or forward-auth header)
 
 ### Phase 1 — Identity seam (HTTP) ✅
 
-`Bindings.Identify` authenticates the Unix peer, then authorises. A forward-auth
-name header is used only when `ForwardAuth` trusts that peer. `SO_PEERCRED` is
-never taken from a non-Unix conn, the body, or a tunnel.
+`Bindings.Identify` authenticates the Unix peer (`SO_PEERCRED`), then authorises.
+`ForwardAuth` honours the name header only when that peer matches `Peers`.
+`SO_PEERCRED` is never taken from a non-Unix conn, the body, or a tunnel.
+If the header name is a local user, principal is `linux:{user}/{uid}`; otherwise
+`http:{name}` (header identity, not “this arrived over HTTPS”).
 
 **Verification:** `go test ./internal/auth/... ./internal/server/...`
 
@@ -111,11 +117,17 @@ CLI on “X” creates/activates a secret on “B” over HTTPS, including attac
 
 **Verification:** `nix flake check` (new remote-http check).
 
-### Phase 4 — SSH via OpenSSH (Git-style)
+### Phase 4 — SSH via OpenSSH
 
-Stdio helper: copy SSH session stdio to the Unix socket. Nix: system user, `authorized_keys`
-`restrict,command=…` (and/or `Match User`). CLI: `ssh` / `ProxyCommand` as the `Dialer`.
-No SSH server in Go.
+`authorized_keys` along the lines of:
+
+```
+restrict,command="socat STDIO UNIX-CONNECT:/run/secret-agent/agent.sock" ssh-ed25519 …
+```
+
+(or a helper that copies stdio the same way, and for a shared account injects
+`X-Secret-Agent-User` from the forced `command=` identity). The CLI `Dialer` is
+`ssh` / `ProxyCommand`; each dial’s stdio is one HTTP `net.Conn`. No SSH server in Go.
 
 **Verification:** helper unit tests; optional Go test that speaks HTTP over a pipe.
 
