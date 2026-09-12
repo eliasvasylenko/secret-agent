@@ -109,7 +109,7 @@ let
         all = "any";
       };
     };
-    claims = {
+    bindings = {
       users = lib.mkOption {
         description = "Users and the roles they can assume";
         type = stringOrStrings;
@@ -179,8 +179,8 @@ let
   # Write the permissions config file for the service backend
   permissionsFile = pkgs.writeText "permissions.config" (
     builtins.toJSON {
-      claims = {
-        inherit (cfg.claims) users groups;
+      bindings = {
+        inherit (cfg.bindings) users groups;
       };
       inherit (cfg) roles;
     }

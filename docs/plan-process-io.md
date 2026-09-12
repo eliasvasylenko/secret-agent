@@ -2,9 +2,11 @@
 
 > **Deprecated (Sep 2026).** This document describes the superseded `process/io` long-poll
 > model and pre-attach-after-POST client flow. **Current architecture:**
-> [design.md](design.md), [plan.md](plan.md), [http-api.md](http-api.md).
-> Kept for historical federation sketches; Phase 8 may fold still-relevant ideas into
-> `design.md`.
+> [design.md](design.md), [plan.md](plan.md), [plan-remote.md](plan-remote.md),
+> [plan-federation.md](plan-federation.md), [http-api.md](http-api.md).
+>
+> Federation (parked) uses **introduce** and **pipe**, not the originating-principal /
+> attach-token sketches below. Remote HTTP/SSH sessions: [plan-remote.md](plan-remote.md).
 
 Design for stdio attach, multi-secret orchestration, and (later) a second control plane over SSH. Written during design discussion (May 2026).
 
@@ -14,10 +16,10 @@ Design for stdio attach, multi-secret orchestration, and (later) a second contro
 |------|--------------------------|----------------------|
 | HTTP stdio (`POST …/process/io`) | Partially implemented | **Removed** — attach-before-start + `Handle` |
 | Decoupled start vs attach | Not implemented | **Done** — client attaches, then POST |
-| Originating principal + attach token | Designed | Deferred → Phase 8 |
-| Header-based principal (forward auth) | Designed, deferred | Deferred → Phase 8 |
-| Embedded SSH server + SSH client | Designed, not started | Phase 8 |
-| Same-host federated e2e (NixOS) | Planned | Phase 8 |
+| Originating principal + attach token | Designed | **Superseded** — A is starter+attacher on B; John authorises via introduce or pipe ([plan-federation.md](plan-federation.md)) |
+| Header-based principal (forward auth) | Designed, deferred | **[plan-remote.md](plan-remote.md)** Phase 1 (`X-Secret-Agent-User`) |
+| Embedded SSH server + SSH client | Designed, not started | **Dropped** — OpenSSH + `command=` helper ([plan-remote.md](plan-remote.md) Phases 4–5) |
+| Same-host federated e2e (NixOS) | Planned | plan-federation Phase 5 |
 
 ## Goals
 

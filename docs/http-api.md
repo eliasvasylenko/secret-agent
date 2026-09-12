@@ -2,7 +2,15 @@
 
 Wire format for the attach-before-start model. Domain logic uses `executor.OperationParameters`; JSON uses **`OperationRequest`** plus **`SecretOperationRequest`** / **`InstanceOperationRequest`**.
 
-Principal is always from transport (Unix peer credentials), never from the request body.
+Principal is always from transport, never from the request body. The agent does not
+authenticate. Local Unix: peer credentials. Remote HTTP: forward-auth header
+**`X-Secret-Agent-User`**, trusted because the Unix peer is a reverse proxy (or Git-style
+SSH helper). If that name is a local user, principal is `linux:{user}/{uid}`; otherwise
+`http:{name}`. SSH: OpenSSH authenticates; see [plan-remote.md](plan-remote.md).
+
+Attach uses HTTP `101` + `Upgrade: secret-agent-process/1` — the same Upgrade
+mechanism as WebSockets. Caddy `reverse_proxy` forwards it; e2e should confirm the
+custom protocol name is not filtered.
 
 Pending attach slot key: **`(secretId, principal)`**. POST atomically consumes that
 slot; subsequent attaches may prepare another operation while the consumed one runs.
@@ -145,4 +153,8 @@ Completion: server closes pipe ends when subprocess exits → attach reads/write
 
 ## Proposals (future)
 
-Dependent-secret authorization during run: **control messages** on a separate upgraded stream or mux (`/attach/control`). Not in v1 wire format. See `design.md` § Proposer and Phase 8 in `plan.md`.
+Dependent-secret authorization during run: **control messages** on a separate upgraded
+stream (`/attach/control` or similar). Not in v1 wire format. Parked with federation —
+[plan-federation.md](plan-federation.md). John↔B is either **introduce** (John dials B)
+or **pipe** (opaque splice through A; John still authenticates to B’s proxy or `sshd`).
+Remote access (John talking to one agent) is [plan-remote.md](plan-remote.md).

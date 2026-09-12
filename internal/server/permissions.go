@@ -12,8 +12,8 @@ import (
 )
 
 type Permissions struct {
-	Roles  auth.Roles  `json:"roles"`
-	Claims auth.Claims `json:"claims"`
+	Roles    auth.Roles    `json:"roles"`
+	Bindings auth.Bindings `json:"bindings"`
 }
 
 type identityKey struct{}
@@ -46,7 +46,7 @@ func LoadPermissions(permissionsFileName string) (*Permissions, error) {
 func (p *Permissions) Middleware(permissions auth.Permissions, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		connection := r.Context().Value(connectionKey{}).(net.Conn)
-		identity, err := p.Claims.ClaimIdentity(r, connection)
+		identity, err := p.Bindings.Identify(r, connection)
 		if err != nil {
 			writeError(w, NewErrorResponse(http.StatusUnauthorized, err))
 			return

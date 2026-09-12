@@ -88,7 +88,7 @@ If HTTP only started the op on `wait`, attach-before-start would be pointless (y
 **Historical “delay until attach” (Jul 2025):** for **HTTP / federation**, not sqlite. Problems it solved:
 
 1. **Fast-script race** — subprocess must not run until stdio streams exist (otherwise exit before attach, or block on full pipe buffers).
-2. **Decoupled attacher** — ~~starter ≠ attacher (human B attaches later)~~ **replaced:** orchestrator A is always starter+attacher on B; B gates on **John’s authorisation proof**, not a second attach principal (federation; Phase 8).
+2. **Decoupled attacher** — ~~starter ≠ attacher (human B attaches later)~~ **replaced:** orchestrator A is always starter+attacher on B; B gates on **John’s authorisation proof**, not a second attach principal (see [plan-federation.md](plan-federation.md)).
 
 That delay is **“until attach + start gate”**, not **“until `wait()`”**. Attach-before-start is the gate: attach streams → POST → then execute. Sqlite has no transport gap — stdio is wired before any goroutine starts — so no attach delay; it still matches the invariant because execute starts at end of accept with I/O already connected.
 
@@ -108,22 +108,31 @@ Failure: **`failedAt`** in store, `err != nil` — **`errors.As`** for typed exi
 
 ## Proposer
 
-- **`Proposer`** on **`Runner.Run(...)`** — invoked from **inside** a parent op script when a dependent op on another secret/host is needed (Phase 8).
+- **`Proposer`** on **`Runner.Run(...)`** — invoked from **inside** a parent op script when a dependent op on another secret/host is needed ([plan-federation.md](plan-federation.md)).
 - **`Propose(ctx, name, params) error`** — nil = approved; error = rejected. Blocks the parent script until resolved.
 
-**Federated shape (sketch):** parent host **A** must not be able to approve on **John’s** behalf by assertion alone. One viable implementation:
+**Federated shape (sketch):** parent host **A** must not be able to approve on **John’s** behalf by assertion alone. Two John↔B patterns, both valid:
+
+| | **Introduce** (direct) | **Pipe** (splice through A) |
+|--|------------------------|------------------------------|
+| What A does | Tells John (and B) how to meet: URL, grant | Hands John an opaque `net.Conn` spliced to B |
+| What John does | Dials B as for a remote secret (HTTPS or `ssh`) | Same **outside** authenticator on the pipe (TLS to B’s proxy, or SSH to B’s `sshd`) |
+| When it wins | John can already reach B | Segmented network: John can see A, not B |
+| Simpler? | Yes — no splice, A is off-path | Extra hop; A must not terminate inner auth |
+| Other pipe wins | — | B unpublished / not in John’s DNS; B can allowlist **A only**; John is already on A for the parent op (in-band); NAT/firewall where only A has a path to B |
+
+Anti-MITM is John authenticating **to B** (or A off-path). The pipe itself is untrusted bytes. Peercreds do not ride it. The agent on B still does not authenticate — `sshd` or B’s reverse proxy does.
 
 1. Script on A hits `Propose` for an op on host **B**.
-2. **A forwards a pipe** (e.g. SSH `-L` / socket forward) so **John talks to B directly** — prompt, challenge, or confirm UI on B’s side.
-3. **John authenticates to B** (peer creds, SSH, mTLS, … — B verifies John, John verifies B).
-4. **John’s OK** is recorded **by B** (signed approval, session on B, audit row) — not “A says John OK’d”.
+2. John authenticates **to B as John**, either by dialing B or over A’s pipe.
+3. **John’s OK** is recorded **by B** — not “A says John OK’d”.
 
-**Threat model:** **A must not MITM John ↔ B.** A may relay bytes for stdio of the parent op and for a **forwarded authorisation channel**, but must not be able to forge John’s approval or impersonate B to John. Concretely:
+**Threat model:** **A must not MITM John ↔ B.**
 
 | Allowed | Not allowed |
 |---------|-------------|
-| A forwards a channel; John establishes **E2E trust with B** | A sends `approved: true` on B’s API with no John↔B auth |
-| B issues nonce/challenge; **John’s response verified by B** (key/credential B already trusts) | A replays or edits John’s response |
+| John dials B directly, or John handshakes to B on a splice A does not terminate | A sends `approved: true` on B’s API with no John↔B auth |
+| B records OK from a connection whose principal is John | A presents a bearer “John approved” B cannot tie to John |
 | Parent op on A blocks in `Propose` until B records John’s decision | Policy “trust parent op X” **without** a John↔B step when cross-host |
 
 Same-host tests can use two Unix peers (John vs A) with the same logic: B still verifies **John**, not A’s say-so.
@@ -165,11 +174,36 @@ Example: John runs an op on **host A**; the script triggers a dependent op on **
 
 **What B must gate on:** **John’s authorisation for this specific op on B at this time** — verified **on B**, not taken on faith from A.
 
-**How (Phase 8 — not v1):** A is starter+attacher on B for **stdio of B’s script**. **John’s consent** is a separate leg: A’s `Proposer` may **forward a pipe** so John authenticates **directly to B** and B records OK. B then allows A’s attach/start (or unblocks a pending proposal). A must not be able to MITM that leg — see **Proposer** § threat model. Reject designs where A submits a bearer “John approved” token B cannot cryptographically or session-wise tie to John.
+**How (federation — not v1):** A is starter+attacher on B for **stdio of B’s script**. **John’s consent** is a separate leg, either **introduce** (John dials B) or **pipe** (John handshakes to B on a splice through A). See § Proposer. Implementation: parked in [plan-federation.md](plan-federation.md) until remote auth exists ([plan-remote.md](plan-remote.md)).
 
-**Implications for attach-before-start:** unchanged for A↔B stdio — A attaches streams, then POST invokes B's `Runner.Run`. **Authorisation** may complete inside `Propose` (blocking parent on A) before A POSTs start on B, or B holds start until John’s OK is on record — exact ordering TBD in Phase 8.
+**Implications for attach-before-start:** unchanged for A↔B stdio — A attaches streams, then POST invokes B's `Runner.Run`. **Authorisation** may complete inside `Propose` (blocking parent on A) before A POSTs start on B, or B holds start until John’s OK is on record — exact ordering TBD in federation Phase 0.
 
 **Audit:** B’s op records `startedBy = A`; John’s involvement is in the **authorisation proof** and/or parent op on A (reason chain, proposer log), not as B’s transport principal.
+
+## Remote transports
+
+The **application protocol is always HTTP** (catalog JSON + attach `101`). That is `internal/client` ↔ `internal/server`, not `Backend`.
+
+**Authentication is always outside the agent.** The process only **authorises** (`Identify` + roles). Plan: [plan-remote.md](plan-remote.md).
+
+| Hop | How you get a `net.Conn` | Who authenticates | What the agent reads |
+|-----|--------------------------|-------------------|----------------------|
+| Local | Unix socket | Kernel (`SO_PEERCRED`) | `linux:{user}/{uid}` |
+| HTTPS | TLS to a reverse proxy, then Unix | Proxy (forward-auth, etc.) | Name header `X-Secret-Agent-User` (trusted hop) |
+| SSH | `ssh` to **OpenSSH** | `sshd` (pubkey) | Peercreds if the SSH user is a real unix user; otherwise the stdio helper asserts the same name header (Git-style `command=`) |
+
+No embedded SSH server. No OIDC/JWT/TLS client-auth inside secret-agent.
+
+**HTTP Upgrade / reverse proxy:** Attach is HTTP `101` + `Upgrade`, same mechanism as WebSockets. Caddy `reverse_proxy` already forwards that. Custom protocol `secret-agent-process/1` should pass; confirm in e2e (do not add a matcher that only allows `websocket`).
+
+**Peer credentials:** `SO_PEERCRED` is kernel metadata on **this** Unix socket. It is not in the byte stream and is **not forwarded** over a pipe, TCP, TLS, SSH, or WebSocket. Guardrails:
+
+- Call `Getpeercred` only on `*net.UnixConn`.
+- That uid is John only for a **direct** local (or SSH-as-that-unix-user) dial.
+- If the Unix peer is a **trusted hop** (reverse proxy or Git-style SSH helper), identity is the name header, not the hop’s uid as the end user.
+- Never copy peercreds into the stream for a remote hop to replay.
+
+**Federation hops (both valid):** **Introduce** — John dials B the same way as a remote secret (HTTPS to B’s proxy, or `ssh` to B’s `sshd`). **Pipe** — A splices an opaque conn; John runs **outer-authn on B** through it (TLS to B’s proxy, or SSH to B’s `sshd`). A must splice, not reverse-proxy. Do not land a John-identity HTTP session on B’s peercred Unix socket via a splice (`SO_PEERCRED` would be A). See § Proposer.
 
 ## Open / deferred
 
@@ -333,7 +367,7 @@ func (st *secretState) launch(inst *secrets.Instance, op secrets.Operation, para
 func (r *sqliteRunner) Run(ctx, name, instanceId, params, proposer, stdio) (*secrets.Instance, Handle, error) {
     inst, op, err := r.beginOp(ctx, name, instanceId, params)
     if err != nil { return nil, nil, err }
-    _ = proposer // Phase 8 executor hook
+    _ = proposer // federation: plan-federation Phase 1
     return inst, r.launch(inst, op, params, stdio), nil
 }
 ```

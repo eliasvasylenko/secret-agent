@@ -2,6 +2,7 @@ package auth
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -14,6 +15,32 @@ type Roles map[RoleName]Role
 
 // RoleName is a name for a role.
 type RoleName string
+
+// RoleNames is a list of role names. JSON may be a single string or an array.
+type RoleNames []RoleName
+
+func (r *RoleNames) UnmarshalJSON(p []byte) error {
+	var one RoleName
+	err1 := json.Unmarshal(p, &one)
+	if err1 == nil {
+		*r = RoleNames{one}
+		return nil
+	}
+	var many []RoleName
+	err2 := json.Unmarshal(p, &many)
+	if err2 != nil {
+		return errors.Join(err1, err2)
+	}
+	*r = many
+	return nil
+}
+
+func (r RoleNames) MarshalJSON() ([]byte, error) {
+	if len(r) == 1 {
+		return marshal.JSON(r[0])
+	}
+	return marshal.JSON([]RoleName(r))
+}
 
 // A role and its permissions
 type Role struct {
@@ -102,19 +129,19 @@ func (r Roles) MarshalJSON() ([]byte, error) {
 	return marshal.JSON(rolePermissions)
 }
 
-// AssertPermission checks if the given claims have the given permissions.
-func (r Roles) AssertPermission(claims ClaimedRoles, permissions Permissions) error {
-	ok := r.CheckPermission(claims, permissions)
+// AssertPermission checks if the bound roles include the given permissions.
+func (r Roles) AssertPermission(bound RoleNames, permissions Permissions) error {
+	ok := r.CheckPermission(bound, permissions)
 	if !ok {
-		return fmt.Errorf("operation not permitted with claimed roles %v", claims)
+		return fmt.Errorf("operation not permitted with roles %v", bound)
 	}
 
 	return nil
 }
 
-// CheckPermission checks if the given claims have the given permissions.
-func (r Roles) CheckPermission(claims ClaimedRoles, permissions Permissions) bool {
-	for _, roleName := range claims {
+// CheckPermission checks if the bound roles include the given permissions.
+func (r Roles) CheckPermission(bound RoleNames, permissions Permissions) bool {
+	for _, roleName := range bound {
 		role := r[roleName]
 		allPermitted := true
 		for subject, action := range permissions {

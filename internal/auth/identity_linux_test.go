@@ -4,13 +4,15 @@ package auth
 
 import (
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"os/user"
+	"path/filepath"
 	"testing"
 )
 
-func slicesEqual(a, b ClaimedRoles) bool {
+func slicesEqual(a, b RoleNames) bool {
 	if len(a) != len(b) {
 		return false
 	}
@@ -22,8 +24,8 @@ func slicesEqual(a, b ClaimedRoles) bool {
 	return true
 }
 
-// claimedRolesSetEqual compares roles as sets (order-independent).
-func claimedRolesSetEqual(a, b ClaimedRoles) bool {
+// roleNamesSetEqual compares roles as sets (order-independent).
+func roleNamesSetEqual(a, b RoleNames) bool {
 	if len(a) != len(b) {
 		return false
 	}
@@ -40,7 +42,7 @@ func claimedRolesSetEqual(a, b ClaimedRoles) bool {
 	return true
 }
 
-func TestPlatformClaimsUnmarshalMarshal(t *testing.T) {
+func TestPlatformBindingsUnmarshalMarshal(t *testing.T) {
 	tests := []struct {
 		name string
 		json string
@@ -64,7 +66,7 @@ func TestPlatformClaimsUnmarshalMarshal(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			var c PlatformClaims
+			var c PlatformBindings
 			if err := json.Unmarshal([]byte(tc.json), &c); err != nil {
 				t.Fatalf("Unmarshal: %v", err)
 			}
@@ -72,7 +74,7 @@ func TestPlatformClaimsUnmarshalMarshal(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Marshal: %v", err)
 			}
-			var c2 PlatformClaims
+			var c2 PlatformBindings
 			if err := json.Unmarshal(roundTrip, &c2); err != nil {
 				t.Fatalf("Unmarshal(roundTrip): %v", err)
 			}
@@ -113,15 +115,15 @@ func TestAuthorise(t *testing.T) {
 
 	tests := []struct {
 		name          string
-		claims        PlatformClaims
+		bindings      PlatformBindings
 		user          *user.User
 		groups        []*user.Group
 		wantPrincipal string
-		wantRoles     ClaimedRoles
+		wantRoles     RoleNames
 	}{
 		{
-			name:          "empty claims yields principal only",
-			claims:        PlatformClaims{},
+			name:          "empty bindings yields principal only",
+			bindings:      PlatformBindings{},
 			user:          alice,
 			groups:        []*user.Group{usersGroup},
 			wantPrincipal: "linux:alice/1000",
@@ -129,84 +131,84 @@ func TestAuthorise(t *testing.T) {
 		},
 		{
 			name: "user matched by uid",
-			claims: PlatformClaims{
-				Users: map[Entity]ClaimedRoles{
+			bindings: PlatformBindings{
+				Users: map[Entity]RoleNames{
 					{Id: "1000", Name: ""}: {"admin"},
 				},
 			},
 			user:          alice,
 			groups:        nil,
 			wantPrincipal: "linux:alice/1000",
-			wantRoles:     ClaimedRoles{"admin"},
+			wantRoles:     RoleNames{"admin"},
 		},
 		{
 			name: "user matched by username",
-			claims: PlatformClaims{
-				Users: map[Entity]ClaimedRoles{
+			bindings: PlatformBindings{
+				Users: map[Entity]RoleNames{
 					{Id: "", Name: "alice"}: {"reader"},
 				},
 			},
 			user:          alice,
 			groups:        nil,
 			wantPrincipal: "linux:alice/1000",
-			wantRoles:     ClaimedRoles{"reader"},
+			wantRoles:     RoleNames{"reader"},
 		},
 		{
 			name: "user matched by id/name",
-			claims: PlatformClaims{
-				Users: map[Entity]ClaimedRoles{
+			bindings: PlatformBindings{
+				Users: map[Entity]RoleNames{
 					{Id: "1000", Name: "alice"}: {"writer"},
 				},
 			},
 			user:          alice,
 			groups:        nil,
 			wantPrincipal: "linux:alice/1000",
-			wantRoles:     ClaimedRoles{"writer"},
+			wantRoles:     RoleNames{"writer"},
 		},
 		{
 			name: "group matched by gid",
-			claims: PlatformClaims{
-				Groups: map[Entity]ClaimedRoles{
+			bindings: PlatformBindings{
+				Groups: map[Entity]RoleNames{
 					{Id: "100", Name: ""}: {"reader"},
 				},
 			},
 			user:          alice,
 			groups:        []*user.Group{usersGroup},
 			wantPrincipal: "linux:alice/1000",
-			wantRoles:     ClaimedRoles{"reader"},
+			wantRoles:     RoleNames{"reader"},
 		},
 		{
 			name: "group matched by name",
-			claims: PlatformClaims{
-				Groups: map[Entity]ClaimedRoles{
+			bindings: PlatformBindings{
+				Groups: map[Entity]RoleNames{
 					{Id: "", Name: "users"}: {"reader"},
 				},
 			},
 			user:          alice,
 			groups:        []*user.Group{usersGroup},
 			wantPrincipal: "linux:alice/1000",
-			wantRoles:     ClaimedRoles{"reader"},
+			wantRoles:     RoleNames{"reader"},
 		},
 		{
 			name: "user and group roles merged and deduplicated",
-			claims: PlatformClaims{
-				Users: map[Entity]ClaimedRoles{
+			bindings: PlatformBindings{
+				Users: map[Entity]RoleNames{
 					{Id: "1000", Name: ""}: {"admin", "reader"},
 				},
-				Groups: map[Entity]ClaimedRoles{
+				Groups: map[Entity]RoleNames{
 					{Id: "100", Name: ""}: {"reader", "writer"},
 				},
 			},
 			user:          alice,
 			groups:        []*user.Group{usersGroup},
 			wantPrincipal: "linux:alice/1000",
-			wantRoles:     ClaimedRoles{"admin", "reader", "writer"},
+			wantRoles:     RoleNames{"admin", "reader", "writer"},
 		},
 		{
 			name: "no matching entity yields empty roles",
-			claims: PlatformClaims{
-				Users:  map[Entity]ClaimedRoles{{Id: "9999", Name: ""}: {"admin"}},
-				Groups: map[Entity]ClaimedRoles{{Id: "9999", Name: ""}: {"admin"}},
+			bindings: PlatformBindings{
+				Users:  map[Entity]RoleNames{{Id: "9999", Name: ""}: {"admin"}},
+				Groups: map[Entity]RoleNames{{Id: "9999", Name: ""}: {"admin"}},
 			},
 			user:          alice,
 			groups:        []*user.Group{usersGroup},
@@ -216,27 +218,101 @@ func TestAuthorise(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			principal, roles := tc.claims.authorise(tc.user, tc.groups)
+			principal, roles := tc.bindings.authorise(tc.user, tc.groups)
 			if principal != tc.wantPrincipal {
 				t.Errorf("principal: got %q, want %q", principal, tc.wantPrincipal)
 			}
-			if !claimedRolesSetEqual(roles, tc.wantRoles) {
+			if !roleNamesSetEqual(roles, tc.wantRoles) {
 				t.Errorf("roles: got %v, want %v", roles, tc.wantRoles)
 			}
 		})
 	}
 }
 
-func TestClaimIdentity_nonUnixConn_returnsError(t *testing.T) {
-	c := &PlatformClaims{}
+func TestIdentify_nonUnixConn_returnsError(t *testing.T) {
+	c := &Bindings{}
 	_, conn := net.Pipe()
 	defer conn.Close()
 
-	_, err := c.ClaimIdentity(&http.Request{}, conn)
+	_, err := c.Identify(&http.Request{}, conn)
 	if err == nil {
 		t.Error("expected error for non-UnixConn")
 	}
 	if err != nil && err.Error() != "unexpected socket type" {
 		t.Errorf("expected 'unexpected socket type', got %v", err)
+	}
+}
+
+func TestIdentify_unixPeercreds(t *testing.T) {
+	self, err := user.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantPrincipal := fmt.Sprintf("linux:%s/%s", self.Username, self.Uid)
+
+	t.Run("direct peer is the caller", func(t *testing.T) {
+		conn := unixPeer(t)
+		got, err := (&Bindings{
+			PlatformBindings: PlatformBindings{
+				Users: map[Entity]RoleNames{{Name: self.Username}: {"admin"}},
+			},
+		}).Identify(&http.Request{}, conn)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Principal != wantPrincipal {
+			t.Errorf("principal: got %q, want %q", got.Principal, wantPrincipal)
+		}
+		if !roleNamesSetEqual(got.Roles, RoleNames{"admin"}) {
+			t.Errorf("roles: got %v, want [admin]", got.Roles)
+		}
+	})
+
+	t.Run("header ignored without forward-auth config", func(t *testing.T) {
+		conn := unixPeer(t)
+		req := &http.Request{Header: http.Header{DefaultForwardAuthHeader: []string{"root"}}}
+		got, err := (&Bindings{}).Identify(req, conn)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Principal != wantPrincipal {
+			t.Errorf("principal: got %q, want %q (header must not impersonate)", got.Principal, wantPrincipal)
+		}
+	})
+}
+
+func unixPeer(t *testing.T) net.Conn {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "sock")
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+
+	errc := make(chan error, 1)
+	peer := make(chan net.Conn, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			errc <- err
+			return
+		}
+		peer <- conn
+	}()
+
+	client, err := net.Dial("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+
+	select {
+	case err := <-errc:
+		t.Fatal(err)
+		return nil
+	case conn := <-peer:
+		t.Cleanup(func() { _ = conn.Close() })
+		return conn
 	}
 }

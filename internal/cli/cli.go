@@ -19,7 +19,7 @@ import (
 
 type CLI struct {
 	SecretsFile     string          `short:"S" env:"SECRETS_FILE" help:"Path to secrets configuration file"`
-	PermissionsFile string          `short:"P" env:"PERMISSIONS_FILE" help:"Path to permissions (roles/claims) configuration file"`
+	PermissionsFile string          `short:"P" env:"PERMISSIONS_FILE" help:"Path to permissions (roles/bindings) configuration file"`
 	DbFile          string          `short:"D" env:"DB_FILE" help:"Path to sqlite database file"`
 	ClientSocket    string          `short:"c" env:"CLIENT_SOCKET" help:"Unix socket for connecting to a running secret-agent server"`
 	MaxReasonLength int             `short:"R" env:"MAX_REASON_LENGTH" default:"4096" help:"Max length of audit reason strings"`
