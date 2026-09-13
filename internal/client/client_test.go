@@ -1,7 +1,6 @@
 package client
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"fmt"
@@ -91,7 +90,7 @@ func ptr[T any](v T) *T { return &v }
 func TestBuildRequest(t *testing.T) {
 	ctx := context.Background()
 	t.Run("no body", func(t *testing.T) {
-		req, err := BuildRequest(ctx, http.MethodGet, "/secrets", nil)
+		req, err := (&SecretClient{}).buildRequest(ctx, http.MethodGet, "/secrets", nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -108,7 +107,7 @@ func TestBuildRequest(t *testing.T) {
 				Reason: "create",
 			},
 		}
-		req, err := BuildRequest(ctx, http.MethodPost, "/instances", body)
+		req, err := (&SecretClient{}).buildRequest(ctx, http.MethodPost, "/instances", body)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -313,15 +312,15 @@ func TestCatalog_InstancesList_unfiltered(t *testing.T) {
 	}
 }
 
-func holdAttach(t *testing.T) func(context.Context, string) (*attachConn, error) {
+func holdAttach(t *testing.T) func(context.Context, string) (io.ReadWriteCloser, error) {
 	t.Helper()
-	return func(_ context.Context, _ string) (*attachConn, error) {
+	return func(_ context.Context, _ string) (io.ReadWriteCloser, error) {
 		a, b := net.Pipe()
 		t.Cleanup(func() {
 			_ = a.Close()
 			_ = b.Close()
 		})
-		return &attachConn{Conn: a, reader: bufio.NewReader(a)}, nil
+		return a, nil
 	}
 }
 
@@ -339,7 +338,7 @@ func TestRunner_Create_attachesBeforePOST(t *testing.T) {
 		}
 		return jsonResponse(200, `{"id":"new-id","secret":{"id":"s1","version":1},"status":{}}`), nil
 	}}
-	c := &SecretClient{client: rec, attach: func(ctx context.Context, path string) (*attachConn, error) {
+	c := &SecretClient{client: rec, attach: func(ctx context.Context, path string) (io.ReadWriteCloser, error) {
 		if !strings.Contains(path, "/secrets/sid/attach/") {
 			t.Errorf("attach path = %s", path)
 		}
@@ -417,7 +416,7 @@ func TestRunner_Wait_getsInstanceAfterPumps(t *testing.T) {
 			return jsonResponse(500, `{"error":{"status":500,"message":"`+req.URL.Path+`"}}`), nil
 		}
 	}}
-	c := &SecretClient{client: rec, attach: func(_ context.Context, path string) (*attachConn, error) {
+	c := &SecretClient{client: rec, attach: func(_ context.Context, path string) (io.ReadWriteCloser, error) {
 		a, b := net.Pipe()
 		peersMu.Lock()
 		peers[path] = b
@@ -426,7 +425,7 @@ func TestRunner_Wait_getsInstanceAfterPumps(t *testing.T) {
 			_ = a.Close()
 			_ = b.Close()
 		})
-		return &attachConn{Conn: a, reader: bufio.NewReader(a)}, nil
+		return a, nil
 	}}
 
 	_, handle, err := c.Runner("sid").Run(ctx, secrets.Create, "", executor.OperationParameters{Reason: "r"}, nil, command.Stdio{})
@@ -471,14 +470,14 @@ func TestRunner_Wait_successWithoutCancel(t *testing.T) {
 			return jsonResponse(500, `{"error":{"status":500,"message":"unexpected"}}`), fmt.Errorf("unexpected %s %s", req.Method, req.URL.Path)
 		}
 	}}
-	c := &SecretClient{client: rec, attach: func(_ context.Context, path string) (*attachConn, error) {
+	c := &SecretClient{client: rec, attach: func(_ context.Context, path string) (io.ReadWriteCloser, error) {
 		client, server := net.Pipe()
 		attachPeers[path] = server
 		t.Cleanup(func() {
 			_ = client.Close()
 			_ = server.Close()
 		})
-		return &attachConn{Conn: client, reader: bufio.NewReader(client)}, nil
+		return client, nil
 	}}
 
 	_, handle, err := c.Runner("sid").Run(ctx, secrets.Create, "", executor.OperationParameters{Reason: "r"}, nil, command.Stdio{
@@ -525,17 +524,17 @@ func TestRunner_closesAttachOnPOSTFailure(t *testing.T) {
 		client: &recordingClient{handler: func(*http.Request) (*http.Response, error) {
 			return jsonResponse(400, `{"error":{"status":400,"message":"bad"}}`), nil
 		}},
-		attach: func(_ context.Context, path string) (*attachConn, error) {
+		attach: func(_ context.Context, path string) (io.ReadWriteCloser, error) {
 			attachN++
 			if strings.HasSuffix(path, "/stdin") {
-				return &attachConn{Conn: stdinClient, reader: bufio.NewReader(stdinClient)}, nil
+				return stdinClient, nil
 			}
 			a, b := net.Pipe()
 			t.Cleanup(func() {
 				_ = a.Close()
 				_ = b.Close()
 			})
-			return &attachConn{Conn: a, reader: bufio.NewReader(a)}, nil
+			return a, nil
 		},
 	}
 

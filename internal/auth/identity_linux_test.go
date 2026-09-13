@@ -218,7 +218,7 @@ func TestAuthorise(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			principal, roles := tc.bindings.authorise(tc.user, tc.groups)
+			principal, roles := tc.bindings.Authorise(tc.user, tc.groups)
 			if principal != tc.wantPrincipal {
 				t.Errorf("principal: got %q, want %q", principal, tc.wantPrincipal)
 			}

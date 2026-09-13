@@ -71,12 +71,12 @@ func (r *httpRunner) postStart(
 		err error
 	)
 	if name == secrets.Create {
-		req, err = BuildRequest(ctx, http.MethodPost, "/instances", server.SecretOperationRequest{
+		req, err = r.client.buildRequest(ctx, http.MethodPost, "/instances", server.SecretOperationRequest{
 			SecretId:         r.secretId,
 			OperationRequest: body,
 		})
 	} else {
-		req, err = BuildRequest(ctx, http.MethodPost, "/operations", server.InstanceOperationRequest{
+		req, err = r.client.buildRequest(ctx, http.MethodPost, "/operations", server.InstanceOperationRequest{
 			InstanceId:       instanceId,
 			Name:             name,
 			OperationRequest: body,
@@ -119,17 +119,9 @@ func (h *runHandle) startPumps(stdio command.Stdio) {
 		stderr = io.Discard
 	}
 
-	h.pumpWrite(h.conns.stdin, stdin)
-	h.pumpRead(h.conns.stdout, stdout)
-	h.pumpRead(h.conns.stderr, stderr)
-}
-
-func (h *runHandle) pumpWrite(conn *attachConn, src io.Reader) {
-	h.pump(func() error { return copyAttachWrite(conn, src) })
-}
-
-func (h *runHandle) pumpRead(conn *attachConn, dst io.Writer) {
-	h.pump(func() error { return copyAttachRead(conn, dst) })
+	h.pump(func() error { return copyAttach(h.conns.stdin, stdin, h.conns.stdin) })
+	h.pump(func() error { return copyAttach(stdout, h.conns.stdout, h.conns.stdout) })
+	h.pump(func() error { return copyAttach(stderr, h.conns.stderr, h.conns.stderr) })
 }
 
 func (h *runHandle) pump(copyFn func() error) {
@@ -176,49 +168,6 @@ func (h *runHandle) Cancel(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
-}
-
-// attachConns is one attach upgrade per stream, opened before the start POST.
-type attachConns struct {
-	stdin  *attachConn
-	stdout *attachConn
-	stderr *attachConn
-}
-
-func (a attachConns) close() {
-	for _, conn := range []*attachConn{a.stdin, a.stdout, a.stderr} {
-		if conn != nil {
-			_ = conn.Close()
-		}
-	}
-}
-
-func (c *SecretClient) attachAll(ctx context.Context, secretId string) (attachConns, error) {
-	var conns attachConns
-	armed := true
-	defer func() {
-		if armed {
-			conns.close()
-		}
-	}()
-
-	attach := func(stream string) (*attachConn, error) {
-		return c.upgrade(ctx, "/secrets/"+secretId+"/attach/"+stream)
-	}
-
-	var err error
-	if conns.stdin, err = attach("stdin"); err != nil {
-		return conns, err
-	}
-	if conns.stdout, err = attach("stdout"); err != nil {
-		return conns, err
-	}
-	if conns.stderr, err = attach("stderr"); err != nil {
-		return conns, err
-	}
-
-	armed = false
-	return conns, nil
 }
 
 var _ backend.Runner = (*httpRunner)(nil)

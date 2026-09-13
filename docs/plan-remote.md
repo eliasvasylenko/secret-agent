@@ -86,8 +86,8 @@ internal/server  (HTTP API; identity from peercreds or forward-auth header)
 | Listen | Unix socket only (`server` rejects non-`UnixConn` for identity) |
 | Authenticate | `SO_PEERCRED` → uid/username/groups |
 | Principal | `linux:{username}/{uid}` |
-| Client | `internal/client` dials **unix** for REST and attach upgrades |
-| CLI | `CLIENT_SOCKET` / `-c`; empty socket → in-process sqlite |
+| Client | `internal/client` dials **unix**, **http**, or **https** for REST and attach upgrades |
+| CLI | `CLIENT_ADDRESS` / `-a`: unix path or `http(s)://` URL; empty → in-process sqlite |
 
 ---
 
@@ -103,10 +103,10 @@ If the header name is a local user, principal is `linux:{user}/{uid}`; otherwise
 
 **Verification:** `go test ./internal/auth/... ./internal/server/...`
 
-### Phase 2 — HTTP client over TCP/HTTPS
+### Phase 2 — HTTP client over TCP/HTTPS ✅
 
 `internal/client` dials `http://` / `https://` as well as unix. Attach Upgrade on the
-same host. CLI flag/env for URL.
+same host. `-a` / `CLIENT_ADDRESS` accepts a unix path or an `http(s)://` URL.
 
 **Verification:** `go test ./internal/client/...` with httptest TLS or loopback.
 

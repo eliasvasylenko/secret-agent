@@ -65,13 +65,13 @@ func (b *Bindings) identityFromForwarded(name string) (*Identity, error) {
 	u, err := lookupUser(name)
 	if err != nil {
 		dummy := &user.User{Username: name}
-		_, roles := b.authorise(dummy, nil)
+		_, roles := b.Authorise(dummy, nil)
 		return &Identity{Principal: "http:" + name, Roles: roles}, nil
 	}
 	groups, err := groupsOf(u)
 	if err != nil {
 		return nil, err
 	}
-	principal, roles := b.authorise(u, groups)
+	principal, roles := b.Authorise(u, groups)
 	return &Identity{Principal: principal, Roles: roles}, nil
 }

@@ -30,7 +30,7 @@ type secretsCatalog struct {
 }
 
 func (s secretsCatalog) List(ctx context.Context) (secrets.Secrets, error) {
-	req, err := BuildRequest(ctx, http.MethodGet, "/secrets", nil)
+	req, err := s.client.buildRequest(ctx, http.MethodGet, "/secrets", nil)
 	items, err := Do[server.ItemsResponse[secrets.Secrets]](s.client.client, req, err)
 	if err != nil {
 		return nil, err
@@ -39,7 +39,7 @@ func (s secretsCatalog) List(ctx context.Context) (secrets.Secrets, error) {
 }
 
 func (s secretsCatalog) Get(ctx context.Context, secretId string) (*secrets.Secret, error) {
-	req, err := BuildRequest(ctx, http.MethodGet, "/secrets/"+secretId, nil)
+	req, err := s.client.buildRequest(ctx, http.MethodGet, "/secrets/"+secretId, nil)
 	return Do[*secrets.Secret](s.client.client, req, err)
 }
 
@@ -48,7 +48,7 @@ type instancesCatalog struct {
 }
 
 func (i instancesCatalog) List(ctx context.Context, secretId *string, from, to int) (secrets.Instances, error) {
-	req, err := BuildRequest(ctx, http.MethodGet, "/instances", nil)
+	req, err := i.client.buildRequest(ctx, http.MethodGet, "/instances", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -61,12 +61,12 @@ func (i instancesCatalog) List(ctx context.Context, secretId *string, from, to i
 }
 
 func (i instancesCatalog) Get(ctx context.Context, instanceId string) (*secrets.Instance, error) {
-	req, err := BuildRequest(ctx, http.MethodGet, "/instances/"+instanceId, nil)
+	req, err := i.client.buildRequest(ctx, http.MethodGet, "/instances/"+instanceId, nil)
 	return Do[*secrets.Instance](i.client.client, req, err)
 }
 
 func (i instancesCatalog) GetActive(ctx context.Context, secretId string) (*secrets.Instance, error) {
-	req, err := BuildRequest(ctx, http.MethodGet, "/secrets/"+secretId+"/active", nil)
+	req, err := i.client.buildRequest(ctx, http.MethodGet, "/secrets/"+secretId+"/active", nil)
 	return Do[*secrets.Instance](i.client.client, req, err)
 }
 
@@ -75,7 +75,7 @@ type operationsCatalog struct {
 }
 
 func (o operationsCatalog) List(ctx context.Context, secretId, instanceId *string, from, to int) ([]*secrets.Operation, error) {
-	req, err := BuildRequest(ctx, http.MethodGet, "/operations", nil)
+	req, err := o.client.buildRequest(ctx, http.MethodGet, "/operations", nil)
 	if err != nil {
 		return nil, err
 	}

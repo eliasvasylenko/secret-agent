@@ -9,9 +9,9 @@ import (
 	"github.com/eliasvasylenko/secret-agent/internal/sqlite"
 )
 
-func NewBackend(ctx context.Context, socket string, secretsFile string, dbFile string, debug bool, maxReasonLen int) (backend.Backend, error) {
-	if socket != "" {
-		return client.NewSecretStore(socket), nil
+func NewBackend(ctx context.Context, address string, secretsFile string, dbFile string, debug bool, maxReasonLen int) (backend.Backend, error) {
+	if address != "" {
+		return client.New(address)
 	}
 	secretsConfig, err := config.LoadSecretsConfig(secretsFile)
 	if err != nil {

@@ -56,7 +56,7 @@ The secret-agent service will:
 
    Users and groups are mapped to roles via `services.secret-agent.bindings`, and roles are mapped to permission sets via `services.secret-agent.roles`.
 
-1. **Rebuild and switch** and the CLI will be available on the system (with `CLIENT_SOCKET` set to the service socket).
+1. **Rebuild and switch** and the CLI will be available on the system (with `CLIENT_ADDRESS` set to the service socket).
 
 1. **Provision and activate an instance**:
 

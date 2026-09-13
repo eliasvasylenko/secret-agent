@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"strconv"
 
@@ -15,24 +14,23 @@ import (
 )
 
 type SecretClient struct {
-	socket string
-	client httpClient
-	attach func(ctx context.Context, path string) (*attachConn, error)
+	endpoint endpoint
+	client   httpClient
+	attach   func(ctx context.Context, path string) (io.ReadWriteCloser, error)
 }
 
 type httpClient interface {
 	Do(req *http.Request) (*http.Response, error)
 }
 
-func NewSecretStore(socket string) *SecretClient {
-	return &SecretClient{
-		socket: socket,
-		client: &http.Client{Transport: &http.Transport{
-			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-				return (&net.Dialer{}).DialContext(ctx, "unix", socket)
-			},
-		}},
+// New talks to a secret-agent HTTP API. address is a Unix socket path,
+// a unix:// URL, or an http:// or https:// URL (host, optional port and path prefix).
+func New(address string) (*SecretClient, error) {
+	ep, err := parseEndpoint(address)
+	if err != nil {
+		return nil, err
 	}
+	return &SecretClient{endpoint: ep, client: ep.httpClient()}, nil
 }
 
 func (c *SecretClient) Catalog() backend.Catalog {
@@ -43,7 +41,7 @@ func (c *SecretClient) Runner(secretId string) backend.Runner {
 	return &httpRunner{client: c, secretId: secretId}
 }
 
-func BuildRequest(ctx context.Context, method string, path string, body any) (*http.Request, error) {
+func (c *SecretClient) buildRequest(ctx context.Context, method string, path string, body any) (*http.Request, error) {
 	buffer := &bytes.Buffer{}
 	if body != nil {
 		encoder := json.NewEncoder(buffer)
@@ -52,7 +50,7 @@ func BuildRequest(ctx context.Context, method string, path string, body any) (*h
 			return nil, err
 		}
 	}
-	return http.NewRequestWithContext(ctx, method, "http://unix"+path, buffer)
+	return http.NewRequestWithContext(ctx, method, c.endpoint.requestURL(path).String(), buffer)
 }
 
 func Do[T any](client httpClient, req *http.Request, err error) (T, error) {
@@ -101,13 +99,6 @@ func setQuery(req *http.Request, from, to int, optional filters) {
 	query.Set("from", strconv.FormatInt(int64(from), 10))
 	query.Set("to", strconv.FormatInt(int64(to), 10))
 	req.URL.RawQuery = query.Encode()
-}
-
-func (c *SecretClient) upgrade(ctx context.Context, path string) (*attachConn, error) {
-	if c.attach != nil {
-		return c.attach(ctx, path)
-	}
-	return upgradeAttach(ctx, c.socket, path)
 }
 
 var _ backend.Backend = (*SecretClient)(nil)

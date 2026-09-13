@@ -222,7 +222,7 @@ in
         nativeBuildInputs = (prevAttrs.nativeBuildInputs or [ ]) ++ [ pkgs.makeBinaryWrapper ];
         postInstall = (prevAttrs.postInstall or "") + ''
           wrapProgram $out/bin/secret-agent \
-            --set CLIENT_SOCKET /tmp/secret-agent.socket
+            --set CLIENT_ADDRESS /tmp/secret-agent.socket
         '';
       }))
     ];

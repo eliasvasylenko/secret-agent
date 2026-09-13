@@ -58,9 +58,9 @@ func TestUpgradeAttach_ok(t *testing.T) {
 		}
 	}()
 
-	conn, err := upgradeAttach(ctx, socket, "/secrets/sid/attach/stdin")
+	conn, err := mustUnixClient(t, socket).upgrade(ctx, "/secrets/sid/attach/stdin")
 	if err != nil {
-		t.Fatalf("upgradeAttach: %v", err)
+		t.Fatalf("upgrade: %v", err)
 	}
 	defer conn.Close()
 }
@@ -80,10 +80,11 @@ func TestUpgradeAttach_rejectsNon101(t *testing.T) {
 			return
 		}
 		defer conn.Close()
+		_, _ = http.ReadRequest(bufio.NewReader(conn))
 		_, _ = conn.Write([]byte("HTTP/1.1 426 Upgrade Required\r\nContent-Length: 0\r\n\r\n"))
 	}()
 
-	_, err = upgradeAttach(ctx, socket, "/secrets/sid/attach/stdin")
+	_, err = mustUnixClient(t, socket).upgrade(ctx, "/secrets/sid/attach/stdin")
 	if err == nil {
 		t.Fatal("want error")
 	}
@@ -96,9 +97,9 @@ func TestAttachAll_closesPriorOnFailure(t *testing.T) {
 	stdinClient, stdinServer := net.Pipe()
 	t.Cleanup(func() { _ = stdinServer.Close() })
 
-	c := &SecretClient{attach: func(_ context.Context, path string) (*attachConn, error) {
+	c := &SecretClient{attach: func(_ context.Context, path string) (io.ReadWriteCloser, error) {
 		if strings.HasSuffix(path, "/stdin") {
-			return &attachConn{Conn: stdinClient, reader: bufio.NewReader(stdinClient)}, nil
+			return stdinClient, nil
 		}
 		return nil, io.ErrUnexpectedEOF
 	}}
@@ -113,4 +114,13 @@ func TestAttachAll_closesPriorOnFailure(t *testing.T) {
 	if readErr != io.EOF {
 		t.Fatalf("stdin server read = %v, want EOF after cleanup", readErr)
 	}
+}
+
+func mustUnixClient(t *testing.T, socket string) *SecretClient {
+	t.Helper()
+	c, err := New(socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
 }

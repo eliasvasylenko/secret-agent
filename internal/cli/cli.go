@@ -21,7 +21,7 @@ type CLI struct {
 	SecretsFile     string          `short:"S" env:"SECRETS_FILE" help:"Path to secrets configuration file"`
 	PermissionsFile string          `short:"P" env:"PERMISSIONS_FILE" help:"Path to permissions (roles/bindings) configuration file"`
 	DbFile          string          `short:"D" env:"DB_FILE" help:"Path to sqlite database file"`
-	ClientSocket    string          `short:"c" env:"CLIENT_SOCKET" help:"Unix socket for connecting to a running secret-agent server"`
+	Address         string          `short:"a" env:"CLIENT_ADDRESS" help:"Unix socket path, unix:// URL, or http(s) URL of a running secret-agent server"`
 	MaxReasonLength int             `short:"R" env:"MAX_REASON_LENGTH" default:"4096" help:"Max length of audit reason strings"`
 	Debug           bool            `short:"d" env:"DEBUG" help:"Enable debug logging"`
 	Pretty          bool            `short:"p" env:"PRETTY" help:"Pretty-print JSON output"`
@@ -56,7 +56,7 @@ func NewCLI(ctx context.Context) *CLI {
 	}
 
 	var err error
-	c.agent, err = NewBackend(ctx, c.ClientSocket, c.SecretsFile, c.DbFile, c.Debug, c.MaxReasonLength)
+	c.agent, err = NewBackend(ctx, c.Address, c.SecretsFile, c.DbFile, c.Debug, c.MaxReasonLength)
 	c.ctx.FatalIfErrorf(err)
 	return &c
 }
