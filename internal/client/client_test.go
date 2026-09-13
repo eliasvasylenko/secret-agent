@@ -514,6 +514,63 @@ func TestRunner_Wait_successWithoutCancel(t *testing.T) {
 	}
 }
 
+func TestRunner_Wait_finishesIfStdinRemainsOpen(t *testing.T) {
+	ctx := context.Background()
+	stdinR, stdinW := io.Pipe()
+	t.Cleanup(func() {
+		_ = stdinR.Close()
+		_ = stdinW.Close()
+	})
+	attachPeers := map[string]net.Conn{}
+
+	rec := &recordingClient{handler: func(req *http.Request) (*http.Response, error) {
+		switch {
+		case req.Method == http.MethodPost:
+			return jsonResponse(200, `{"id":"i1","secret":{"id":"s1","version":1},"status":{}}`), nil
+		case req.URL.Path == "/instances/i1":
+			return jsonResponse(200, `{"id":"i1","secret":{"id":"s1","version":1},"status":{"completedAt":"2024-01-01T00:00:00Z"}}`), nil
+		default:
+			return jsonResponse(500, `{"error":{"status":500,"message":"unexpected"}}`), fmt.Errorf("unexpected %s %s", req.Method, req.URL.Path)
+		}
+	}}
+	c := &SecretClient{client: rec, attach: func(_ context.Context, path string) (io.ReadWriteCloser, error) {
+		client, server := net.Pipe()
+		attachPeers[path] = server
+		t.Cleanup(func() {
+			_ = client.Close()
+			_ = server.Close()
+		})
+		return client, nil
+	}}
+
+	_, handle, err := c.Runner("sid").Run(ctx, secrets.Create, "", executor.OperationParameters{Reason: "r"}, nil, command.Stdio{
+		Stdin:  stdinR,
+		Stdout: io.Discard,
+		Stderr: io.Discard,
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	stdoutPeer := attachPeers["/secrets/sid/attach/stdout"]
+	stderrPeer := attachPeers["/secrets/sid/attach/stderr"]
+	if stdoutPeer == nil || stderrPeer == nil || attachPeers["/secrets/sid/attach/stdin"] == nil {
+		t.Fatal("missing attach peer")
+	}
+	_ = stdoutPeer.Close()
+	_ = stderrPeer.Close()
+
+	waitCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	final, err := handle.Wait(waitCtx)
+	if err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	if final.Status.CompletedAt == nil {
+		t.Fatalf("final = %+v", final)
+	}
+}
+
 func TestRunner_closesAttachOnPOSTFailure(t *testing.T) {
 	ctx := context.Background()
 	stdinClient, stdinServer := net.Pipe()

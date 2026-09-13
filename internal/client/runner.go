@@ -119,8 +119,10 @@ func (h *runHandle) startPumps(stdio command.Stdio) {
 		stderr = io.Discard
 	}
 
-	h.pump(func() error { return copyAttach(h.conns.stdin, stdin, h.conns.stdin) })
-	h.pump(func() error { return copyAttach(stdout, h.conns.stdout, h.conns.stdout) })
+	// Stdin is forwarded but not joined. A process can exit without reading
+	// it; waiting for stdin EOF would hang a CLI whose stdin is still open.
+	go func() { _ = copyAttach(h.conns.stdin, stdin, h.conns.stdin) }()
+ 	h.pump(func() error { return copyAttach(stdout, h.conns.stdout, h.conns.stdout) })
 	h.pump(func() error { return copyAttach(stderr, h.conns.stderr, h.conns.stderr) })
 }
 
@@ -135,6 +137,9 @@ func (h *runHandle) pump(copyFn func() error) {
 func (h *runHandle) startJoin() {
 	go func() {
 		h.pumpWG.Wait()
+		if h.conns.stdin != nil {
+			_ = h.conns.stdin.Close()
+		}
 		inst, err := h.client.Catalog().Instances().Get(context.Background(), h.instanceId)
 		if err == nil && inst != nil {
 			switch {

@@ -78,7 +78,7 @@ pkgs.testers.runNixOSTest {
     with subtest("root has admin role and can list secrets"):
       machine.succeed("secret-agent secrets | grep -q test-secret")
 
-    with subtest("testuser has admin role (from user claim) and can create instance"):
+    with subtest("testuser has admin role (from user binding) and can create instance"):
       machine.succeed("su -s ${pkgs.bash}/bin/bash testuser -c 'secret-agent create test-secret -r auth-test'")
 
     with subtest("nobody has no role and gets 403 on list secrets"):

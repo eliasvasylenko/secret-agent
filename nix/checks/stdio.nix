@@ -79,17 +79,18 @@ pkgs.testers.runNixOSTest {
       assert received == "test-input", f"stdin: got '{received}'"
 
     with subtest("stdout"):
-      output = machine.succeed("secret-agent create basic 2>/dev/null")
+      # Same as running the script on a terminal: `cat` waits until stdin EOFs.
+      output = machine.succeed("secret-agent create basic </dev/null 2>/dev/null")
       assert "stdout-hello" in output, f"stdout not found in: {output}"
 
     with subtest("stderr"):
-      machine.succeed("secret-agent create basic > /dev/null 2>/tmp/stderr-output")
+      machine.succeed("secret-agent create basic </dev/null > /dev/null 2>/tmp/stderr-output")
       stderr = machine.succeed("cat /tmp/stderr-output")
       assert "stderr-hello" in stderr, f"stderr not found in: {stderr}"
 
     with subtest("stdout streaming"):
       machine.succeed("mkfifo /tmp/latch")
-      machine.succeed("secret-agent create streaming > /tmp/stream-out 2>/dev/null &")
+      machine.succeed("secret-agent create streaming </dev/null > /tmp/stream-out 2>/dev/null &")
       machine.wait_until_succeeds("grep -q part1 /tmp/stream-out")
       machine.fail("grep -q part2 /tmp/stream-out")
       machine.succeed("echo -n done > /tmp/latch")

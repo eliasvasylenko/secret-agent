@@ -90,7 +90,7 @@ let
   # Options for the secret agent service
   secret-agent = {
     enable = lib.mkEnableOption "secret agent";
-    package = lib.mkPackageOption packages.${pkgs.system} "secret-agent" {
+    package = lib.mkPackageOption packages.${pkgs.stdenv.hostPlatform.system} "secret-agent" {
       default = "default";
     };
     roles = lib.mkOption {

@@ -81,7 +81,25 @@ func (b *PlatformBindings) Authenticate(connection net.Conn) (*user.User, []*use
 	if err != nil {
 		return nil, nil, err
 	}
+	groups, err = withPeerGid(groups, cred.Gid)
+	if err != nil {
+		return nil, nil, err
+	}
 	return authenticatedUser, groups, nil
+}
+
+func withPeerGid(groups []*user.Group, peerGid uint32) ([]*user.Group, error) {
+	gid := strconv.FormatUint(uint64(peerGid), 10)
+	for _, g := range groups {
+		if g.Gid == gid {
+			return groups, nil
+		}
+	}
+	g, err := user.LookupGroupId(gid)
+	if err != nil {
+		return nil, fmt.Errorf("failed to lookup peer group: %w", err)
+	}
+	return append([]*user.Group{g}, groups...), nil
 }
 
 func groupsOf(u *user.User) ([]*user.Group, error) {
