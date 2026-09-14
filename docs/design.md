@@ -199,7 +199,21 @@ No embedded SSH server. No OIDC/JWT/TLS client-auth inside secret-agent.
 
 **Hop trust is peercreds.** `ForwardAuth` is “this Unix peer may assert the name header.” `Peers` is an allowlist of last hops, not a forwarded chain. The agent always trusts the innermost hop; outer hops are that hop’s problem (Caddy’s OIDC, `sshd`’s keys).
 
-**HTTP Upgrade / reverse proxy:** Attach is HTTP `101` + `Upgrade`, same mechanism as WebSockets. Caddy `reverse_proxy` already forwards that. Custom protocol `secret-agent-process/1` should pass; confirm in e2e (do not add a matcher that only allows `websocket`). The SSH splice carries the same bytes after `101`.
+**HTTP Upgrade / reverse proxy:** Attach is HTTP `101` + `Upgrade`, same mechanism as WebSockets. Caddy `reverse_proxy` forwards any Upgrade (not only `websocket`); force HTTP/1.1 to the Unix socket (no `101` on HTTP/2). Example — TLS and the name header are Caddy’s job; `ForwardAuth.Peers` must include the proxy’s Unix identity (e.g. `caddy`):
+
+```
+server {
+    tls cert.pem key.pem
+    reverse_proxy unix//tmp/secret-agent.socket {
+        header_up X-Secret-Agent-User {http.auth.user.id}
+        transport http {
+            versions 1.1
+        }
+    }
+}
+```
+
+The SSH splice carries the same bytes after `101`.
 
 **Peer credentials:** `SO_PEERCRED` is kernel metadata on **this** Unix socket. It is not in the byte stream and is **not forwarded** over a pipe, TCP, TLS, SSH, or WebSocket. Guardrails:
 

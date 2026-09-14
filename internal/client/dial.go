@@ -75,5 +75,13 @@ func (e endpoint) httpClient() *http.Client {
 	if e.tls != nil {
 		transport.TLSClientConfig = e.tls.Clone()
 	}
+	// Attach is HTTP/1.1 only; advertise that in ALPN so HTTPS hops
+	// (Caddy) do not negotiate h2 and then close.
+	if e.address != nil && e.address.Scheme == "https" {
+		if transport.TLSClientConfig == nil {
+			transport.TLSClientConfig = &tls.Config{}
+		}
+		transport.TLSClientConfig.NextProtos = []string{"http/1.1"}
+	}
 	return &http.Client{Transport: transport}
 }

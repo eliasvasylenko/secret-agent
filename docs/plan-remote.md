@@ -79,15 +79,16 @@ internal/server  (HTTP API; identity from peercreds or forward-auth header)
 
 ---
 
-## What already works (local)
+## What already works (local + HTTPS)
 
 | Piece | Today |
 |-------|--------|
 | Listen | Unix socket only (`server` rejects non-`UnixConn` for identity) |
 | Authenticate | `SO_PEERCRED` → uid/username/groups |
-| Principal | `linux:{username}/{uid}` |
+| Principal | `linux:{username}/{uid}`, or `http:{name}` via `ForwardAuth` |
 | Client | `internal/client` dials **unix**, **http**, or **https** for REST and attach upgrades |
 | CLI | `CLIENT_ADDRESS` / `-a`: unix path or `http(s)://` URL; empty → in-process sqlite |
+| Reverse proxy | NixOS `bindings.forwardAuth`; Caddy e2e in `nix/checks/remote-http.nix` |
 
 ---
 
@@ -110,12 +111,12 @@ same host. `-a` / `CLIENT_ADDRESS` accepts a unix path or an `http(s)://` URL.
 
 **Verification:** `go test ./internal/client/...` with httptest TLS or loopback.
 
-### Phase 3 — Nix reverse-proxy e2e
+### Phase 3 — Nix reverse-proxy e2e ✅
 
 Module/docs: reverse proxy in front of the agent socket (Caddy as the example). Check:
 CLI on “X” creates/activates a secret on “B” over HTTPS, including attach streams.
 
-**Verification:** `nix flake check` (new remote-http check).
+**Verification:** `nix flake check` (`checks.*.remote-http`).
 
 ### Phase 4 — SSH via OpenSSH
 

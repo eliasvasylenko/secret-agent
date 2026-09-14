@@ -120,6 +120,23 @@ let
         type = stringOrStrings;
         default.secret-agent = "admin";
       };
+      forwardAuth = {
+        peers = lib.mkOption {
+          description = ''
+            Unix peers allowed to assert the end-user via HTTP header (typically
+            the reverse-proxy user, e.g. `caddy`). The header is ignored unless
+            `SO_PEERCRED` matches one of these names or uids.
+          '';
+          type = lib.types.listOf lib.types.str;
+          default = [ ];
+          example = [ "caddy" ];
+        };
+        header = lib.mkOption {
+          description = "Header a trusted hop uses to name the end user.";
+          type = lib.types.str;
+          default = "X-Secret-Agent-User";
+        };
+      };
     };
     secrets = lib.mkOption {
       description = "Secrets";
@@ -181,6 +198,12 @@ let
     builtins.toJSON {
       bindings = {
         inherit (cfg.bindings) users groups;
+      }
+      // lib.optionalAttrs (cfg.bindings.forwardAuth.peers != [ ]) {
+        forwardAuth = {
+          peers = cfg.bindings.forwardAuth.peers;
+          header = cfg.bindings.forwardAuth.header;
+        };
       };
       inherit (cfg) roles;
     }
