@@ -195,7 +195,22 @@ The **application protocol is always HTTP** (catalog JSON + attach `101`). That 
 
 No embedded SSH server. No OIDC/JWT/TLS client-auth inside secret-agent.
 
-**`command=`** forces a stdio↔unix-socket splice (`socat` or a small helper). It does not run the CLI or `serve`. One `ssh` per REST call and per attach stream. `restrict` is correct for that shape; it is the wrong knob for `-L` / streamlocal.
+**`command=`** forces `secret-agent dial-stdio` (Docker-style stdio↔unix-socket bridge).
+It does not run catalog commands or `serve`. Socket path is `-s` on that subcommand
+only (default `/tmp/secret-agent.socket`). One `ssh` per REST call and per attach
+stream. `restrict` is correct for that shape; it is the wrong knob for `-L` / streamlocal.
+Client `ssh://…[/socket]` only adds `-s` when sshd runs the client-requested command.
+With `restrict,command=…`, `-s`, `-u`, and `-H` (if `ForwardAuth.Header` is not the default)
+come from that forced command, not from the URL.
+
+```
+# peercreds (helper runs as the unix user)
+restrict,command="secret-agent dial-stdio" ssh-ed25519 …
+
+# shared account: inject X-Secret-Agent-User (helper uid in ForwardAuth.Peers)
+restrict,command="secret-agent dial-stdio -s /tmp/secret-agent.socket -u john" ssh-ed25519 …
+restrict,command="secret-agent dial-stdio -u john -H X-Remote-User" ssh-ed25519 …
+```
 
 **Hop trust is peercreds.** `ForwardAuth` is “this Unix peer may assert the name header.” `Peers` is an allowlist of last hops, not a forwarded chain. The agent always trusts the innermost hop; outer hops are that hop’s problem (Caddy’s OIDC, `sshd`’s keys).
 
@@ -213,7 +228,7 @@ server {
 }
 ```
 
-The SSH splice carries the same bytes after `101`.
+The SSH stdio bridge carries the same bytes after `101`.
 
 **Peer credentials:** `SO_PEERCRED` is kernel metadata on **this** Unix socket. It is not in the byte stream and is **not forwarded** over a pipe, TCP, TLS, SSH, or WebSocket. Guardrails:
 

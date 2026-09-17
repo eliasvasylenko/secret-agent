@@ -1,5 +1,8 @@
 { pkgs, ... }:
 with pkgs;
 mkShell {
-  buildInputs = [ go ];
+  buildInputs = [
+    go
+    gopls
+  ];
 }

@@ -7,7 +7,7 @@ authenticate. Local Unix: peer credentials. Name header **`X-Secret-Agent-User`*
 used only when `SO_PEERCRED` matches `ForwardAuth.Peers` (Caddy, or a shared-account
 SSH helper that injects the header). If that name is a local user, principal is
 `linux:{user}/{uid}`; otherwise `http:{name}` (not a local account — not “HTTPS vs
-SSH”). SSH as a real unix user: helper splice, identity from peercreds, no header.
+SSH”). SSH as a real unix user: `dial-stdio` helper, identity from peercreds, no header.
 See [plan-remote.md](plan-remote.md).
 
 Attach uses HTTP `101` + `Upgrade: secret-agent-process/1` — the same Upgrade

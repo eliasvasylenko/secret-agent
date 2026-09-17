@@ -24,7 +24,9 @@ type httpClient interface {
 }
 
 // New talks to a secret-agent HTTP API. address is a Unix socket path,
-// a unix:// URL, or an http:// or https:// URL (host, optional port and path prefix).
+// a unix:// URL, an http:// or https:// URL, or ssh://[user@]host[:port][/socket].
+// The ssh URL path is dial-stdio -s only when sshd runs the client-requested
+// command; with restrict,command=, socket and -u/-H come from that command.
 func New(address string) (*SecretClient, error) {
 	ep, err := parseEndpoint(address)
 	if err != nil {

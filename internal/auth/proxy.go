@@ -10,9 +10,6 @@ import (
 	"unicode"
 )
 
-// DefaultForwardAuthHeader is used when ForwardAuth.Header is empty.
-const DefaultForwardAuthHeader = "X-Secret-Agent-User"
-
 // lookupUser is user.Lookup; tests may replace it.
 var lookupUser = user.Lookup
 

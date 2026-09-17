@@ -21,7 +21,7 @@ type CLI struct {
 	SecretsFile     string          `short:"S" env:"SECRETS_FILE" help:"Path to secrets configuration file"`
 	PermissionsFile string          `short:"P" env:"PERMISSIONS_FILE" help:"Path to permissions (roles/bindings) configuration file"`
 	DbFile          string          `short:"D" env:"DB_FILE" help:"Path to sqlite database file"`
-	Address         string          `short:"a" env:"CLIENT_ADDRESS" help:"Unix socket path, unix:// URL, or http(s) URL of a running secret-agent server"`
+	Address         string          `short:"a" env:"CLIENT_ADDRESS" help:"Unix socket path, unix:// URL, http(s):// URL, or ssh://[user@]host[:port][/socket]. URL /socket is dial-stdio -s only when sshd runs the client-requested command; with restrict,command=, -s/-u/-H come from that command."`
 	MaxReasonLength int             `short:"R" env:"MAX_REASON_LENGTH" default:"4096" help:"Max length of audit reason strings"`
 	Debug           bool            `short:"d" env:"DEBUG" help:"Enable debug logging"`
 	Pretty          bool            `short:"p" env:"PRETTY" help:"Pretty-print JSON output"`
@@ -37,6 +37,7 @@ type CLI struct {
 	Deactivate      InstanceCommand `cmd:"" help:"Deactivate an instance of a secret"`
 	Test            InstanceCommand `cmd:"" help:"Test an instance of a secret"`
 	Serve           Serve           `cmd:"" help:"Serve the secret agent API"`
+	DialStdio       DialStdio       `cmd:"" name:"dial-stdio" help:"Proxy stdio to the agent Unix socket. Should not be invoked manually."`
 
 	ctx   kongContext
 	agent backend.Backend
@@ -55,6 +56,10 @@ func NewCLI(ctx context.Context) *CLI {
 		log.Default().Printf("cli %v", c)
 	}
 
+	if c.ctx.Command() == "dial-stdio" {
+		return &c
+	}
+
 	var err error
 	c.agent, err = NewBackend(ctx, c.Address, c.SecretsFile, c.DbFile, c.Debug, c.MaxReasonLength)
 	c.ctx.FatalIfErrorf(err)
@@ -62,6 +67,12 @@ func NewCLI(ctx context.Context) *CLI {
 }
 
 func (c *CLI) Run(ctx context.Context) {
+	if c.ctx.Command() == "dial-stdio" {
+		err := runDialStdio(c.DialStdio.Socket, c.DialStdio.User, c.DialStdio.Header, os.Stdin, os.Stdout)
+		c.ctx.FatalIfErrorf(err)
+		return
+	}
+
 	var result any
 	var err error
 	catalog := c.agent.Catalog()
@@ -190,4 +201,10 @@ type Serve struct {
 	RequestLimit  uint32        `short:"L" default:"100" help:"Maximum number of requests per request window"`
 	RequestWindow time.Duration `short:"W" default:"1m" help:"Window of time over which the request limit is enforced"`
 	OutputTTL     time.Duration `short:"T" default:"5m" help:"Reserved: future orphan attach-slot timeout (unused)"`
+}
+
+type DialStdio struct {
+	Socket string `short:"s" help:"Unix socket path (default: Nix systemd socket). With restrict,command=, set here, not in the client's ssh:// URL."`
+	User   string `short:"u" help:"Inject the forward-auth user (shared-account hop); omit for peercred identity"`
+	Header string `short:"H" help:"Header set with -u (default X-Secret-Agent-User); must match ForwardAuth.Header"`
 }

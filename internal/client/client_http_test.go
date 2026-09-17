@@ -20,7 +20,11 @@ func TestNew_rejectsBadURL(t *testing.T) {
 	if err == nil {
 		t.Fatal("want error for URL with no host")
 	}
-	_, err = New("ssh://agent.example")
+	_, err = New("ssh://")
+	if err == nil {
+		t.Fatal("want error for ssh URL with no host")
+	}
+	_, err = New("ftp://agent.example")
 	if err == nil {
 		t.Fatal("want error for unsupported scheme")
 	}

@@ -10,9 +10,10 @@ import (
 	"strings"
 )
 
-// endpoint is one agent. address is unix:///path or http(s)://host — the
-// dial target, not an HTTP origin. Request URLs are always http(s); unix
-// sockets use http://unix/… (requestURL).
+// endpoint is one agent. address is unix:///path, http(s)://host, or
+// ssh://[user@]host[:port][/socket] — the dial target, not an HTTP origin.
+// URL path is remote dial-stdio -s only when sshd runs that requested command.
+// Request URLs are always http(s); unix and ssh use http://unix/… (requestURL).
 type endpoint struct {
 	address *url.URL
 	tls     *tls.Config
@@ -24,7 +25,7 @@ func parseEndpoint(address string) (endpoint, error) {
 		return endpoint{}, fmt.Errorf("client address: %w", err)
 	}
 	switch u.Scheme {
-	case "http", "https":
+	case "http", "https", "ssh":
 		if u.Host == "" {
 			return endpoint{}, fmt.Errorf("client address: missing host")
 		}
@@ -45,21 +46,6 @@ func parseEndpoint(address string) (endpoint, error) {
 	}
 }
 
-func unixEndpoint(socket string) endpoint {
-	return endpoint{address: &url.URL{Scheme: "unix", Path: socket}}
-}
-
-func (e endpoint) requestURL(apiPath string) *url.URL {
-	base := &url.URL{Scheme: "http", Host: "unix"}
-	if e.address != nil && e.address.Scheme != "unix" {
-		b := *e.address
-		b.RawQuery = ""
-		b.Fragment = ""
-		base = &b
-	}
-	return base.JoinPath(strings.TrimPrefix(apiPath, "/"))
-}
-
 func (e endpoint) httpClient() *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	// Attach is HTTP/1.1 101 Upgrade; HTTP/2 has no 101.
@@ -70,6 +56,14 @@ func (e endpoint) httpClient() *http.Client {
 		socket := e.address.Path
 		transport.DialContext = func(ctx context.Context, _, _ string) (net.Conn, error) {
 			return (&net.Dialer{}).DialContext(ctx, "unix", socket)
+		}
+	}
+	if e.address != nil && e.address.Scheme == "ssh" {
+		u := e.address
+		transport.Proxy = nil
+		transport.DisableKeepAlives = true
+		transport.DialContext = func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return dialSSH(ctx, u)
 		}
 	}
 	if e.tls != nil {
@@ -84,4 +78,19 @@ func (e endpoint) httpClient() *http.Client {
 		transport.TLSClientConfig.NextProtos = []string{"http/1.1"}
 	}
 	return &http.Client{Transport: transport}
+}
+
+func (e endpoint) requestURL(apiPath string) *url.URL {
+	base := &url.URL{Scheme: "http", Host: "unix"}
+	if e.address != nil && (e.address.Scheme == "http" || e.address.Scheme == "https") {
+		b := *e.address
+		b.RawQuery = ""
+		b.Fragment = ""
+		base = &b
+	}
+	return base.JoinPath(strings.TrimPrefix(apiPath, "/"))
+}
+
+func unixEndpoint(socket string) endpoint {
+	return endpoint{address: &url.URL{Scheme: "unix", Path: socket}}
 }
