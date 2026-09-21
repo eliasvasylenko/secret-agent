@@ -190,7 +190,7 @@ The **application protocol is always HTTP** (catalog JSON + attach `101`). That 
 |-----|--------------------------|-------------------|----------------------|
 | Local | Unix socket | Kernel (`SO_PEERCRED`) | `linux:{user}/{uid}` |
 | HTTPS | TLS to a reverse proxy, then Unix | Proxy (forward-auth, etc.) | Name header `X-Secret-Agent-User` if the Unix peer matches `ForwardAuth.Peers` |
-| SSH as a real unix user | `ssh eli@host`; `command=` splices stdio to the Unix socket | `sshd` (pubkey) | Peercreds of Eli (helper runs as Eli) |
+| SSH as a real unix user | `ssh eli@host` (existing login); `command=` splices stdio to the Unix socket, or run the CLI after login | `sshd` (pubkey) | Peercreds of Eli (helper runs as Eli) |
 | SSH as a shared account | `ssh secret-agent@host`; `command=` encodes the person (Gitolite-style) | `sshd` (pubkey) | Name header, if that helper’s uid/name is in `ForwardAuth.Peers` |
 
 No embedded SSH server. No OIDC/JWT/TLS client-auth inside secret-agent.

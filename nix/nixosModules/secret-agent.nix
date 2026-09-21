@@ -87,6 +87,21 @@ let
       (listOf str)
     ]);
 
+  sshKeysType = lib.types.submodule {
+    options = {
+      keys = lib.mkOption {
+        description = "SSH public key lines.";
+        type = lib.types.listOf lib.types.str;
+        default = [ ];
+      };
+      keyFiles = lib.mkOption {
+        description = "Files containing SSH public key lines.";
+        type = lib.types.listOf lib.types.path;
+        default = [ ];
+      };
+    };
+  };
+
   # Options for the secret agent service
   secret-agent = {
     enable = lib.mkEnableOption "secret agent";
@@ -132,9 +147,36 @@ let
           example = [ "caddy" ];
         };
         header = lib.mkOption {
-          description = "Header a trusted hop uses to name the end user.";
+          description = ''
+            Header a trusted hop uses to name the end user. Empty (default)
+            uses the agent's default; only set this to pass `-H` on
+            dial-stdio and override ForwardAuth.Header.
+          '';
           type = lib.types.str;
-          default = "X-Secret-Agent-User";
+          default = "";
+        };
+      };
+    };
+    ssh = {
+      enable = lib.mkEnableOption ''
+        unix user `secret-agent` on host `services.openssh` (`Match User` only).
+        sshd reads Nix-pinned keys (`ssh.shared`) and fragments in
+        /var/lib/secret-agent/ssh/authorized_keys.d (activate). Requires
+        services.openssh.enable
+      '';
+      shared = lib.mkOption {
+        description = ''
+          Optional Nix-pinned keys for the shared account. Requires
+          ssh.enable. Attr names are wrapped with `restrict,command=` /
+          `dial-stdio -u`. Rebuild owns only these pins; agent fragments
+          are a separate sshd source and are not clobbered.
+        '';
+        type = lib.types.attrsOf sshKeysType;
+        default = { };
+        example = {
+          alice.keys = [
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI..."
+          ];
         };
       };
     };
@@ -156,7 +198,44 @@ let
 
   cfg = config.services.secret-agent;
 
-  # Convert a command (string or object) to JSON format
+  sshHasStaticKeys = lib.any (spec: spec.keys != [ ] || spec.keyFiles != [ ]) (
+    lib.attrValues cfg.ssh.shared
+  );
+  sshAgentKeysDir = "/var/lib/secret-agent/ssh/authorized_keys.d";
+  forwardAuthPeers = lib.unique (
+    cfg.bindings.forwardAuth.peers ++ lib.optionals cfg.ssh.enable [ "secret-agent" ]
+  );
+
+  dialStdio = "${cfg.package}/bin/secret-agent dial-stdio";
+  dialStdioHeader = lib.optionalString (
+    cfg.bindings.forwardAuth.header != ""
+  ) " -H ${cfg.bindings.forwardAuth.header}";
+
+  wrapSharedKey =
+    name: key:
+    let
+      k = lib.removeSuffix "\n" (lib.removeSuffix "\r" key);
+    in
+    lib.optionalString (
+      k != ""
+    ) "restrict,command=\"${dialStdio} -u ${name}${dialStdioHeader}\" ${k}\n";
+
+  sharedAuthorizedKeys = pkgs.writeText "secret-agent-authorized-keys" (
+    lib.concatStrings (
+      lib.mapAttrsToList (
+        name: spec:
+        lib.concatMapStrings (wrapSharedKey name) (spec.keys ++ map builtins.readFile spec.keyFiles)
+      ) cfg.ssh.shared
+    )
+  );
+
+  authorizedKeysCommand = pkgs.writeShellScript "secret-agent-authorized-keys" ''
+    for f in ${sshAgentKeysDir}/*; do
+      [ -f "$f" ] || continue
+      ${pkgs.coreutils}/bin/cat "$f"
+    done
+  '';
+
   makeCommandConfig =
     command:
     if command == null then
@@ -199,9 +278,11 @@ let
       bindings = {
         inherit (cfg.bindings) users groups;
       }
-      // lib.optionalAttrs (cfg.bindings.forwardAuth.peers != [ ]) {
+      // lib.optionalAttrs (forwardAuthPeers != [ ]) {
         forwardAuth = {
-          peers = cfg.bindings.forwardAuth.peers;
+          peers = forwardAuthPeers;
+        }
+        // lib.optionalAttrs (cfg.bindings.forwardAuth.header != "") {
           header = cfg.bindings.forwardAuth.header;
         };
       };
@@ -222,6 +303,13 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    assertions = [
+      {
+        assertion = !cfg.ssh.enable || config.services.openssh.enable;
+        message = "services.secret-agent.ssh.enable requires services.openssh.enable.";
+      }
+    ];
+
     systemd.services.secret-agent = {
       enable = true;
       description = "Secret agent service";
@@ -261,12 +349,38 @@ in
     };
 
     users.groups.secret-agent = { };
-    users.users.secret-agent = {
+    users.users.secret-agent = lib.mkIf cfg.ssh.enable {
       isSystemUser = true;
       description = "Secret Agent";
       group = "secret-agent";
-      extraGroups = [ "secret-agent" ];
-      packages = [ ];
+      shell = pkgs.bash;
+      openssh.authorizedKeys.keyFiles = lib.mkIf sshHasStaticKeys [ sharedAuthorizedKeys ];
     };
+
+    system.activationScripts.secret-agent-ssh = lib.mkIf cfg.ssh.enable ''
+      install -d -m 755 /var/lib/secret-agent/ssh/authorized_keys.d
+      install -m 755 ${authorizedKeysCommand} /var/lib/secret-agent/ssh/authorized-keys-command
+    '';
+
+    # Nix pins: AuthorizedKeysFile (openssh.authorizedKeys).
+    # Activate fragments: AuthorizedKeysCommand. Rebuild does not touch the dir.
+    services.openssh.extraConfig = lib.mkIf cfg.ssh.enable (
+      lib.mkAfter ''
+        Match User secret-agent
+          PasswordAuthentication no
+          KbdInteractiveAuthentication no
+          PubkeyAuthentication yes
+          AuthenticationMethods publickey
+          PermitTTY no
+          AllowTcpForwarding no
+          AllowStreamLocalForwarding no
+          X11Forwarding no
+          AllowAgentForwarding no
+          PermitTunnel no
+          GatewayPorts no
+          AuthorizedKeysCommand /var/lib/secret-agent/ssh/authorized-keys-command
+          AuthorizedKeysCommandUser nobody
+      ''
+    );
   };
 }

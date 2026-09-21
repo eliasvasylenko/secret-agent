@@ -45,7 +45,7 @@ Unix peer credentials. Both later hops reuse these outside authenticators:
 | Hop trust | **Peercreds.** `ForwardAuth` honours the name header only when `SO_PEERCRED` matches `ForwardAuth.Peers`. Not “whoever can dial the socket.” |
 | `ForwardAuth.Peers` | Allowlist of **last hops** (OR), not a chain. Typically one process (Caddy). A second entry only if another local process independently dials the same socket and asserts the header. |
 | Header | One name for the agent (`X-Secret-Agent-User`, overridable). Hops are configured to set that; the agent is not a per-peer header polyglot. |
-| SSH | **OpenSSH**. **No** `x/crypto/ssh` in secret-agent. Prefer `Match User` on the host `sshd`; optional dedicated `sshd` if port 22 stays closed. |
+| SSH | **OpenSSH**. **No** `x/crypto/ssh` in secret-agent. `ssh.enable` creates unix user `secret-agent` on host sshd (`Match User` only). Optional Nix pins (`ssh.shared`) and/or activate fragments under `/var/lib/secret-agent/ssh/authorized_keys.d`. Homelab login is the peercred path. |
 | SSH `command=` | Forces **`secret-agent dial-stdio`** (Docker-style stdio↔unix-socket bridge). Not catalog commands, not `serve` (already listening). HTTP (including attach `101`) lives **on** that stdio. One `ssh` per REST call and per attach stream. Client runs `ssh host secret-agent dial-stdio` (or `dial-stdio -s /path` when the socket is not default). `ssh://` `/socket` is that `-s` only if sshd runs the requested command; with `restrict,command=`, `-s`/`-u`/`-H` are in the forced command. Not `-L` / streamlocal forwarding (`restrict` disables forwarding). |
 | SSH identity | **Real unix user** (`ssh eli@host`) → helper runs as Eli → peercreds, no header. **Shared account** (`ssh secret-agent@host`, key maps to a person via `command=` argv, like Gitolite) → peercreds is the shared user; helper injects the same name header (trusted hop, same seam as Caddy). Git itself does not use a header; we translate `command=` into one because the agent speaks HTTP. |
 | Pipe / mix-and-match | **Reserved** — [plan-federation.md](plan-federation.md). A splices to B’s `sshd` or proxy (e.g. `command="nc B 22"` / `ProxyJump`). B’s `command=` is still the agent splice. A must not terminate HTTP. |
@@ -55,7 +55,7 @@ Unix peer credentials. Both later hops reuse these outside authenticators:
 
 Written into [design.md](design.md) § Remote transports.
 
-**Still TBD in implementation:** exact Nix `Match User` vs second `sshd` (Phase 5). Mux / keep-alive is an optional optimisation, not a primitive.
+Mux / keep-alive is an optional optimisation, not a primitive. Packaged SSH is host `sshd` + `Match User secret-agent`; `ssh://` with no port is OpenSSH's default 22.
 
 ---
 
@@ -89,6 +89,7 @@ internal/server  (HTTP API; identity from peercreds or forward-auth header)
 | Client | `internal/client` dials **unix**, **http**, **https**, or **ssh://** for REST and attach upgrades |
 | CLI | `CLIENT_ADDRESS` / `-a`: unix path, `http(s)://`, or `ssh://[user@]host[:port][/socket]`; empty → in-process sqlite; `dial-stdio` for `sshd` `command=` (URL `/socket` is `-s` only without a forced command) |
 | Reverse proxy | NixOS `bindings.forwardAuth`; Caddy e2e in `nix/checks/remote-http.nix` |
+| SSH | Host `Match User secret-agent` (`ssh.enable`); e2e in `nix/checks/remote-ssh.nix` |
 
 ---
 
@@ -140,11 +141,13 @@ restrict,command="secret-agent dial-stdio -u john -H X-Remote-User" ssh-ed25519 
 
 **Verification:** `go test ./internal/dialstdio/ ./internal/auth/ ./internal/cli/ ./internal/client/` (HTTP + attach over stdio).
 
-### Phase 5 — Nix SSH e2e
+### Phase 5 — Nix SSH e2e ✅
 
-CLI on X uses `ssh` to B; attach/stdio works; helper has no shell/PTY/forwarding.
+Host `services.openssh`, optional unix user `secret-agent`: `Match User`
+plus `restrict,command=` / `-u`. Nix-pinned `ssh.shared` keys and
+activate fragments (`authorized_keys.d`) are both sshd sources.
 
-**Verification:** `nix flake check` (remote-ssh check).
+**Verification:** `nix flake check` (`checks.*.remote-ssh`).
 
 ---
 
