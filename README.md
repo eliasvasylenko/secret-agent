@@ -19,11 +19,9 @@ Homelabbers using NixOS. People who are willing to take a risk on something imma
 
 ## Architecture docs
 
-- [design.md](docs/design.md) — settled constraints, `Backend` / `Handle` contract
-- [plan.md](docs/plan.md) — local-agent migration (Phases 0–7, complete)
-- [plan-remote.md](docs/plan-remote.md) — remote secrets and authentication (next)
-- [plan-federation.md](docs/plan-federation.md) — federation and `Proposer` (parked)
-- [http-api.md](docs/http-api.md) — HTTP routes and wire JSON types
+- [design.md](docs/design.md) — current design
+- [http-api.md](docs/http-api.md) — HTTP routes and JSON
+- [plan-federation.md](docs/plan-federation.md) — federation still to build
 
 ## How it works
 

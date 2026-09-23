@@ -8,7 +8,7 @@ used only when `SO_PEERCRED` matches `ForwardAuth.Peers` (Caddy, or a shared-acc
 SSH helper that injects the header). If that name is a local user, principal is
 `linux:{user}/{uid}`; otherwise `http:{name}` (not a local account — not “HTTPS vs
 SSH”). SSH as a real unix user: `dial-stdio` helper, identity from peercreds, no header.
-See [plan-remote.md](plan-remote.md).
+See [design.md](design.md) § Authentication and remote transport.
 
 Attach uses HTTP `101` + `Upgrade: secret-agent-process/1` — the same Upgrade
 mechanism as WebSockets. Caddy `reverse_proxy` forwards it; e2e should confirm the
@@ -48,6 +48,7 @@ instance, its attach slot — stays nested.
 | POST + Upgrade | `/secrets/{secretId}/attach/stdout` | Server → client copy |
 | POST + Upgrade | `/secrets/{secretId}/attach/stderr` | Server → client copy |
 | POST | `/instances` | Create instance + start op; `secretId` in body. **Requires attach slot ready.** |
+| POST | `/instances/{instanceId}/approve` | Resume the parked `Propose` with the connection principal. Empty body. |
 | POST | `/operations` | Start named op; `instanceId` in body, secret derived from it. **Requires attach slot ready.** |
 
 `POST /operations` derives the secret from the instance, so a request cannot name one
@@ -83,8 +84,8 @@ When POST succeeds, response returns initial **`Instance`** JSON (op accepted, `
 | 426 | Attach without Upgrade header |
 | 404 | No attach slot / unknown secret or instance |
 | 400 | Missing `secretId` on create, missing `instanceId` on operation, `create` posted to `/operations` |
-| 409 | Pending slot not ready; stream already claimed |
-| 403 | Attach/start principal ≠ slot `startedBy` |
+| 409 | Pending slot not ready; stream already claimed; approve when no `Propose` is parked |
+| 403 | Attach/start principal ≠ slot `startedBy`; principal is not in the operation's approver set |
 
 ---
 
@@ -149,14 +150,24 @@ Response **200**: updated `Instance` snapshot (same shape as today).
 5. GET /instances/{id}                          (final status, reported by Handle.Wait)
 ```
 
-Completion: server closes pipe ends when subprocess exits → attach reads/writes hit EOF. Client **`Wait`** maps to steps 4–5. Exit code: see design.md (coarse from `completedAt`/`failedAt` until control channel exists).
+Completion: server closes pipe ends when subprocess exits → attach reads/writes hit EOF. Client **`Wait`** maps to steps 4–5. Exit code: see design.md (`completedAt` / `failedAt`).
 
 ---
 
-## Proposals (future)
+## Proposal and approval fields
 
-Dependent-secret authorization during run: **control messages** on a separate upgraded
-stream (`/attach/control` or similar). Not in v1 wire format. Parked with federation —
-[plan-federation.md](plan-federation.md). John↔B is either **introduce** (John dials B)
-or **pipe** (opaque splice through A; John still authenticates to B’s proxy or `sshd`).
-Remote access (John talking to one agent) is [plan-remote.md](plan-remote.md).
+Behaviour: [design.md](design.md) § Delegating parents and approval. These fields are optional
+on `Status` inside `GET /instances/{id}` and the operation list.
+
+| Field | JSON |
+|-------|------|
+| `proposal` | `{ "id", "secretId", "instanceId", "operationNumber", "name", "at" }` while the parent is inside `Propose`; omitted otherwise |
+| `approvalRequired` | frozen at accept when the starter is a delegating parent |
+| `awaitingApproval` | `true` while that hold has not been released |
+| `approvedBy` | originating principal accepted by `POST /instances/{id}/approve`; remains after the op finishes |
+
+`POST /instances/{id}/approve` has an empty body. The principal comes from the
+connection. **403** means that principal is the delegating parent that started the
+operation; `Propose` stays parked. **409** means nothing is parked, including a second
+approve. **200** returns the instance after `approvedBy` is recorded. Start requests
+cannot name an originator or waive the hold.

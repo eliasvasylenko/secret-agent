@@ -57,9 +57,14 @@ type Handle interface {
 	Cancel(ctx context.Context) error
 }
 
+// Proposer approves by returning nil and rejects by returning an error.
+// A delegated grant calls Propose and runs only after that nil return has recorded
+// an eligible principal. A nil Proposer fails that operation.
 type Proposer interface {
 	Propose(ctx context.Context, name secrets.OperationName, params executor.OperationParameters) error
 }
+
+var ErrNotApprover = fmt.Errorf("principal is not eligible to approve this operation")
 
 type StaleOperationError struct {
 	Expected int

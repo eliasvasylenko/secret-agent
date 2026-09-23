@@ -1,7 +1,7 @@
 package server
 
 import (
-	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -17,6 +17,8 @@ type Controller struct {
 	secretStore backend.Backend
 	slotsMu     sync.Mutex
 	slots       map[attachSlotKey]*attachSlot
+	approvalsMu sync.Mutex
+	approvals   map[string]*parkedApproval
 	middleware  func(perms auth.Permissions, next http.HandlerFunc) http.Handler
 }
 
@@ -30,6 +32,7 @@ func NewController(secretStore backend.Backend, limiter limiter, permissions per
 	return &Controller{
 		secretStore: secretStore,
 		slots:       make(map[attachSlotKey]*attachSlot),
+		approvals:   make(map[string]*parkedApproval),
 		middleware:  middleware,
 	}
 }
@@ -40,12 +43,6 @@ type limiter interface {
 
 type permissions interface {
 	Middleware(perms auth.Permissions, next http.Handler) http.Handler
-}
-
-type noopProposer struct{}
-
-func (noopProposer) Propose(context.Context, secrets.OperationName, executor.OperationParameters) error {
-	return nil
 }
 
 func (c *Controller) buildHandler(registerHandler func(pattern string, handler http.Handler)) {
@@ -76,6 +73,10 @@ func (c *Controller) buildHandler(registerHandler func(pattern string, handler h
 	registerHandler("POST /instances", c.middleware(
 		auth.Permissions{auth.Instances: auth.Write},
 		c.createInstance,
+	))
+	registerHandler("POST /instances/{instanceId}/approve", c.middleware(
+		auth.Permissions{auth.Instances: auth.Write},
+		c.approveInstance,
 	))
 	registerHandler("GET /operations", c.middleware(
 		auth.Permissions{auth.Instances: auth.Read},
@@ -143,6 +144,34 @@ func (s *Controller) createInstance(w http.ResponseWriter, r *http.Request) {
 		Reason:    request.Reason,
 		StartedBy: identity.Principal,
 	})
+}
+
+func (s *Controller) approveInstance(w http.ResponseWriter, r *http.Request) {
+	identity := identityFromContext(r.Context())
+	if identity == nil {
+		writeError(w, NewErrorResponse(http.StatusUnauthorized, fmt.Errorf("identity not found in context")))
+		return
+	}
+	instanceID := r.PathValue("instanceId")
+	err := s.submitApproval(instanceID, identity.Principal)
+	if errors.Is(err, errNoParkedApproval) {
+		writeError(w, NewErrorResponse(http.StatusConflict, err))
+		return
+	}
+	if errors.Is(err, backend.ErrNotApprover) {
+		writeError(w, NewErrorResponse(http.StatusForbidden, err))
+		return
+	}
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	instance, err := s.secretStore.Catalog().Instances().Get(r.Context(), instanceID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeResult(w, instance, http.StatusOK)
 }
 
 func (s *Controller) getActiveInstance(w http.ResponseWriter, r *http.Request) {
@@ -246,14 +275,17 @@ func (s *Controller) startAttachedRun(
 	}
 
 	// r.Context() is the accept ctx for Run (persist only); execute uses Handle.
+	// Propose parks until POST …/approve records an eligible principal and returns nil.
+	proposer := newRunProposer(s, s.secretStore)
 	instance, handle, err := s.secretStore.Runner(secretId).Run(
-		r.Context(), name, instanceId, parameters, noopProposer{}, slot.pipes.Stdio(),
+		r.Context(), name, instanceId, parameters, proposer, slot.pipes.Stdio(),
 	)
 	if err != nil {
 		slot.close()
 		writeError(w, err)
 		return
 	}
+	proposer.bind(instance.Id)
 	slot.watch(handle)
 	writeResult(w, instance, http.StatusOK)
 }

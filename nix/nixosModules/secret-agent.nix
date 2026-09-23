@@ -77,6 +77,16 @@ let
     activate = mkCommandOptions "activate the secret";
     deactivate = mkCommandOptions "deactivate the secret";
     test = mkCommandOptions "test the activated secret";
+    parents = lib.mkOption {
+      description = ''
+        Delegating parent principals allowed to start this secret.
+        A start by one of these principals is held until an originating principal approves.
+        Any other authenticated principal is the originating principal and runs directly.
+      '';
+      default = [ ];
+      type = lib.types.listOf lib.types.str;
+      example = [ "linux:agent-a/200" ];
+    };
   };
 
   # One or more strings
@@ -268,6 +278,7 @@ let
           activate = makeCommandConfig secret.activate;
           deactivate = makeCommandConfig secret.deactivate;
           test = makeCommandConfig secret.test;
+          parents = if secret.parents == [ ] then null else secret.parents;
         }
       ) secrets
     );

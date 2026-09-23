@@ -79,6 +79,22 @@ func (i instancesCatalog) GetActive(ctx context.Context, secretId string) (*secr
 	return i.repo.getActiveInstance(ctx, secretId)
 }
 
+// RecordApproval stores by on a held operation when by is an originating principal.
+func (b *Backend) RecordApproval(ctx context.Context, instanceID, by string) error {
+	return b.repo.recordInstanceApproval(ctx, instanceID, by)
+}
+
+// SetProposal records a proposal on the instance's running operation.
+// The parent agent calls this while Propose is blocked. It is not an HTTP route.
+func (b *Backend) SetProposal(ctx context.Context, instanceID string, proposal *secrets.Proposal) error {
+	return b.repo.setProposal(ctx, instanceID, proposal)
+}
+
+// ClearProposal removes the proposal from the instance's running operation.
+func (b *Backend) ClearProposal(ctx context.Context, instanceID string) error {
+	return b.repo.clearProposal(ctx, instanceID)
+}
+
 type operationsCatalog struct {
 	repo *Repository
 }
@@ -99,8 +115,6 @@ func (r *runner) Run(
 	proposer backend.Proposer,
 	stdio command.Stdio,
 ) (*secrets.Instance, backend.Handle, error) {
-	_ = proposer
-
 	var (
 		instance  *secrets.Instance
 		operation secrets.Operation
@@ -115,7 +129,7 @@ func (r *runner) Run(
 	if err != nil {
 		return nil, nil, err
 	}
-	return instance, r.state.launch(instance, operation, params, stdio), nil
+	return instance, r.state.launch(instance, operation, params, proposer, stdio), nil
 }
 
 func (h *opHandle) Wait(ctx context.Context) (*secrets.Instance, error) {

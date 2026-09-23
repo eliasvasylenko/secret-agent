@@ -36,6 +36,11 @@ type Secret struct {
 
 	// Test an instance of the secret
 	Test *command.Command `json:"test,omitempty"`
+
+	// Parents are delegating principals allowed to start this secret.
+	// Their start is held until an originating principal approves.
+	// Any other authenticated principal is the originating principal and runs directly.
+	Parents []string `json:"parents,omitempty"`
 }
 
 func New(secretList []*Secret) (Secrets, error) {
@@ -49,6 +54,9 @@ func New(secretList []*Secret) (Secrets, error) {
 		}
 		if _, ok := secrets[secret.Id]; ok {
 			return nil, fmt.Errorf("Secret id '%s' must be unique", secret.Id)
+		}
+		if err := secret.ValidateParents(); err != nil {
+			return nil, err
 		}
 		secrets[secret.Id] = secret
 	}
@@ -71,6 +79,36 @@ func (s Secrets) MarshalJSON() ([]byte, error) {
 		secrets = append(secrets, secret)
 	}
 	return marshal.JSON(secrets)
+}
+
+func (s *Secret) ValidateParents() error {
+	if s == nil {
+		return fmt.Errorf("secret plan is missing")
+	}
+	seen := map[string]struct{}{}
+	for i, principal := range s.Parents {
+		if principal == "" {
+			return fmt.Errorf("secret %q parent %d is empty", s.Id, i)
+		}
+		if _, ok := seen[principal]; ok {
+			return fmt.Errorf("secret %q repeats parent %q", s.Id, principal)
+		}
+		seen[principal] = struct{}{}
+	}
+	return nil
+}
+
+// Parent reports whether principal may start this secret as a delegating parent.
+func (s *Secret) Parent(principal string) bool {
+	if s == nil || principal == "" {
+		return false
+	}
+	for _, parent := range s.Parents {
+		if parent == principal {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Secret) Command(operation OperationName) *command.Command {

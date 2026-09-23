@@ -122,7 +122,7 @@ func (h *runHandle) startPumps(stdio command.Stdio) {
 	// Stdin is forwarded but not joined. A process can exit without reading
 	// it; waiting for stdin EOF would hang a CLI whose stdin is still open.
 	go func() { _ = copyAttach(h.conns.stdin, stdin, h.conns.stdin) }()
- 	h.pump(func() error { return copyAttach(stdout, h.conns.stdout, h.conns.stdout) })
+	h.pump(func() error { return copyAttach(stdout, h.conns.stdout, h.conns.stdout) })
 	h.pump(func() error { return copyAttach(stderr, h.conns.stderr, h.conns.stderr) })
 }
 

@@ -5,12 +5,12 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/eliasvasylenko/secret-agent/internal/backend"
 	"github.com/eliasvasylenko/secret-agent/internal/command"
 	"github.com/eliasvasylenko/secret-agent/internal/executor"
 	"github.com/eliasvasylenko/secret-agent/internal/mocks"
 	"github.com/eliasvasylenko/secret-agent/internal/ops"
 	"github.com/eliasvasylenko/secret-agent/internal/secrets"
-	"github.com/eliasvasylenko/secret-agent/internal/backend"
 )
 
 type noopProposer struct{}

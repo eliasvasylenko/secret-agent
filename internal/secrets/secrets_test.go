@@ -59,6 +59,26 @@ func TestNew(t *testing.T) {
 	})
 }
 
+func TestValidateParents(t *testing.T) {
+	valid := &Secret{Id: "s", Parents: []string{"linux:agent/1", "linux:agent/2"}}
+	if err := valid.ValidateParents(); err != nil {
+		t.Fatal(err)
+	}
+	if !valid.Parent("linux:agent/1") || valid.Parent("linux:john/2") {
+		t.Fatalf("parents = %v", valid.Parents)
+	}
+
+	cases := []Secret{
+		{Id: "s", Parents: []string{""}},
+		{Id: "s", Parents: []string{"linux:agent/1", "linux:agent/1"}},
+	}
+	for _, secret := range cases {
+		if err := secret.ValidateParents(); err == nil {
+			t.Fatalf("ValidateParents(%+v) = nil, want error", secret.Parents)
+		}
+	}
+}
+
 func TestSecrets_MarshalJSON(t *testing.T) {
 	secrets := Secrets{
 		"friend": {Id: "friend", Version: 1, Create: command.New("echo hello", nil, "")},

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/eliasvasylenko/secret-agent/internal/auth"
 	"github.com/eliasvasylenko/secret-agent/internal/backend"
@@ -720,6 +721,209 @@ func TestController_attachThenCreate_stdinReachesRun(t *testing.T) {
 	if string(capturedStdin) != "payload" {
 		t.Errorf("stdin = %q, want payload", capturedStdin)
 	}
+}
+
+type headerIdentity struct{}
+
+func (headerIdentity) Middleware(_ auth.Permissions, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if principal := r.Header.Get("X-Test-Principal"); principal != "" {
+			r = r.WithContext(context.WithValue(r.Context(), identityKey{}, &auth.Identity{Principal: principal}))
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+type recordingStore struct {
+	backend.Backend
+	record func(context.Context, string, string) error
+}
+
+func (s recordingStore) RecordApproval(ctx context.Context, instanceID, by string) error {
+	return s.record(ctx, instanceID, by)
+}
+
+func postAs(mux *http.ServeMux, method, url, principal, body string) *httptest.ResponseRecorder {
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(method, url, strings.NewReader(body))
+	req.Header.Set("X-Test-Principal", principal)
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	mux.ServeHTTP(rec, req)
+	return rec
+}
+
+func TestController_approveInstance(t *testing.T) {
+	const starter = "linux:agent/1"
+	const john = "linux:john/2"
+
+	t.Run("eligible approval", func(t *testing.T) {
+		mockBackend := &mocks.MockBackend{}
+		defer mockBackend.Mock.Validate(t)
+		mockRunner := &mocks.MockRunner{}
+		defer mockRunner.Mock.Validate(t)
+		mockCatalog := &mocks.MockCatalog{}
+		defer mockCatalog.Mock.Validate(t)
+		mockInstances := &mocks.MockInstances{}
+		defer mockInstances.Mock.Validate(t)
+
+		held := &secrets.Instance{Id: "i1", Status: secrets.Status{StartedBy: starter, AwaitingApproval: true, ApprovalRequired: true}}
+		approved := &secrets.Instance{Id: "i1", Status: secrets.Status{StartedBy: starter, ApprovedBy: john}}
+		bg, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		entered := make(chan struct{})
+
+		mocks.Expect(&mockBackend.Mock, mockBackend.Runner, func(string) backend.Runner { return mockRunner })
+		mocks.Expect(&mockRunner.Mock, mockRunner.Run, func(
+			_ context.Context,
+			_ secrets.OperationName,
+			_ string,
+			_ executor.OperationParameters,
+			proposer backend.Proposer,
+			_ command.Stdio,
+		) (*secrets.Instance, backend.Handle, error) {
+			go func() {
+				close(entered)
+				_ = proposer.Propose(bg, secrets.Create, executor.OperationParameters{})
+			}()
+			return held, immediateHandle{inst: held}, nil
+		})
+		expectCatalog(mockBackend, mockCatalog)
+		mocks.Expect(&mockCatalog.Mock, mockCatalog.Instances, func() backend.Instances { return mockInstances })
+		mocks.Expect(&mockInstances.Mock, mockInstances.Get, func(context.Context, string) (*secrets.Instance, error) {
+			return approved, nil
+		})
+
+		c := NewController(recordingStore{
+			Backend: mockBackend,
+			record: func(_ context.Context, instanceID, by string) error {
+				if instanceID != "i1" || by != john {
+					return backend.ErrNotApprover
+				}
+				return nil
+			},
+		}, noopLimiter{}, headerIdentity{})
+		mux := http.NewServeMux()
+		c.buildHandler(mux.Handle)
+		readySlot(c, "sid", starter)
+
+		start := postAs(mux, http.MethodPost, "http://test/instances", starter, `{"secretId":"sid","reason":"r"}`)
+		if start.Code != http.StatusOK {
+			t.Fatalf("start status = %d, body %s", start.Code, start.Body.String())
+		}
+		select {
+		case <-entered:
+		case <-time.After(2 * time.Second):
+			t.Fatal("Propose was not called")
+		}
+
+		var rec *httptest.ResponseRecorder
+		deadline := time.Now().Add(2 * time.Second)
+		for {
+			rec = postAs(mux, http.MethodPost, "http://test/instances/i1/approve", john, "")
+			if rec.Code == http.StatusOK {
+				break
+			}
+			if rec.Code != http.StatusConflict || time.Now().After(deadline) {
+				t.Fatalf("approve status = %d, body %s", rec.Code, rec.Body.String())
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		var got secrets.Instance
+		if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if got.Status.ApprovedBy != john {
+			t.Fatalf("approvedBy = %q", got.Status.ApprovedBy)
+		}
+
+		again := postAs(mux, http.MethodPost, "http://test/instances/i1/approve", john, "")
+		if again.Code != http.StatusConflict {
+			t.Fatalf("second approve status = %d, want 409", again.Code)
+		}
+	})
+
+	t.Run("starter forbidden", func(t *testing.T) {
+		mockBackend := &mocks.MockBackend{}
+		defer mockBackend.Mock.Validate(t)
+		mockRunner := &mocks.MockRunner{}
+		defer mockRunner.Mock.Validate(t)
+		mockCatalog := &mocks.MockCatalog{}
+		defer mockCatalog.Mock.Validate(t)
+		mockInstances := &mocks.MockInstances{}
+		defer mockInstances.Mock.Validate(t)
+
+		held := &secrets.Instance{Id: "i1", Status: secrets.Status{StartedBy: starter, AwaitingApproval: true, ApprovalRequired: true}}
+		bg, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		released := make(chan struct{})
+
+		mocks.Expect(&mockBackend.Mock, mockBackend.Runner, func(string) backend.Runner { return mockRunner })
+		mocks.Expect(&mockRunner.Mock, mockRunner.Run, func(
+			_ context.Context,
+			_ secrets.OperationName,
+			_ string,
+			_ executor.OperationParameters,
+			proposer backend.Proposer,
+			_ command.Stdio,
+		) (*secrets.Instance, backend.Handle, error) {
+			go func() {
+				if proposer.Propose(bg, secrets.Create, executor.OperationParameters{}) == nil {
+					close(released)
+				}
+			}()
+			return held, immediateHandle{inst: held}, nil
+		})
+
+		c := NewController(recordingStore{
+			Backend: mockBackend,
+			record:  func(context.Context, string, string) error { return backend.ErrNotApprover },
+		}, noopLimiter{}, headerIdentity{})
+		mux := http.NewServeMux()
+		c.buildHandler(mux.Handle)
+		readySlot(c, "sid", starter)
+
+		start := postAs(mux, http.MethodPost, "http://test/instances", starter, `{"secretId":"sid","reason":"r"}`)
+		if start.Code != http.StatusOK {
+			t.Fatalf("start status = %d, body %s", start.Code, start.Body.String())
+		}
+
+		deadline := time.Now().Add(2 * time.Second)
+		for {
+			rec := postAs(mux, http.MethodPost, "http://test/instances/i1/approve", starter, "")
+			if rec.Code == http.StatusForbidden {
+				break
+			}
+			if rec.Code != http.StatusConflict || time.Now().After(deadline) {
+				t.Fatalf("approve status = %d, body %s", rec.Code, rec.Body.String())
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		other := postAs(mux, http.MethodPost, "http://test/instances/i1/approve", "linux:eve/9", "")
+		if other.Code != http.StatusForbidden {
+			t.Fatalf("unrelated approve status = %d, want 403", other.Code)
+		}
+		select {
+		case <-released:
+			t.Fatal("ineligible approve released the waiter")
+		default:
+		}
+	})
+
+	t.Run("nothing parked", func(t *testing.T) {
+		mockBackend := &mocks.MockBackend{}
+		defer mockBackend.Mock.Validate(t)
+
+		c := NewController(mockBackend, noopLimiter{}, headerIdentity{})
+		mux := http.NewServeMux()
+		c.buildHandler(mux.Handle)
+
+		rec := postAs(mux, http.MethodPost, "http://test/instances/i1/approve", john, "")
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("status = %d, want 409, body %s", rec.Code, rec.Body.String())
+		}
+	})
 }
 
 func upgradeAttach(t *testing.T, serverURL, secretId, stream, body string) net.Conn {

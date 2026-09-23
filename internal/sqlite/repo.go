@@ -11,6 +11,7 @@ import (
 
 	"database/sql"
 
+	"github.com/eliasvasylenko/secret-agent/internal/backend"
 	"github.com/eliasvasylenko/secret-agent/internal/command"
 	"github.com/eliasvasylenko/secret-agent/internal/executor"
 	"github.com/eliasvasylenko/secret-agent/internal/marshal"
@@ -76,6 +77,9 @@ func NewRepository(ctx context.Context, dbFile string, secrets secrets.Secrets, 
 			startedAt DATETIME NOT NULL,
 			completedAt DATETIME,
 			failedAt DATETIME,
+			approvalRequired INTEGER NOT NULL DEFAULT 0,
+			approvedBy TEXT NOT NULL DEFAULT '',
+			proposal TEXT,
 			FOREIGN KEY(secretId) REFERENCES secret(id)
 			FOREIGN KEY(instanceId) REFERENCES instance(id)
 		);
@@ -83,6 +87,16 @@ func NewRepository(ctx context.Context, dbFile string, secrets secrets.Secrets, 
 		CREATE INDEX IF NOT EXISTS secret_operation ON operation (secretId, id DESC);
 	`)
 	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	for _, secret := range secrets {
+		if err := secret.ValidateParents(); err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
+	if err := ensureApprovalColumns(ctx, db); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -139,7 +153,10 @@ func (r *Repository) listInstances(ctx context.Context, secretId *string, from, 
 			o.startedBy,
 			o.startedAt,
 			o.completedAt,
-			o.failedAt
+			o.failedAt,
+			o.approvalRequired,
+			o.approvedBy,
+			o.proposal
 		FROM instance i
 		INNER JOIN revision r
 			ON r.secretId = i.secretId AND r.version = i.version
@@ -169,6 +186,8 @@ func (r *Repository) listInstances(ctx context.Context, secretId *string, from, 
 func (r *Repository) getInstance(ctx context.Context, instanceId string) (*secrets.Instance, error) {
 	instance := &secrets.Instance{Id: instanceId}
 	var secretBytes []byte
+	var approvalRequired int
+	var proposalJSON sql.NullString
 	err := r.db.QueryRowContext(ctx, `
 		SELECT
 			r.plan,
@@ -179,7 +198,10 @@ func (r *Repository) getInstance(ctx context.Context, instanceId string) (*secre
 			o.startedBy,
 			o.startedAt,
 			o.completedAt,
-			o.failedAt
+			o.failedAt,
+			o.approvalRequired,
+			o.approvedBy,
+			o.proposal
 		FROM instance i
 		INNER JOIN revision r
 			ON r.secretId = i.secretId AND r.version = i.version
@@ -200,11 +222,17 @@ func (r *Repository) getInstance(ctx context.Context, instanceId string) (*secre
 		&instance.Status.StartedAt,
 		&instance.Status.CompletedAt,
 		&instance.Status.FailedAt,
+		&approvalRequired,
+		&instance.Status.ApprovedBy,
+		&proposalJSON,
 	)
 	if err != nil {
 		return nil, err
 	}
 	if err := json.Unmarshal(secretBytes, &instance.Secret); err != nil {
+		return nil, err
+	}
+	if err := finishStatus(&instance.Status, approvalRequired != 0, proposalJSON); err != nil {
 		return nil, err
 	}
 	return instance, nil
@@ -222,7 +250,10 @@ func (r *Repository) getActiveInstance(ctx context.Context, secretId string) (*s
 			o.startedBy,
 			o.startedAt,
 			o.completedAt,
-			o.failedAt
+			o.failedAt,
+			o.approvalRequired,
+			o.approvedBy,
+			o.proposal
 		FROM secret s
 		INNER JOIN instance i
 			ON i.id = s.activeInstanceId
@@ -245,6 +276,8 @@ func (r *Repository) getActiveInstance(ctx context.Context, secretId string) (*s
 	}
 	instance := &secrets.Instance{}
 	var secretBytes []byte
+	var approvalRequired int
+	var proposalJSON sql.NullString
 	err = rows.Scan(
 		&instance.Id,
 		&secretBytes,
@@ -256,11 +289,17 @@ func (r *Repository) getActiveInstance(ctx context.Context, secretId string) (*s
 		&instance.Status.StartedAt,
 		&instance.Status.CompletedAt,
 		&instance.Status.FailedAt,
+		&approvalRequired,
+		&instance.Status.ApprovedBy,
+		&proposalJSON,
 	)
 	if err != nil {
 		return nil, err
 	}
 	if err := json.Unmarshal(secretBytes, &instance.Secret); err != nil {
+		return nil, err
+	}
+	if err := finishStatus(&instance.Status, approvalRequired != 0, proposalJSON); err != nil {
 		return nil, err
 	}
 	return instance, nil
@@ -278,7 +317,10 @@ func (r *Repository) listOperations(ctx context.Context, secretId, instanceId *s
 			startedBy,
 			startedAt,
 			completedAt,
-			failedAt
+			failedAt,
+			approvalRequired,
+			approvedBy,
+			proposal
 		FROM operation
 		WHERE 1=1
 	`
@@ -327,7 +369,7 @@ func (st *secretState) beginCreate(ctx context.Context, parameters executor.Oper
 		return nil, secrets.Operation{}, err
 	}
 
-	operation, err := startOperation(ctx, tx, st.secretId, instanceId, secrets.Create, parameters)
+	operation, err := startOperation(ctx, tx, st.secret, instanceId, secrets.Create, parameters)
 	if err != nil {
 		return nil, secrets.Operation{}, err
 	}
@@ -415,7 +457,7 @@ func (st *secretState) beginUpdate(ctx context.Context, instanceId string, opera
 		}
 	}
 
-	operation, err := startOperation(ctx, tx, st.secretId, instanceId, operationName, parameters)
+	operation, err := startOperation(ctx, tx, st.secret, instanceId, operationName, parameters)
 	if err != nil {
 		return nil, secrets.Operation{}, err
 	}
@@ -431,7 +473,7 @@ func (st *secretState) beginUpdate(ctx context.Context, instanceId string, opera
 	return instance, operation, nil
 }
 
-func (st *secretState) launch(instance *secrets.Instance, operation secrets.Operation, parameters executor.OperationParameters, stdio command.Stdio) *opHandle {
+func (st *secretState) launch(instance *secrets.Instance, operation secrets.Operation, parameters executor.OperationParameters, proposer backend.Proposer, stdio command.Stdio) *opHandle {
 	execCtx, execCancel := context.WithCancel(context.Background())
 	h := &opHandle{
 		done:       make(chan struct{}),
@@ -443,6 +485,20 @@ func (st *secretState) launch(instance *secrets.Instance, operation secrets.Oper
 	inst := instance
 	go func() {
 		defer close(h.done)
+		if operation.ApprovalRequired {
+			err := approveHeld(execCtx, repo, inst.Id, operation, parameters, proposer)
+			if err != nil {
+				_ = repo.failOperation(context.Background(), operation.OperationNumber)
+				h.waitErr = err
+				got, getErr := repo.getInstance(context.Background(), inst.Id)
+				if getErr != nil {
+					h.waitErr = getErr
+					return
+				}
+				h.final = got
+				return
+			}
+		}
 		err := completeOperation(execCtx, repo.db, secretId, inst, operation, parameters, stdio)
 		got, getErr := repo.getInstance(context.Background(), inst.Id)
 		if getErr != nil {
@@ -484,22 +540,28 @@ func beginTx(db *sql.DB) (*sql.Tx, func() error, func(), error) {
 	return tx, commit, rollback, err
 }
 
-func startOperation(ctx context.Context, tx *sql.Tx, secretId, instanceId string, operationName secrets.OperationName, parameters executor.OperationParameters) (secrets.Operation, error) {
+func startOperation(ctx context.Context, tx *sql.Tx, secret *secrets.Secret, instanceId string, operationName secrets.OperationName, parameters executor.OperationParameters) (secrets.Operation, error) {
+	if secret == nil {
+		return secrets.Operation{}, fmt.Errorf("secret plan does not exist")
+	}
+	approvalRequired := secret.Parent(parameters.StartedBy)
 	operation := secrets.Operation{
-		SecretId:   secretId,
+		SecretId:   secret.Id,
 		InstanceId: instanceId,
 		Status: secrets.Status{
-			Name:      operationName,
-			Forced:    parameters.Forced,
-			Reason:    parameters.Reason,
-			StartedBy: parameters.StartedBy,
+			Name:             operationName,
+			Forced:           parameters.Forced,
+			Reason:           parameters.Reason,
+			StartedBy:        parameters.StartedBy,
+			ApprovalRequired: approvalRequired,
+			AwaitingApproval: approvalRequired,
 		},
 	}
 	err := tx.QueryRowContext(ctx, `
-		INSERT INTO operation (secretId, instanceId, name, forced, reason, startedBy, startedAt)
-			VALUES (?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO operation (secretId, instanceId, name, forced, reason, startedBy, startedAt, approvalRequired)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 			RETURNING id, startedAt
-	`, secretId, instanceId, operation.Name, operation.Forced, operation.Reason, operation.StartedBy, time.Now()).Scan(&operation.OperationNumber, &operation.StartedAt)
+	`, secret.Id, instanceId, operation.Name, operation.Forced, operation.Reason, operation.StartedBy, time.Now(), approvalRequired).Scan(&operation.OperationNumber, &operation.StartedAt)
 	return operation, err
 }
 
@@ -521,7 +583,7 @@ func completeOperation(ctx context.Context, db *sql.DB, secretId string, instanc
 
 	if processErr != nil {
 		if err := tx.QueryRowContext(dbCtx, `
-			UPDATE operation SET failedAt = ? WHERE id = ? RETURNING failedAt
+			UPDATE operation SET failedAt = ?, proposal = NULL WHERE id = ? RETURNING failedAt
 		`, time.Now(), operation.OperationNumber).Scan(&instance.Status.FailedAt); err != nil {
 			return err
 		}
@@ -535,7 +597,7 @@ func completeOperation(ctx context.Context, db *sql.DB, secretId string, instanc
 		tx.ExecContext(dbCtx, `UPDATE secret SET activeInstanceId = NULL WHERE id = ?`, secretId)
 	}
 	if err := tx.QueryRowContext(dbCtx, `
-		UPDATE operation SET completedAt = ? WHERE id = ? RETURNING completedAt
+		UPDATE operation SET completedAt = ?, proposal = NULL WHERE id = ? RETURNING completedAt
 	`, time.Now(), operation.OperationNumber).Scan(&instance.Status.CompletedAt); err != nil {
 		return err
 	}
@@ -547,6 +609,8 @@ func scanInstances(rows *sql.Rows) (secrets.Instances, error) {
 	for rows.Next() {
 		instance := &secrets.Instance{}
 		var secretBytes []byte
+		var approvalRequired int
+		var proposalJSON sql.NullString
 		if err := rows.Scan(
 			&instance.Id,
 			&secretBytes,
@@ -558,10 +622,16 @@ func scanInstances(rows *sql.Rows) (secrets.Instances, error) {
 			&instance.Status.StartedAt,
 			&instance.Status.CompletedAt,
 			&instance.Status.FailedAt,
+			&approvalRequired,
+			&instance.Status.ApprovedBy,
+			&proposalJSON,
 		); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal(secretBytes, &instance.Secret); err != nil {
+			return nil, err
+		}
+		if err := finishStatus(&instance.Status, approvalRequired != 0, proposalJSON); err != nil {
 			return nil, err
 		}
 		instances[instance.Id] = instance
@@ -573,6 +643,8 @@ func scanOperations(rows *sql.Rows) ([]*secrets.Operation, error) {
 	operations := []*secrets.Operation{}
 	for rows.Next() {
 		operation := &secrets.Operation{}
+		var approvalRequired int
+		var proposalJSON sql.NullString
 		if err := rows.Scan(
 			&operation.OperationNumber,
 			&operation.SecretId,
@@ -584,7 +656,13 @@ func scanOperations(rows *sql.Rows) ([]*secrets.Operation, error) {
 			&operation.StartedAt,
 			&operation.CompletedAt,
 			&operation.FailedAt,
+			&approvalRequired,
+			&operation.ApprovedBy,
+			&proposalJSON,
 		); err != nil {
+			return nil, err
+		}
+		if err := finishStatus(&operation.Status, approvalRequired != 0, proposalJSON); err != nil {
 			return nil, err
 		}
 		operations = append(operations, operation)
