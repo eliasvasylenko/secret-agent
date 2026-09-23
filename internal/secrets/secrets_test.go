@@ -15,8 +15,8 @@ import (
 func TestNew(t *testing.T) {
 	t.Run("success", func(t *testing.T) {
 		secrets, err := New([]*Secret{
-			{Name: "a", Version: 1, Create: command.New("echo a", nil, "")},
-			{Name: "b", Version: 1, Create: command.New("echo b", nil, "")},
+			{Id: "a", Version: 1, Create: command.New("echo a", nil, "")},
+			{Id: "b", Version: 1, Create: command.New("echo b", nil, "")},
 		})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -25,30 +25,30 @@ func TestNew(t *testing.T) {
 			t.Errorf("expected two secrets, got %v", secrets)
 		}
 	})
-	t.Run("empty name", func(t *testing.T) {
-		_, err := New([]*Secret{{Name: ""}})
+	t.Run("empty id", func(t *testing.T) {
+		_, err := New([]*Secret{{Id: ""}})
 		if err == nil {
-			t.Fatal("expected error for empty name")
+			t.Fatal("expected error for empty id")
 		}
-		if fmt.Sprint(err) != "Secret name must not be empty" {
-			t.Errorf("expected empty name error, got %v", err)
+		if fmt.Sprint(err) != "Secret id must not be empty" {
+			t.Errorf("expected empty id error, got %v", err)
 		}
 	})
-	t.Run("duplicate name", func(t *testing.T) {
+	t.Run("duplicate id", func(t *testing.T) {
 		_, err := New([]*Secret{
-			{Name: "x", Version: 1},
-			{Name: "x", Version: 1},
+			{Id: "x", Version: 1},
+			{Id: "x", Version: 1},
 		})
 		if err == nil {
-			t.Fatal("expected error for duplicate name")
+			t.Fatal("expected error for duplicate id")
 		}
-		if fmt.Sprint(err) != "Secret name 'x' must be unique" {
-			t.Errorf("expected duplicate name error, got %v", err)
+		if fmt.Sprint(err) != "Secret id 'x' must be unique" {
+			t.Errorf("expected duplicate id error, got %v", err)
 		}
 	})
 	t.Run("version below 1 rejected", func(t *testing.T) {
 		for _, mv := range []int{-1, 0} {
-			_, err := New([]*Secret{{Name: "x", Version: mv}})
+			_, err := New([]*Secret{{Id: "x", Version: mv}})
 			if err == nil {
 				t.Fatalf("Version %d: expected error", mv)
 			}
@@ -61,7 +61,7 @@ func TestNew(t *testing.T) {
 
 func TestSecrets_MarshalJSON(t *testing.T) {
 	secrets := Secrets{
-		"friend": {Name: "friend", Version: 1, Create: command.New("echo hello", nil, "")},
+		"friend": {Id: "friend", Version: 1, Create: command.New("echo hello", nil, "")},
 	}
 	data, err := json.Marshal(secrets)
 	if err != nil {
@@ -78,18 +78,18 @@ func TestSecrets_MarshalJSON(t *testing.T) {
 
 func TestLoadPlans(t *testing.T) {
 	friend := &Secret{
-		Name:    "friend",
+		Id:      "friend",
 		Version: 1,
 		Create:  command.New("echo hello friend", nil, ""),
 	}
 	dbCreds := &Secret{
-		Name:       "db-creds",
+		Id:         "db-creds",
 		Version:    1,
 		Create:     command.New("openssl rand -base64 32", nil, ""),
-		Destroy:    command.New("rm -f /etc/enrypted-creds/$NAME/$ID.cred", nil, ""),
-		Activate:   command.New("cp -f /etc/enrypted-creds/$NAME/$ID.cred /etc/enrypted-creds/service.cred", nil, ""),
+		Destroy:    command.New("rm -f /etc/enrypted-creds/$SECRET/$INSTANCE.cred", nil, ""),
+		Activate:   command.New("cp -f /etc/enrypted-creds/$SECRET/$INSTANCE.cred /etc/enrypted-creds/service.cred", nil, ""),
 		Deactivate: command.New("rm -f /etc/enrypted-creds/service.cred", nil, ""),
-		Test:       command.New("ssh host -csecret-agent test $NAME $ID", nil, ""),
+		Test:       command.New("ssh host -csecret-agent test $SECRET $INSTANCE", nil, ""),
 	}
 	tests := []struct {
 		file            string
@@ -140,8 +140,8 @@ func TestLoadPlans(t *testing.T) {
 func TestNewInstances(t *testing.T) {
 	t.Run("success", func(t *testing.T) {
 		instances, err := NewInstances([]*Instance{
-			{Id: "id1", Secret: Secret{Name: "s1"}, Status: Status{OperationNumber: 1}},
-			{Id: "id2", Secret: Secret{Name: "s2"}, Status: Status{OperationNumber: 2}},
+			{Id: "id1", Secret: Secret{Id: "s1"}, Status: Status{OperationNumber: 1}},
+			{Id: "id2", Secret: Secret{Id: "s2"}, Status: Status{OperationNumber: 2}},
 		})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -174,7 +174,7 @@ func TestNewInstances(t *testing.T) {
 }
 
 func TestInstances_UnmarshalJSON(t *testing.T) {
-	data := `[{"id":"i1","secret":{"name":"s1","version":1},"status":{"operationNumber":1,"name":"create"}}]`
+	data := `[{"id":"i1","secret":{"id":"s1","version":1},"status":{"operationNumber":1,"name":"create"}}]`
 	var instances Instances
 	err := json.Unmarshal([]byte(data), &instances)
 	if err != nil {
@@ -183,8 +183,8 @@ func TestInstances_UnmarshalJSON(t *testing.T) {
 	if len(instances) != 1 || instances["i1"] == nil {
 		t.Errorf("expected one instance, got %v", instances)
 	}
-	if instances["i1"].Secret.Name != "s1" {
-		t.Errorf("instance secret name = %q", instances["i1"].Secret.Name)
+	if instances["i1"].Secret.Id != "s1" {
+		t.Errorf("instance secret id = %q", instances["i1"].Secret.Id)
 	}
 	if instances["i1"].Secret.Version != 1 {
 		t.Errorf("secret.version = %d, want 1", instances["i1"].Secret.Version)
@@ -193,8 +193,8 @@ func TestInstances_UnmarshalJSON(t *testing.T) {
 
 func TestInstances_MarshalJSON(t *testing.T) {
 	instances := Instances{
-		"id1": {Id: "id1", Secret: Secret{Name: "s1", Version: 1}, Status: Status{OperationNumber: 2}},
-		"id2": {Id: "id2", Secret: Secret{Name: "s2", Version: 1}, Status: Status{OperationNumber: 1}},
+		"id1": {Id: "id1", Secret: Secret{Id: "s1", Version: 1}, Status: Status{OperationNumber: 2}},
+		"id2": {Id: "id2", Secret: Secret{Id: "s2", Version: 1}, Status: Status{OperationNumber: 1}},
 	}
 	data, err := json.Marshal(instances)
 	if err != nil {

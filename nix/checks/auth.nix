@@ -1,14 +1,14 @@
 # Integration test for linux auth. The server derives identity from Unix socket
-# peer credentials and applies role mappings from the claims config.
+# peer credentials and applies role mappings from the bindings config.
 # We verify:
-# - user claims
-# - group claims from peer cred gid
-# - group claims from user groups
+# - user bindings
+# - group bindings from peer cred gid
+# - group bindings from user groups
 # - limited roles
 # - 403 when unmapped
 { self, pkgs, ... }:
 pkgs.testers.runNixOSTest {
-  name = "Claim identity auth";
+  name = "Identify auth";
 
   nodes.machine =
     { config, pkgs, ... }:
@@ -50,12 +50,12 @@ pkgs.testers.runNixOSTest {
           admin.permissions = { all = "any"; };
           reader.permissions = { secrets = "any"; instances = "read"; };
         };
-        claims = {
+        bindings = {
           users = {
             root = "admin";
             "1001" = "admin";
           };
-          # Group claims: primary (peercred) and user's groups (GroupIds) are both matched
+          # Group bindings: primary (peercred) and user's groups (GroupIds) are both matched
           groups = {
             "1001" = "reader";   # testgroup – primary for grouptest
             "1002" = "reader";   # testgroup2 – supplementary for testuser
@@ -78,7 +78,7 @@ pkgs.testers.runNixOSTest {
     with subtest("root has admin role and can list secrets"):
       machine.succeed("secret-agent secrets | grep -q test-secret")
 
-    with subtest("testuser has admin role (from user claim) and can create instance"):
+    with subtest("testuser has admin role (from user binding) and can create instance"):
       machine.succeed("su -s ${pkgs.bash}/bin/bash testuser -c 'secret-agent create test-secret -r auth-test'")
 
     with subtest("nobody has no role and gets 403 on list secrets"):

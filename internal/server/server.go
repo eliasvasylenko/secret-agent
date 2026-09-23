@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/eliasvasylenko/secret-agent/internal/store"
+	"github.com/eliasvasylenko/secret-agent/internal/backend"
 )
 
 type Server struct {
@@ -21,15 +21,15 @@ type ServerConfig struct {
 	Socket        string
 	RequestLimit  uint32
 	RequestWindow time.Duration
-	MaxBytes      int
-	OutputTTL     time.Duration
+	// OutputTTL was the /result poll retention; unused until orphan attach-slot timeout.
+	OutputTTL time.Duration
 }
 
-func New(config ServerConfig, secretStore store.Secrets, permissions *Permissions) *Server {
+func New(config ServerConfig, secretStore backend.Backend, permissions *Permissions) *Server {
 	limiter := NewLimiter(config.RequestLimit, config.RequestWindow)
 	return &Server{
 		config:     config,
-		controller: NewController(secretStore, limiter, permissions, config.MaxBytes, config.OutputTTL),
+		controller: NewController(secretStore, limiter, permissions),
 	}
 }
 

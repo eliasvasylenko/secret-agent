@@ -47,21 +47,21 @@ func TestRolesCheckPermission(t *testing.T) {
 		},
 	}
 	tests := []struct {
-		claims    ClaimedRoles
+		bound     RoleNames
 		perms     Permissions
 		permitted bool
 	}{
-		{ClaimedRoles{"reader"}, Permissions{Secrets: Read}, true},
-		{ClaimedRoles{"reader"}, Permissions{Secrets: Write}, false},
-		{ClaimedRoles{"admin"}, Permissions{Secrets: Write}, true},
-		{ClaimedRoles{"reader", "admin"}, Permissions{Instances: Write}, true},
-		{ClaimedRoles{"reader"}, Permissions{Instances: Read}, false},
+		{RoleNames{"reader"}, Permissions{Secrets: Read}, true},
+		{RoleNames{"reader"}, Permissions{Secrets: Write}, false},
+		{RoleNames{"admin"}, Permissions{Secrets: Write}, true},
+		{RoleNames{"reader", "admin"}, Permissions{Instances: Write}, true},
+		{RoleNames{"reader"}, Permissions{Instances: Read}, false},
 	}
 	for _, tc := range tests {
 		t.Run("", func(t *testing.T) {
-			got := roles.CheckPermission(tc.claims, tc.perms)
+			got := roles.CheckPermission(tc.bound, tc.perms)
 			if got != tc.permitted {
-				t.Errorf("CheckPermission(%v, %v): expected %v, got %v", tc.claims, tc.perms, tc.permitted, got)
+				t.Errorf("CheckPermission(%v, %v): expected %v, got %v", tc.bound, tc.perms, tc.permitted, got)
 			}
 		})
 	}
@@ -71,24 +71,24 @@ func TestRolesAssertPermission(t *testing.T) {
 	roles := Roles{
 		"reader": {Name: "reader", Permissions: Permissions{Secrets: Read}},
 	}
-	if err := roles.AssertPermission(ClaimedRoles{"reader"}, Permissions{Secrets: Read}); err != nil {
+	if err := roles.AssertPermission(RoleNames{"reader"}, Permissions{Secrets: Read}); err != nil {
 		t.Errorf("expected no error, got %v", err)
 	}
-	if err := roles.AssertPermission(ClaimedRoles{"reader"}, Permissions{Secrets: Write}); err == nil {
+	if err := roles.AssertPermission(RoleNames{"reader"}, Permissions{Secrets: Write}); err == nil {
 		t.Error("expected error for denied permission")
 	}
 }
 
-func TestClaimedRolesUnmarshalJSON(t *testing.T) {
+func TestRoleNamesUnmarshalJSON(t *testing.T) {
 	tests := []struct {
 		json string
-		want ClaimedRoles
+		want RoleNames
 	}{
-		{`"admin"`, ClaimedRoles{"admin"}},
-		{`["admin","reader"]`, ClaimedRoles{"admin", "reader"}},
+		{`"admin"`, RoleNames{"admin"}},
+		{`["admin","reader"]`, RoleNames{"admin", "reader"}},
 	}
 	for _, tc := range tests {
-		var got ClaimedRoles
+		var got RoleNames
 		if err := json.Unmarshal([]byte(tc.json), &got); err != nil {
 			t.Errorf("Unmarshal(%s): %v", tc.json, err)
 			continue

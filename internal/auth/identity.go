@@ -3,48 +3,35 @@
 package auth
 
 import (
-	"encoding/json"
-	"errors"
 	"net"
 	"net/http"
-
-	"github.com/eliasvasylenko/secret-agent/internal/marshal"
 )
 
 type Identity struct {
 	Principal string
-	Roles     ClaimedRoles
+	Roles     RoleNames
 }
 
-type Claims struct {
-	PlatformClaims `json:""`
+// Bindings map principals (users, groups, forward-auth hops) to role names.
+type Bindings struct {
+	PlatformBindings `json:""`
+	ForwardAuth      *ForwardAuth `json:"forwardAuth,omitempty"`
 }
 
-func (c *Claims) ClaimIdentity(request *http.Request, connection net.Conn) (*Identity, error) {
-	return c.PlatformClaims.ClaimIdentity(request, connection)
-}
-
-type ClaimedRoles []RoleName
-
-func (c *ClaimedRoles) UnmarshalJSON(p []byte) error {
-	var claimedRole RoleName
-	err1 := json.Unmarshal(p, &claimedRole)
-	if err1 == nil {
-		*c = ClaimedRoles{claimedRole}
-		return nil
+// Identify authenticates the Unix peer, then authorises. If ForwardAuth trusts
+// that peer, the end-user is the name header, not the hop.
+func (b *Bindings) Identify(request *http.Request, connection net.Conn) (*Identity, error) {
+	peer, groups, err := b.PlatformBindings.Authenticate(connection)
+	if err != nil {
+		return nil, err
 	}
-	var temp []RoleName
-	err2 := json.Unmarshal(p, &temp)
-	if err2 != nil {
-		return errors.Join(err1, err2)
+	if b.ForwardAuth.trusts(peer) {
+		name, err := forwardAuthUser(request, b.ForwardAuth.headerName())
+		if err != nil {
+			return nil, err
+		}
+		return b.identityFromForwarded(name)
 	}
-	*c = temp
-	return nil
-}
-
-func (c *ClaimedRoles) MarshalJSON() ([]byte, error) {
-	if len(*c) == 1 {
-		return marshal.JSON((*c)[0])
-	}
-	return marshal.JSON([]RoleName(*c))
+	principal, roles := b.PlatformBindings.Authorise(peer, groups)
+	return &Identity{Principal: principal, Roles: roles}, nil
 }

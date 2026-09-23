@@ -19,7 +19,7 @@ func TestLoadPermissions(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	validBody := `{"roles":{"admin":{"permissions":{"all":"any"}},"reader":{"permissions":{"secrets":"read","instances":"read"}}},"claims":{}}`
+	validBody := `{"roles":{"admin":{"permissions":{"all":"any"}},"reader":{"permissions":{"secrets":"read","instances":"read"}}},"bindings":{}}`
 	validPath := filepath.Join(t.TempDir(), "permissions.json")
 	if err := os.WriteFile(validPath, []byte(validBody), 0600); err != nil {
 		t.Fatal(err)
@@ -89,8 +89,8 @@ func TestLoadPermissions(t *testing.T) {
 	}
 }
 
-func TestPermissions_Middleware_returns401WhenClaimIdentityFails(t *testing.T) {
-	// Use a non-Unix connection so ClaimIdentity fails (e.g. "unexpected socket type" on Linux).
+func TestPermissions_Middleware_returns401WhenIdentifyFails(t *testing.T) {
+	// Use a non-Unix connection so Identify fails (e.g. "unexpected socket type" on Linux).
 	client, server := net.Pipe()
 	defer client.Close()
 	defer server.Close()

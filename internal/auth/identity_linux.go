@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"maps"
 	"net"
-	"net/http"
 	"os/user"
 	"slices"
 	"strconv"
@@ -14,57 +13,44 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// PlatformClaims are the platform-specific claims that are obtained from unix socket peercreds
-type PlatformClaims struct {
-	Users  map[Entity]ClaimedRoles `json:"users,omitempty"`
-	Groups map[Entity]ClaimedRoles `json:"groups,omitempty"`
+// PlatformBindings map local users and groups to roles. This is the Linux
+// implementation: identity of the socket peer comes from SO_PEERCRED, not the
+// HTTP request. Other platforms would define the same type differently.
+type PlatformBindings struct {
+	Users  map[Entity]RoleNames `json:"users,omitempty"`
+	Groups map[Entity]RoleNames `json:"groups,omitempty"`
 }
 
-// getClaimedRolesFromMap returns the union of ClaimedRoles for all entities in m
-// that match (id, name).
-func addClaimedRoles(authorisedRoles map[RoleName]struct{}, claims map[Entity]ClaimedRoles, id string, name string) {
-	for entity, roles := range claims {
+func addRoleNames(bound map[RoleName]struct{}, bindings map[Entity]RoleNames, id string, name string) {
+	for entity, roles := range bindings {
 		if entity.matches(id, name) {
 			for _, role := range roles {
-				authorisedRoles[role] = struct{}{}
+				bound[role] = struct{}{}
 			}
 		}
 	}
 }
 
-// Claim the identity of the caller from the socket connection.
-func (c *PlatformClaims) ClaimIdentity(request *http.Request, connection net.Conn) (*Identity, error) {
-	user, groups, err := c.authenticate(connection)
-	if err != nil {
-		return nil, err
+func (b *PlatformBindings) Authorise(u *user.User, groups []*user.Group) (string, RoleNames) {
+	bound := make(map[RoleName]struct{})
+	if b.Users != nil {
+		addRoleNames(bound, b.Users, u.Uid, u.Username)
 	}
-	principal, roles := c.authorise(user, groups)
-	return &Identity{Principal: principal, Roles: roles}, nil
-}
-
-// Authorise resolves the principal and roles for the authenticated user and groups from the claims config.
-func (c *PlatformClaims) authorise(user *user.User, groups []*user.Group) (string, ClaimedRoles) {
-	authorisedRoles := make(map[RoleName]struct{})
-	if c.Users != nil {
-		addClaimedRoles(authorisedRoles, c.Users, user.Uid, user.Username)
-	}
-	if c.Groups != nil {
+	if b.Groups != nil {
 		for _, group := range groups {
-			addClaimedRoles(authorisedRoles, c.Groups, group.Gid, group.Name)
+			addRoleNames(bound, b.Groups, group.Gid, group.Name)
 		}
 	}
 
-	principal := fmt.Sprintf("linux:%s/%s", user.Username, user.Uid)
-	roles := slices.Collect(maps.Keys(authorisedRoles))
+	principal := fmt.Sprintf("linux:%s/%s", u.Username, u.Uid)
+	roles := slices.Collect(maps.Keys(bound))
 
 	return principal, roles
 }
 
-// Authenticate establishes the caller's user and groups from the socket peer credentials.
-func (c *PlatformClaims) authenticate(connection net.Conn) (*user.User, []*user.Group, error) {
+func (b *PlatformBindings) Authenticate(connection net.Conn) (*user.User, []*user.Group, error) {
 	var cred *unix.Ucred
 
-	// Get Raw socket connection
 	uc, ok := connection.(*net.UnixConn)
 	if !ok {
 		return nil, nil, fmt.Errorf("unexpected socket type")
@@ -74,7 +60,6 @@ func (c *PlatformClaims) authenticate(connection net.Conn) (*user.User, []*user.
 		return nil, nil, fmt.Errorf("error opening raw connection: %w", err)
 	}
 
-	// Get socket credentials
 	controlErr := raw.Control(func(fd uintptr) {
 		cred, err = unix.GetsockoptUcred(int(fd),
 			unix.SOL_SOCKET,
@@ -87,29 +72,55 @@ func (c *PlatformClaims) authenticate(connection net.Conn) (*user.User, []*user.
 		return nil, nil, fmt.Errorf("failed to control socket: %w", controlErr)
 	}
 
-	// Lookup authenticated user
 	authenticatedUser, err := user.LookupId(strconv.FormatUint(uint64(cred.Uid), 10))
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to lookup credential user: %w", err)
 	}
 
-	authenticatedGroup, err := user.LookupGroupId(strconv.FormatUint(uint64(cred.Gid), 10))
+	groups, err := groupsOf(authenticatedUser)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to lookup credential group: %w", err)
+		return nil, nil, err
 	}
-
-	authenticatedGroups := []*user.Group{authenticatedGroup}
-	gids, err := authenticatedUser.GroupIds()
+	groups, err = withPeerGid(groups, cred.Gid)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to find user groups: %w", err)
+		return nil, nil, err
+	}
+	return authenticatedUser, groups, nil
+}
+
+func withPeerGid(groups []*user.Group, peerGid uint32) ([]*user.Group, error) {
+	gid := strconv.FormatUint(uint64(peerGid), 10)
+	for _, g := range groups {
+		if g.Gid == gid {
+			return groups, nil
+		}
+	}
+	g, err := user.LookupGroupId(gid)
+	if err != nil {
+		return nil, fmt.Errorf("failed to lookup peer group: %w", err)
+	}
+	return append([]*user.Group{g}, groups...), nil
+}
+
+func groupsOf(u *user.User) ([]*user.Group, error) {
+	var groups []*user.Group
+	if u.Gid != "" {
+		authenticatedGroup, err := user.LookupGroupId(u.Gid)
+		if err != nil {
+			return nil, fmt.Errorf("failed to lookup credential group: %w", err)
+		}
+		groups = append(groups, authenticatedGroup)
+	}
+	gids, err := u.GroupIds()
+	if err != nil {
+		return nil, fmt.Errorf("failed to find user groups: %w", err)
 	}
 	for _, gid := range gids {
 		group, err := user.LookupGroupId(gid)
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to lookup user group: %w", err)
+			return nil, fmt.Errorf("failed to lookup user group: %w", err)
 		}
-		authenticatedGroups = append(authenticatedGroups, group)
+		groups = append(groups, group)
 	}
-
-	return authenticatedUser, authenticatedGroups, nil
+	return groups, nil
 }

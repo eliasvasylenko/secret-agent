@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
-	"strings"
 
 	"github.com/eliasvasylenko/secret-agent/internal/marshal"
 )
@@ -25,7 +24,7 @@ type Command struct {
 }
 
 type Stdio struct {
-	Stdin  string
+	Stdin  io.Reader
 	Stdout io.Writer
 	Stderr io.Writer
 }
@@ -73,14 +72,32 @@ func (c *Command) Process(ctx context.Context, stdio Stdio, environment Environm
 	subProcess.Env = append(subProcess.Env, env.Render()...)
 	c.CommandOptions.Apply(subProcess)
 
-	subProcess.Stdin = strings.NewReader(stdio.Stdin)
+	var stdinPipe io.WriteCloser
+	if stdio.Stdin != nil {
+		stdinPipe, err = subProcess.StdinPipe()
+		if err != nil {
+			return fmt.Errorf("process failed '%v' - %s", c, err.Error())
+		}
+	}
 	subProcess.Stdout = stdio.Stdout
 	subProcess.Stderr = stdio.Stderr
 
-	err = subProcess.Run()
-	if err != nil {
+	if err := subProcess.Start(); err != nil {
 		return fmt.Errorf("process failed '%v' - %s", c, err.Error())
 	}
 
+	if stdinPipe != nil {
+		go func() {
+			_, _ = io.Copy(stdinPipe, stdio.Stdin)
+			stdinPipe.Close()
+		}()
+	}
+
+	waitErr := subProcess.Wait()
+	stopStdinCopy(stdio.Stdin, stdinPipe)
+
+	if waitErr != nil {
+		return fmt.Errorf("process failed '%v' - %s", c, waitErr.Error())
+	}
 	return nil
 }

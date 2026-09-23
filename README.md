@@ -17,6 +17,14 @@ Instead secret-agent declares only the secret **plans** (i.e. the scripts that d
 
 Homelabbers using NixOS. People who are willing to take a risk on something immature if it's interesting.
 
+## Architecture docs
+
+- [design.md](docs/design.md) — settled constraints, `Backend` / `Handle` contract
+- [plan.md](docs/plan.md) — local-agent migration (Phases 0–7, complete)
+- [plan-remote.md](docs/plan-remote.md) — remote secrets and authentication (next)
+- [plan-federation.md](docs/plan-federation.md) — federation and `Proposer` (parked)
+- [http-api.md](docs/http-api.md) — HTTP routes and wire JSON types
+
 ## How it works
 
 The secret-agent NixOS module will: 
@@ -46,9 +54,9 @@ The secret-agent service will:
 
    By default the `root` user and `secret-agent` group have the `admin` role with all permissions.
 
-   Users and groups are mapped to roles via `serices.secret-agent.roles`, and roles are mapped to permission sets via `services.secret-agent.claims`.
+   Users and groups are mapped to roles via `services.secret-agent.bindings`, and roles are mapped to permission sets via `services.secret-agent.roles`.
 
-1. **Rebuild and switch** and the CLI will be available on the system (with `CLIENT_SOCKET` set to the service socket).
+1. **Rebuild and switch** and the CLI will be available on the system (with `CLIENT_ADDRESS` set to the service socket).
 
 1. **Provision and activate an instance**:
 

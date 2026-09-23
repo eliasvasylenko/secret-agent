@@ -1,7 +1,6 @@
 package server
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,21 +22,21 @@ type httpError struct {
 	Message string `json:"message"`
 }
 
-type StreamResponse struct {
-	Data     []byte `json:"data,omitempty"`
-	Complete bool   `json:"complete"`
-}
-
 func NewErrorResponse(code int, err error) *ErrorResponse {
-	return &ErrorResponse{HttpError: &httpError{Code: code, Message: err.Error()}, Headers: make(map[string]string)}
+	var message string
+	if err != nil {
+		message = err.Error()
+	} else {
+		message = http.StatusText(code)
+	}
+	return &ErrorResponse{HttpError: &httpError{Code: code, Message: message}, Headers: make(map[string]string)}
 }
 
 func (r *ErrorResponse) Error() string {
 	if r.HttpError.Message == "" {
 		return fmt.Sprintf("%v %s", r.HttpError.Code, http.StatusText(r.HttpError.Code))
-	} else {
-		return fmt.Sprintf("%v %s - %s", r.HttpError.Code, http.StatusText(r.HttpError.Code), r.HttpError.Message)
 	}
+	return fmt.Sprintf("%v %s - %s", r.HttpError.Code, http.StatusText(r.HttpError.Code), r.HttpError.Message)
 }
 
 func writeResult(w http.ResponseWriter, value any, statusCode int) error {
@@ -68,13 +67,13 @@ func writeError(w http.ResponseWriter, err error) error {
 	return writeResult(w, response, response.HttpError.Code)
 }
 
-func writeBytes(ctx context.Context, w http.ResponseWriter, stream Stream, fromByte int, maxBytes int) error {
-	data := make([]byte, maxBytes)
-	reader := stream.Reader(ctx)
-	n, err := reader.ReadAt(data, int64(fromByte))
-	if err != nil && err != io.EOF {
-		return writeError(w, err)
+func readBody(r *http.Request, v any) error {
+	bytes, err := io.ReadAll(r.Body)
+	if err == nil {
+		err = json.Unmarshal(bytes, v)
 	}
-	response := StreamResponse{Data: data[:n], Complete: err == io.EOF}
-	return writeResult(w, response, http.StatusOK)
+	if err != nil {
+		return NewErrorResponse(http.StatusBadRequest, err)
+	}
+	return nil
 }

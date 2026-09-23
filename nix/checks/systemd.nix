@@ -12,18 +12,18 @@ let
       PATH = pkgs.lib.makeBinPath (with pkgs; [ coreutils ]);
     };
     create = ''
-      mkdir -p "$STAGING/$NAME"
-      echo password123 > "$STAGING/$NAME/$ID"
+      mkdir -p "$STAGING/$SECRET"
+      echo password123 > "$STAGING/$SECRET/$INSTANCE"
     '';
     activate = ''
       mkdir -p "$STORE"
-      cp "$STAGING/$NAME/$ID" "$STORE/$NAME.cred"
+      cp "$STAGING/$SECRET/$INSTANCE" "$STORE/$SECRET.cred"
     '';
     deactivate = ''
-      rm "$STORE/$NAME.cred"
+      rm "$STORE/$SECRET.cred"
     '';
     destroy = ''
-      rm "$STAGING/$NAME/$ID"
+      rm "$STAGING/$SECRET/$INSTANCE"
     '';
   };
   encryptedSecret = simpleSecret // {
@@ -33,8 +33,8 @@ let
       PATH = pkgs.lib.makeBinPath (with pkgs; [ coreutils systemd ]);
     };
     create = ''
-      mkdir -p "$STAGING/$NAME"
-      echo password123 | systemd-creds encrypt --name "$NAME.cred" - "$STAGING/$NAME/$ID"
+      mkdir -p "$STAGING/$SECRET"
+      echo password123 | systemd-creds encrypt --name "$SECRET.cred" - "$STAGING/$SECRET/$INSTANCE"
     '';
   };
 in
@@ -88,6 +88,7 @@ pkgs.testers.runNixOSTest {
 
     start_all()
     machine.wait_for_unit("sockets.target")
+    machine.succeed("systemd-creds setup")
 
     with subtest("no creds"):
       machine.succeed("systemctl start credential-consumer")

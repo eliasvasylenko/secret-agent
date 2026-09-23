@@ -90,7 +90,7 @@ let
   # Options for the secret agent service
   secret-agent = {
     enable = lib.mkEnableOption "secret agent";
-    package = lib.mkPackageOption packages.${pkgs.system} "secret-agent" {
+    package = lib.mkPackageOption packages.${pkgs.stdenv.hostPlatform.system} "secret-agent" {
       default = "default";
     };
     roles = lib.mkOption {
@@ -109,7 +109,7 @@ let
         all = "any";
       };
     };
-    claims = {
+    bindings = {
       users = lib.mkOption {
         description = "Users and the roles they can assume";
         type = stringOrStrings;
@@ -119,6 +119,23 @@ let
         description = "Groups and the roles they can assume";
         type = stringOrStrings;
         default.secret-agent = "admin";
+      };
+      forwardAuth = {
+        peers = lib.mkOption {
+          description = ''
+            Unix peers allowed to assert the end-user via HTTP header (typically
+            the reverse-proxy user, e.g. `caddy`). The header is ignored unless
+            `SO_PEERCRED` matches one of these names or uids.
+          '';
+          type = lib.types.listOf lib.types.str;
+          default = [ ];
+          example = [ "caddy" ];
+        };
+        header = lib.mkOption {
+          description = "Header a trusted hop uses to name the end user.";
+          type = lib.types.str;
+          default = "X-Secret-Agent-User";
+        };
       };
     };
     secrets = lib.mkOption {
@@ -160,11 +177,11 @@ let
   # Map the nix secrets config into a service secrets config
   makeSecretsConfig =
     secrets:
-    lib.lists.sortOn ({ name, ... }: name) (
+    lib.lists.sortOn (s: s.id) (
       lib.attrsets.mapAttrsToList (
         name: secret:
         lib.attrsets.filterAttrs (n: v: v != null) {
-          inherit name;
+          id = name;
           version = secret.version;
           environment = secret.environment;
           create = makeCommandConfig secret.create;
@@ -179,8 +196,14 @@ let
   # Write the permissions config file for the service backend
   permissionsFile = pkgs.writeText "permissions.config" (
     builtins.toJSON {
-      claims = {
-        inherit (cfg.claims) users groups;
+      bindings = {
+        inherit (cfg.bindings) users groups;
+      }
+      // lib.optionalAttrs (cfg.bindings.forwardAuth.peers != [ ]) {
+        forwardAuth = {
+          peers = cfg.bindings.forwardAuth.peers;
+          header = cfg.bindings.forwardAuth.header;
+        };
       };
       inherit (cfg) roles;
     }
@@ -222,7 +245,7 @@ in
         nativeBuildInputs = (prevAttrs.nativeBuildInputs or [ ]) ++ [ pkgs.makeBinaryWrapper ];
         postInstall = (prevAttrs.postInstall or "") + ''
           wrapProgram $out/bin/secret-agent \
-            --set CLIENT_SOCKET /tmp/secret-agent.socket
+            --set CLIENT_ADDRESS /tmp/secret-agent.socket
         '';
       }))
     ];

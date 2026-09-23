@@ -32,8 +32,8 @@ func (p OperationParameters) Validate(maxReasonLength int) error {
 // Execute runs the command for the given operation on the secret.
 func Execute(ctx context.Context, secret *secrets.Secret, operation secrets.OperationName, stdio command.Stdio, parameters OperationParameters, instanceId string) error {
 	parameters.Env = secret.Environment.ExpandAndMergeWith(command.Environment{
-		"ID":         instanceId,
-		"NAME":       secret.Name,
+		"INSTANCE":   instanceId,
+		"SECRET":     secret.Id,
 		"FORCE":      strconv.FormatBool(parameters.Forced),
 		"REASON":     parameters.Reason,
 		"STARTED_BY": parameters.StartedBy,

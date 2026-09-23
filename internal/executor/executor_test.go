@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 	"testing"
 
 	"github.com/eliasvasylenko/secret-agent/internal/command"
@@ -16,18 +17,29 @@ type processCommandCall struct {
 	Env    command.Environment
 }
 
+func stdinString(r io.Reader) string {
+	if r == nil {
+		return ""
+	}
+	b, err := io.ReadAll(r)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
 func TestExecute(t *testing.T) {
 	ctx := context.Background()
 	var call processCommandCall
 	saved := processCommand
 	processCommand = func(cmd *command.Command, _ context.Context, stdio command.Stdio, env command.Environment) error {
-		call = processCommandCall{Script: cmd.Script, Stdin: stdio.Stdin, Env: env}
+		call = processCommandCall{Script: cmd.Script, Stdin: stdinString(stdio.Stdin), Env: env}
 		return nil
 	}
 	defer func() { processCommand = saved }()
 
 	s := &secrets.Secret{
-		Name:   "test-secret",
+		Id:     "test-secret",
 		Create: command.New("echo -n", nil, ""),
 	}
 	stdio := command.Stdio{Stdout: io.Discard, Stderr: io.Discard}
@@ -41,7 +53,7 @@ func TestExecute(t *testing.T) {
 	if call.Stdin != "" {
 		t.Errorf("processCommand called with Stdin = %q, want %q", call.Stdin, "")
 	}
-	wantEnv := map[string]string{"ID": "inst-1", "NAME": "test-secret", "FORCE": "false", "REASON": "", "STARTED_BY": ""}
+	wantEnv := map[string]string{"INSTANCE": "inst-1", "SECRET": "test-secret", "FORCE": "false", "REASON": "", "STARTED_BY": ""}
 	for k, v := range wantEnv {
 		if call.Env[k] != v {
 			t.Errorf("processCommand Env[%q] = %q, want %q", k, call.Env[k], v)
@@ -54,20 +66,20 @@ func TestExecute_withEnv(t *testing.T) {
 	var call processCommandCall
 	saved := processCommand
 	processCommand = func(cmd *command.Command, _ context.Context, stdio command.Stdio, env command.Environment) error {
-		call = processCommandCall{Script: cmd.Script, Stdin: stdio.Stdin, Env: env}
+		call = processCommandCall{Script: cmd.Script, Stdin: stdinString(stdio.Stdin), Env: env}
 		return nil
 	}
 	defer func() { processCommand = saved }()
 
 	s := &secrets.Secret{
-		Name:   "test-secret",
+		Id:     "test-secret",
 		Create: command.New("create-script", nil, ""),
 	}
 	params := OperationParameters{
 		Reason:    "test",
 		StartedBy: "tests",
 	}
-	stdio := command.Stdio{Stdin: "stdin", Stdout: io.Discard, Stderr: io.Discard}
+	stdio := command.Stdio{Stdin: strings.NewReader("stdin"), Stdout: io.Discard, Stderr: io.Discard}
 	err := Execute(ctx, s, secrets.Create, stdio, params, "inst-1")
 	if err != nil {
 		t.Fatalf("Execute with env: %v", err)
@@ -78,8 +90,8 @@ func TestExecute_withEnv(t *testing.T) {
 	if call.Stdin != "stdin" {
 		t.Errorf("processCommand Stdin = %q, want stdin", call.Stdin)
 	}
-	if call.Env["NAME"] != "test-secret" {
-		t.Errorf("processCommand Env[NAME] = %q, want test-secret", call.Env["NAME"])
+	if call.Env["SECRET"] != "test-secret" {
+		t.Errorf("processCommand Env[SECRET] = %q, want test-secret", call.Env["SECRET"])
 	}
 	if call.Env["REASON"] != "test" || call.Env["STARTED_BY"] != "tests" {
 		t.Errorf("processCommand Env REASON=%q STARTED_BY=%q, want test, tests", call.Env["REASON"], call.Env["STARTED_BY"])
@@ -96,7 +108,7 @@ func TestExecute_noCommandForOp(t *testing.T) {
 	}
 	defer func() { processCommand = saved }()
 
-	s := &secrets.Secret{Name: "no-cmds"}
+	s := &secrets.Secret{Id: "no-cmds"}
 	stdio := command.Stdio{Stdout: io.Discard, Stderr: io.Discard}
 	err := Execute(ctx, s, secrets.Create, stdio, OperationParameters{}, "id")
 	if err != nil {
@@ -116,7 +128,7 @@ func TestExecute_returnsCommandError(t *testing.T) {
 	}
 	defer func() { processCommand = saved }()
 
-	s := &secrets.Secret{Name: "x", Create: command.New("script", nil, "")}
+	s := &secrets.Secret{Id: "x", Create: command.New("script", nil, "")}
 	stdio := command.Stdio{Stdout: io.Discard, Stderr: io.Discard}
 	err := Execute(ctx, s, secrets.Create, stdio, OperationParameters{}, "id")
 	if err != wantErr {
@@ -126,8 +138,8 @@ func TestExecute_returnsCommandError(t *testing.T) {
 
 func TestExecute_noCommand(t *testing.T) {
 	ctx := context.Background()
-	s := &secrets.Secret{Name: "leaf"}
-	stdio := command.Stdio{Stdin: "input", Stdout: io.Discard, Stderr: io.Discard}
+	s := &secrets.Secret{Id: "leaf"}
+	stdio := command.Stdio{Stdin: strings.NewReader("input"), Stdout: io.Discard, Stderr: io.Discard}
 	err := Execute(ctx, s, secrets.Create, stdio, OperationParameters{}, "id")
 	if err != nil {
 		t.Errorf("Execute with no command for op should succeed (no-op): %v", err)

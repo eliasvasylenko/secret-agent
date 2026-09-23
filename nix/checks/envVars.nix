@@ -21,8 +21,8 @@ pkgs.testers.runNixOSTest {
             PATH = pkgs.lib.makeBinPath (with pkgs; [ coreutils ]);
           };
           create = ''
-            mkdir -p "/etc/$NAME"
-            printenv > "/etc/$NAME/$ID.cred"
+            mkdir -p "/etc/$SECRET"
+            printenv > "/etc/$SECRET/$INSTANCE.cred"
           '';
         };
       };
@@ -49,8 +49,8 @@ pkgs.testers.runNixOSTest {
     with subtest("root env vars"):
       rootOutput = parse(machine.succeed("cat /etc/root/*.cred"))
       rootExpected = {
-        "ID": rootOutput["ID"],
-        "NAME": "root",
+        "INSTANCE": rootOutput["INSTANCE"],
+        "SECRET": "root",
         "FORCE": "false",
         "REASON": "reason",
         "VAR1": "test1",
