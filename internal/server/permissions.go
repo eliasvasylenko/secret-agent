@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -24,6 +25,37 @@ func identityFromContext(ctx context.Context) *auth.Identity {
 		return nil
 	}
 	return identity
+}
+
+// permitFunc reports whether the route's permission set allows one secret.
+type permitFunc func(secretID string) bool
+
+type permitKey struct{}
+
+func contextWithPermit(ctx context.Context, permit permitFunc) context.Context {
+	return context.WithValue(ctx, permitKey{}, permit)
+}
+
+func permitFromContext(ctx context.Context) permitFunc {
+	permit, _ := ctx.Value(permitKey{}).(permitFunc)
+	return permit
+}
+
+func permitted(r *http.Request, secretID string) bool {
+	permit := permitFromContext(r.Context())
+	return permit != nil && permit(secretID)
+}
+
+func requirePermit(w http.ResponseWriter, r *http.Request, secretID string) bool {
+	if permitted(r, secretID) {
+		return true
+	}
+	var roles auth.RoleNames
+	if identity := identityFromContext(r.Context()); identity != nil {
+		roles = identity.Roles
+	}
+	writeError(w, NewErrorResponse(http.StatusForbidden, fmt.Errorf("operation not permitted with roles %v", roles)))
+	return false
 }
 
 func LoadPermissions(permissionsFileName string) (*Permissions, error) {
@@ -52,13 +84,18 @@ func (p *Permissions) Middleware(permissions auth.Permissions, next http.Handler
 			return
 		}
 
-		err = p.Roles.AssertPermission(identity.Roles, permissions)
+		// No secret yet: the action must be granted globally or on some secret.
+		err = p.Roles.AssertPermission(identity.Roles, permissions, "")
 		if err != nil {
 			writeError(w, NewErrorResponse(http.StatusForbidden, err))
 			return
 		}
 
-		r = r.WithContext(context.WithValue(r.Context(), identityKey{}, identity))
-		next.ServeHTTP(w, r)
+		permit := func(secretID string) bool {
+			return p.Roles.CheckPermission(identity.Roles, permissions, secretID)
+		}
+		ctx := context.WithValue(r.Context(), identityKey{}, identity)
+		ctx = contextWithPermit(ctx, permit)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
