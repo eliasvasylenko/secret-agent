@@ -32,6 +32,9 @@ func parseAttachStream(name string) (attachStream, error) {
 
 func (s *Controller) attachSecret(w http.ResponseWriter, r *http.Request) {
 	secretId := r.PathValue("secretId")
+	if !requirePermit(w, r, secretId) {
+		return
+	}
 	stream, err := parseAttachStream(r.PathValue("stream"))
 	if err != nil {
 		writeError(w, err)

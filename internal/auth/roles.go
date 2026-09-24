@@ -42,13 +42,16 @@ func (r RoleNames) MarshalJSON() ([]byte, error) {
 	return marshal.JSON([]RoleName(r))
 }
 
-// A role and its permissions
+// A role and its permissions.
+// Name is the key in the roles object, not a field of it.
+// Secrets grants a permission set on one secret. Permissions still apply to every secret.
 type Role struct {
-	Name        RoleName    `json:"name"`
-	Permissions Permissions `json:"permissions"`
+	Name        RoleName               `json:"-"`
+	Permissions Permissions            `json:"permissions"`
+	Secrets     map[string]Permissions `json:"secrets,omitempty"`
 }
 
-// A set of permissions
+// A set of permissions. A subject or action outside the known constants is rejected at load.
 type Permissions map[Subject]Action
 
 // Subjects which can be acted upon
@@ -77,6 +80,27 @@ const (
 	Write Action = "write"
 )
 
+func (p *Permissions) UnmarshalJSON(data []byte) error {
+	var raw map[Subject]Action
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	for subject, action := range raw {
+		switch subject {
+		case All, Secrets, Instances:
+		default:
+			return fmt.Errorf("invalid subject %q", subject)
+		}
+		switch action {
+		case Any, List, Read, Write:
+		default:
+			return fmt.Errorf("invalid action %q", action)
+		}
+	}
+	*p = raw
+	return nil
+}
+
 func Load(rolesFileName string) (Roles, error) {
 	rolesFile, err := os.Open(rolesFileName)
 	if err != nil {
@@ -98,67 +122,71 @@ func Load(rolesFileName string) (Roles, error) {
 }
 
 func (r *Roles) UnmarshalJSON(p []byte) error {
-	rolePermissions := make(map[RoleName]struct {
-		Permissions `json:"permissions"`
-	}, 0)
-	if err := json.Unmarshal(p, &rolePermissions); err != nil {
+	parsed := make(map[RoleName]Role, 0)
+	if err := json.Unmarshal(p, &parsed); err != nil {
 		return err
 	}
 	*r = Roles{}
-	for name, permissions := range rolePermissions {
+	for name, role := range parsed {
 		if name == "" {
 			return fmt.Errorf("Failed to parse role name")
 		}
-		(*r)[name] = Role{
-			Name:        name,
-			Permissions: permissions.Permissions,
-		}
+		role.Name = name
+		(*r)[name] = role
 	}
 	return nil
 }
 
 func (r Roles) MarshalJSON() ([]byte, error) {
-	rolePermissions := make(map[RoleName]struct {
-		Permissions `json:"permissions"`
-	}, 0)
+	docs := make(map[RoleName]Role, len(r))
 	for _, role := range r {
-		rolePermissions[role.Name] = struct {
-			Permissions "json:\"permissions\""
-		}{role.Permissions}
+		docs[role.Name] = role
 	}
-	return marshal.JSON(rolePermissions)
+	return marshal.JSON(docs)
 }
 
 // AssertPermission checks if the bound roles include the given permissions.
-func (r Roles) AssertPermission(bound RoleNames, permissions Permissions) error {
-	ok := r.CheckPermission(bound, permissions)
-	if !ok {
-		return fmt.Errorf("operation not permitted with roles %v", bound)
+func (r Roles) AssertPermission(bound RoleNames, permissions Permissions, secretID string) error {
+	if r.CheckPermission(bound, permissions, secretID) {
+		return nil
 	}
-
-	return nil
+	return fmt.Errorf("operation not permitted with roles %v", bound)
 }
 
-// CheckPermission checks if the bound roles include the given permissions.
-func (r Roles) CheckPermission(bound RoleNames, permissions Permissions) bool {
+// CheckPermission reports whether one bound role grants every subject in permissions.
+// The role's own permissions apply to every secret. A per-secret map applies to that secret.
+// An empty secretID matches when any of those grants does.
+func (r Roles) CheckPermission(bound RoleNames, permissions Permissions, secretID string) bool {
 	for _, roleName := range bound {
 		role := r[roleName]
-		allPermitted := true
-		for subject, action := range permissions {
-			if !role.CheckPermission(subject, action) && !role.CheckPermission(All, action) {
-				allPermitted = false
-				break
-			}
-		}
-		if allPermitted {
+		if role.allows(permissions, secretID) {
 			return true
+		}
+		if secretID != "" {
+			continue
+		}
+		for id := range role.Secrets {
+			if role.allows(permissions, id) {
+				return true
+			}
 		}
 	}
 	return false
 }
 
-// CheckPermission checks if the given role has the given permission.
-func (r Role) CheckPermission(subject Subject, action Action) bool {
-	permittedAction, ok := r.Permissions[subject]
-	return ok && (permittedAction == action || permittedAction == Any)
+func (role Role) allows(permissions Permissions, secretID string) bool {
+	for subject, action := range permissions {
+		if !role.Permissions.matches(subject, action) && !role.Secrets[secretID].matches(subject, action) {
+			return false
+		}
+	}
+	return true
+}
+
+func (p Permissions) matches(subject Subject, action Action) bool {
+	if permitted, ok := p[subject]; ok && (permitted == action || permitted == Any) {
+		return true
+	}
+	permitted, ok := p[All]
+	return ok && (permitted == action || permitted == Any)
 }

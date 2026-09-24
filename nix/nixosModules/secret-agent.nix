@@ -115,8 +115,19 @@ let
         attrsOf (submodule {
           options = {
             permissions = lib.mkOption {
-              description = "The permissions assigned to a role";
+              description = "Actions granted on every secret. Subjects are all, secrets, and instances.";
               type = stringOrStrings;
+              default = { };
+            };
+            secrets = lib.mkOption {
+              description = ''
+                Permissions for named secrets. Each value has the same shape as
+                `permissions` and applies only to that secret.
+                Global permissions still apply to every secret.
+              '';
+              type = lib.types.attrsOf stringOrStrings;
+              default = { };
+              example.secret-a.all = "any";
             };
           };
         });

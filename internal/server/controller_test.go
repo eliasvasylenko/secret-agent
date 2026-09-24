@@ -35,10 +35,38 @@ type noopPermissions struct {
 
 func (p noopPermissions) Middleware(_ auth.Permissions, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
 		if p.identity != nil {
-			r = r.WithContext(context.WithValue(r.Context(), identityKey{}, p.identity))
+			ctx = context.WithValue(ctx, identityKey{}, p.identity)
 		}
-		next.ServeHTTP(w, r)
+		ctx = contextWithPermit(ctx, func(string) bool { return true })
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+type staticPermissions struct {
+	identity *auth.Identity
+	roles    auth.Roles
+}
+
+func (p staticPermissions) Middleware(perms auth.Permissions, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var roles auth.RoleNames
+		if p.identity != nil {
+			roles = p.identity.Roles
+		}
+		if err := p.roles.AssertPermission(roles, perms, ""); err != nil {
+			writeError(w, NewErrorResponse(http.StatusForbidden, err))
+			return
+		}
+		ctx := r.Context()
+		if p.identity != nil {
+			ctx = context.WithValue(ctx, identityKey{}, p.identity)
+		}
+		ctx = contextWithPermit(ctx, func(secretID string) bool {
+			return p.roles.CheckPermission(roles, perms, secretID)
+		})
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
@@ -159,6 +187,156 @@ func TestController_listSecrets(t *testing.T) {
 	if !cmp.Equal(got, want, cmp.AllowUnexported(secrets.Secret{})) {
 		t.Errorf("response:\n%s", cmp.Diff(want, got, cmp.AllowUnexported(secrets.Secret{})))
 	}
+}
+
+func TestController_secretGrantAllowsOneSecret(t *testing.T) {
+	identity := &auth.Identity{Principal: "linux:john/1000", Roles: auth.RoleNames{"payroll"}}
+	roles := auth.Roles{
+		"payroll": {Name: "payroll", Secrets: map[string]auth.Permissions{"secret-a": {auth.All: auth.Any}}},
+	}
+
+	t.Run("list hides the other secret", func(t *testing.T) {
+		mockBackend := &mocks.MockBackend{}
+		defer mockBackend.Mock.Validate(t)
+		mockCatalog := &mocks.MockCatalog{}
+		defer mockCatalog.Mock.Validate(t)
+		mockSecrets := &mocks.MockSecrets{}
+		defer mockSecrets.Mock.Validate(t)
+		expectCatalog(mockBackend, mockCatalog)
+		mocks.Expect(&mockCatalog.Mock, mockCatalog.Secrets, func() backend.Secrets { return mockSecrets })
+		mocks.Expect(&mockSecrets.Mock, mockSecrets.List, func(ctx context.Context) (secrets.Secrets, error) {
+			return secrets.Secrets{
+				"secret-a": {Id: "secret-a", Version: 1},
+				"secret-b": {Id: "secret-b", Version: 1},
+			}, nil
+		})
+
+		c := NewController(mockBackend, noopLimiter{}, staticPermissions{identity: identity, roles: roles})
+		mux := http.NewServeMux()
+		c.buildHandler(mux.Handle)
+
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "http://test/secrets", nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200\n%s", rec.Code, rec.Body.Bytes())
+		}
+		var got ItemsResponse[secrets.Secrets]
+		if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if _, ok := got.Items["secret-a"]; !ok {
+			t.Errorf("secret-a missing: %v", got.Items)
+		}
+		if _, ok := got.Items["secret-b"]; ok {
+			t.Errorf("secret-b visible: %v", got.Items)
+		}
+	})
+
+	t.Run("read and write A, refuse B", func(t *testing.T) {
+		mockBackend := &mocks.MockBackend{}
+		defer mockBackend.Mock.Validate(t)
+		mockCatalog := &mocks.MockCatalog{}
+		defer mockCatalog.Mock.Validate(t)
+		mockSecrets := &mocks.MockSecrets{}
+		defer mockSecrets.Mock.Validate(t)
+		expectCatalog(mockBackend, mockCatalog)
+		mocks.Expect(&mockCatalog.Mock, mockCatalog.Secrets, func() backend.Secrets { return mockSecrets })
+		mocks.Expect(&mockSecrets.Mock, mockSecrets.Get, func(ctx context.Context, secretId string) (*secrets.Secret, error) {
+			if secretId != "secret-a" {
+				t.Errorf("Get secretId = %q", secretId)
+			}
+			return &secrets.Secret{Id: secretId, Version: 1}, nil
+		})
+
+		c := NewController(mockBackend, noopLimiter{}, staticPermissions{identity: identity, roles: roles})
+		mux := http.NewServeMux()
+		c.buildHandler(mux.Handle)
+
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "http://test/secrets/secret-a", nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("get A status = %d, want 200\n%s", rec.Code, rec.Body.Bytes())
+		}
+
+		rec = httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "http://test/secrets/secret-b", nil))
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("get B status = %d, want 403\n%s", rec.Code, rec.Body.Bytes())
+		}
+
+		rec = httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "http://test/instances", strings.NewReader(`{"secretId":"secret-b","reason":"no"}`))
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("create B status = %d, want 403\n%s", rec.Code, rec.Body.Bytes())
+		}
+
+		rec = httptest.NewRecorder()
+		req = httptest.NewRequest(http.MethodPost, "http://test/instances", strings.NewReader(`{"secretId":"secret-a","reason":"yes"}`))
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("create A status = %d, want 404 (past auth, no attach slot)\n%s", rec.Code, rec.Body.Bytes())
+		}
+	})
+
+	t.Run("instance id resolves to its secret", func(t *testing.T) {
+		mockBackend := &mocks.MockBackend{}
+		defer mockBackend.Mock.Validate(t)
+		mockCatalog := &mocks.MockCatalog{}
+		defer mockCatalog.Mock.Validate(t)
+		mockInstances := &mocks.MockInstances{}
+		defer mockInstances.Mock.Validate(t)
+		expectCatalog(mockBackend, mockCatalog)
+		expectCatalog(mockBackend, mockCatalog)
+		expectCatalog(mockBackend, mockCatalog)
+		mocks.Expect(&mockCatalog.Mock, mockCatalog.Instances, func() backend.Instances { return mockInstances })
+		mocks.Expect(&mockInstances.Mock, mockInstances.Get, func(ctx context.Context, instanceId string) (*secrets.Instance, error) {
+			return &secrets.Instance{Id: instanceId, Secret: secrets.Secret{Id: "secret-b"}}, nil
+		})
+		mocks.Expect(&mockCatalog.Mock, mockCatalog.Instances, func() backend.Instances { return mockInstances })
+		mocks.Expect(&mockInstances.Mock, mockInstances.Get, func(ctx context.Context, instanceId string) (*secrets.Instance, error) {
+			return &secrets.Instance{Id: instanceId, Secret: secrets.Secret{Id: "secret-a"}}, nil
+		})
+		mocks.Expect(&mockCatalog.Mock, mockCatalog.Instances, func() backend.Instances { return mockInstances })
+		mocks.Expect(&mockInstances.Mock, mockInstances.List, func(ctx context.Context, secretId *string, from int, to int) (secrets.Instances, error) {
+			return secrets.Instances{
+				"ia": {Id: "ia", Secret: secrets.Secret{Id: "secret-a"}},
+				"ib": {Id: "ib", Secret: secrets.Secret{Id: "secret-b"}},
+			}, nil
+		})
+
+		c := NewController(mockBackend, noopLimiter{}, staticPermissions{identity: identity, roles: roles})
+		mux := http.NewServeMux()
+		c.buildHandler(mux.Handle)
+
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "http://test/instances/ib", nil))
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("get B status = %d, want 403\n%s", rec.Code, rec.Body.Bytes())
+		}
+
+		rec = httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "http://test/instances/ia", nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("get A status = %d, want 200\n%s", rec.Code, rec.Body.Bytes())
+		}
+
+		rec = httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "http://test/instances", nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("list status = %d, want 200\n%s", rec.Code, rec.Body.Bytes())
+		}
+		var got ItemsResponse[secrets.Instances]
+		if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if _, ok := got.Items["ia"]; !ok {
+			t.Errorf("instance of A missing: %v", got.Items)
+		}
+		if _, ok := got.Items["ib"]; ok {
+			t.Errorf("instance of B visible: %v", got.Items)
+		}
+	})
 }
 
 func TestController_getSecret(t *testing.T) {

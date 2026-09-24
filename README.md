@@ -54,7 +54,7 @@ The secret-agent service will:
 
    By default the `root` user and `secret-agent` group have the `admin` role with all permissions.
 
-   Users and groups are mapped to roles via `services.secret-agent.bindings`, and roles are mapped to permission sets via `services.secret-agent.roles`.
+   Users and groups are mapped to roles via `services.secret-agent.bindings`, and roles are mapped to permission sets via `services.secret-agent.roles`. A role's `permissions` apply to every secret. `roles.<role>.secrets.<secretId>` is the same permission set limited to that secret.
 
 1. **Rebuild and switch** and the CLI will be available on the system (with `CLIENT_ADDRESS` set to the service socket).
 

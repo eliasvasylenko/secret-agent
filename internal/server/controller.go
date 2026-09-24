@@ -93,11 +93,23 @@ func (s *Controller) listSecrets(w http.ResponseWriter, r *http.Request) {
 		writeError(w, NewErrorResponse(http.StatusBadRequest, err))
 		return
 	}
-	writeResult(w, ItemsResponse[secrets.Secrets]{secs}, http.StatusOK)
+	var visible secrets.Secrets
+	if secs != nil {
+		visible = make(secrets.Secrets, len(secs))
+		for id, secret := range secs {
+			if permitted(r, id) {
+				visible[id] = secret
+			}
+		}
+	}
+	writeResult(w, ItemsResponse[secrets.Secrets]{visible}, http.StatusOK)
 }
 
 func (s *Controller) getSecret(w http.ResponseWriter, r *http.Request) {
 	secretId := r.PathValue("secretId")
+	if !requirePermit(w, r, secretId) {
+		return
+	}
 	secret, err := s.secretStore.Catalog().Secrets().Get(r.Context(), secretId)
 	if err != nil {
 		writeError(w, NewErrorResponse(http.StatusBadRequest, err))
@@ -113,12 +125,24 @@ func (s *Controller) listInstances(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	secretId := optionalQuery(r, "secretId")
+	if secretId != nil && !requirePermit(w, r, *secretId) {
+		return
+	}
 	insts, err := s.secretStore.Catalog().Instances().List(r.Context(), secretId, int(from), int(to))
 	if err != nil {
 		writeError(w, NewErrorResponse(http.StatusBadRequest, err))
 		return
 	}
-	writeResult(w, ItemsResponse[secrets.Instances]{insts}, http.StatusOK)
+	var visible secrets.Instances
+	if insts != nil {
+		visible = make(secrets.Instances, len(insts))
+		for id, instance := range insts {
+			if instance != nil && permitted(r, instance.Secret.Id) {
+				visible[id] = instance
+			}
+		}
+	}
+	writeResult(w, ItemsResponse[secrets.Instances]{visible}, http.StatusOK)
 }
 
 func (s *Controller) createInstance(w http.ResponseWriter, r *http.Request) {
@@ -137,6 +161,9 @@ func (s *Controller) createInstance(w http.ResponseWriter, r *http.Request) {
 		writeError(w, NewErrorResponse(http.StatusBadRequest, fmt.Errorf("secretId required")))
 		return
 	}
+	if !requirePermit(w, r, request.SecretId) {
+		return
+	}
 	s.startAttachedRun(w, r, request.SecretId, "", secrets.Create, executor.OperationParameters{
 		Env:       request.Env,
 		Forced:    request.Forced,
@@ -147,6 +174,9 @@ func (s *Controller) createInstance(w http.ResponseWriter, r *http.Request) {
 
 func (s *Controller) getActiveInstance(w http.ResponseWriter, r *http.Request) {
 	secretId := r.PathValue("secretId")
+	if !requirePermit(w, r, secretId) {
+		return
+	}
 	instance, err := s.secretStore.Catalog().Instances().GetActive(r.Context(), secretId)
 	if err != nil {
 		writeError(w, err)
@@ -162,6 +192,9 @@ func (s *Controller) getInstance(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	if instance != nil && !requirePermit(w, r, instance.Secret.Id) {
+		return
+	}
 	writeResult(w, instance, http.StatusOK)
 }
 
@@ -172,13 +205,25 @@ func (s *Controller) listOperations(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	secretId := optionalQuery(r, "secretId")
+	if secretId != nil && !requirePermit(w, r, *secretId) {
+		return
+	}
 	instanceId := optionalQuery(r, "instanceId")
 	operations, err := s.secretStore.Catalog().Operations().List(r.Context(), secretId, instanceId, int(from), int(to))
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	writeResult(w, operations, http.StatusOK)
+	var visible []*secrets.Operation
+	if operations != nil {
+		visible = make([]*secrets.Operation, 0, len(operations))
+		for _, operation := range operations {
+			if operation != nil && permitted(r, operation.SecretId) {
+				visible = append(visible, operation)
+			}
+		}
+	}
+	writeResult(w, visible, http.StatusOK)
 }
 
 func (s *Controller) createOperation(w http.ResponseWriter, r *http.Request) {
@@ -211,6 +256,9 @@ func (s *Controller) createOperation(w http.ResponseWriter, r *http.Request) {
 	}
 	if instance == nil {
 		writeError(w, NewErrorResponse(http.StatusNotFound, fmt.Errorf("unknown instance %s", request.InstanceId)))
+		return
+	}
+	if !requirePermit(w, r, instance.Secret.Id) {
 		return
 	}
 
