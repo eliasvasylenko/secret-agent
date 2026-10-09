@@ -8,6 +8,11 @@ import (
 	"reflect"
 )
 
+const (
+	systemAuthenticator = "system"
+	linuxKind           = "linux"
+)
+
 var authenticatorRegistry = make(map[string]func() Authenticator[Principal])
 
 type Authenticators map[string]Authenticator[Principal]

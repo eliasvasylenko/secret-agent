@@ -13,13 +13,22 @@ import (
 	"github.com/eliasvasylenko/secret-agent/internal/auth"
 )
 
+func roleLoaded(p *auth.Policy, name auth.RoleName) bool {
+	for _, role := range p.Roles {
+		if role.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
 func TestLoadPermissions(t *testing.T) {
 	invalidPath := filepath.Join(t.TempDir(), "permissions.json")
 	if err := os.WriteFile(invalidPath, []byte("not json"), 0600); err != nil {
 		t.Fatal(err)
 	}
 
-	validBody := `{"roles":{"admin":{"bindings":[{"auth":"system","uid":0}],"permissions":{"all":"any"}},"reader":{"permissions":{"secrets":"read","instances":"read"}}}}`
+	validBody := `{"roles":[{"name":"admin","bindings":[{"auth":"system","uid":0}],"permissions":{"all":"any"}},{"name":"reader","permissions":{"secrets":"read","instances":"read"}}]}`
 	validPath := filepath.Join(t.TempDir(), "permissions.json")
 	if err := os.WriteFile(validPath, []byte(validBody), 0600); err != nil {
 		t.Fatal(err)
@@ -59,10 +68,10 @@ func TestLoadPermissions(t *testing.T) {
 				if len(p.Roles) != 2 {
 					t.Errorf("len(Roles) = %d, want 2", len(p.Roles))
 				}
-				if _, ok := p.Roles["admin"]; !ok {
+				if !roleLoaded(p, "admin") {
 					t.Error("missing role admin")
 				}
-				if _, ok := p.Roles["reader"]; !ok {
+				if !roleLoaded(p, "reader") {
 					t.Error("missing role reader")
 				}
 			},
@@ -95,7 +104,7 @@ func TestPermissions_Middleware_returns401WhenIdentifyFails(t *testing.T) {
 	defer client.Close()
 	defer server.Close()
 
-	policy := &auth.Policy{Roles: auth.Roles{"admin": {Name: "admin", Permissions: auth.Permissions{auth.All: auth.Any}}}}
+	policy := &auth.Policy{Roles: auth.Roles{&auth.Role{Name: "admin", Permissions: auth.Permissions{auth.All: auth.Any}}}}
 	nextCalled := false
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		nextCalled = true

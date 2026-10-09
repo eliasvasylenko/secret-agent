@@ -22,7 +22,7 @@ type Controller struct {
 
 func NewController(secretStore backend.Backend, policy *auth.Policy, limiter *Limiter) *Controller {
 	limiterKey := func(r *http.Request) string {
-		return identityFromContext(r.Context()).Principal
+		return identityFromContext(r.Context()).Principal.GetName()
 	}
 	middleware := func(perms auth.Permissions, next http.HandlerFunc) http.Handler {
 		return AuthMiddleware(policy, perms, limiter.Middleware(limiterKey, next))
@@ -160,7 +160,7 @@ func (s *Controller) createInstance(w http.ResponseWriter, r *http.Request) {
 		Env:       request.Env,
 		Forced:    request.Forced,
 		Reason:    request.Reason,
-		StartedBy: identity.Principal,
+		StartedBy: identity.Principal.GetName(),
 	})
 }
 
@@ -258,7 +258,7 @@ func (s *Controller) createOperation(w http.ResponseWriter, r *http.Request) {
 		Env:       request.Env,
 		Forced:    request.Forced,
 		Reason:    request.Reason,
-		StartedBy: identity.Principal,
+		StartedBy: identity.Principal.GetName(),
 	})
 }
 
@@ -279,7 +279,7 @@ func (s *Controller) startAttachedRun(
 	parameters executor.OperationParameters,
 ) {
 	identity := identityFromContext(r.Context())
-	slot, err := s.takeSlot(secretId, identity.Principal)
+	slot, err := s.takeSlot(secretId, identity.Principal.GetName())
 	if err != nil {
 		writeError(w, err)
 		return

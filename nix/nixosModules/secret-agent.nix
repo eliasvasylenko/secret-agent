@@ -383,14 +383,17 @@ let
     // lib.optionalAttrs (binding.name != null) { inherit (binding) name; }
   );
 
-  makeRolesConfig = lib.mapAttrs (
-    _: spec:
-    {
-      permissions = spec.permissions;
-    }
-    // lib.optionalAttrs (spec.secrets != { }) { inherit (spec) secrets; }
-    // lib.optionalAttrs (spec.bindings != [ ]) { bindings = makeBindings spec.bindings; }
-  ) cfg.roles;
+  makeRolesConfig = lib.lists.sortOn (role: role.name) (
+    lib.mapAttrsToList (
+      name: spec:
+      {
+        inherit name;
+        permissions = spec.permissions;
+      }
+      // lib.optionalAttrs (spec.secrets != { }) { inherit (spec) secrets; }
+      // lib.optionalAttrs (spec.bindings != [ ]) { bindings = makeBindings spec.bindings; }
+    ) cfg.roles
+  );
 
   # Write the permissions config file for the service backend
   permissionsFile = pkgs.writeText "permissions.config" (

@@ -26,6 +26,19 @@ import (
 	"github.com/google/go-cmp/cmp"
 )
 
+func systemUIDBinding(t *testing.T, uid uint32) auth.Binding[auth.Principal] {
+	t.Helper()
+	var policy auth.Policy
+	if err := json.Unmarshal([]byte(`{}`), &policy); err != nil {
+		t.Fatal(err)
+	}
+	binding, err := auth.UnmarshalJSONBinding([]byte(fmt.Sprintf(`{"auth":"system","uid":%d}`, uid)), policy.Authenticators)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return binding
+}
+
 func policyForCurrentUser(t *testing.T, roles auth.Roles) (*auth.Policy, string) {
 	t.Helper()
 	self, err := user.Current()
@@ -39,16 +52,12 @@ func policyForCurrentUser(t *testing.T, roles auth.Roles) (*auth.Policy, string)
 	uid := uint32(n)
 	if len(roles) == 0 {
 		roles = auth.Roles{
-			"test": {Permissions: auth.Permissions{auth.All: auth.Any}},
+			&auth.Role{Name: "test", Permissions: auth.Permissions{auth.All: auth.Any}},
 		}
 	}
-	for name, role := range roles {
-		role.Name = name
-		role.Bindings = []auth.Binding{{
-			Auth:         "system",
-			LinuxBinding: auth.LinuxBinding{UID: &uid},
-		}}
-		roles[name] = role
+	binding := systemUIDBinding(t, uid)
+	for _, role := range roles {
+		role.Bindings = auth.Bindings{binding}
 	}
 	return &auth.Policy{Roles: roles}, fmt.Sprintf("linux:%s/%s", self.Username, self.Uid)
 }
@@ -216,7 +225,7 @@ func TestController_listSecrets(t *testing.T) {
 
 func TestController_secretGrantAllowsOneSecret(t *testing.T) {
 	roles := auth.Roles{
-		"payroll": {Name: "payroll", Secrets: map[string]auth.Permissions{"secret-a": {auth.All: auth.Any}}},
+		&auth.Role{Name: "payroll", Secrets: map[string]auth.Permissions{"secret-a": {auth.All: auth.Any}}},
 	}
 
 	t.Run("list hides the other secret", func(t *testing.T) {

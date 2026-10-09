@@ -13,16 +13,16 @@ import (
 
 // authenticatePeer reads the socket peer from SO_PEERCRED. The username and
 // groups come from the user database. The uid is what later matchers compare.
-func authenticatePeer(connection net.Conn) (platformPeer, error) {
+func authenticatePeer(connection net.Conn) (linuxPrincipal, error) {
 	var cred *unix.Ucred
 
 	uc, ok := connection.(*net.UnixConn)
 	if !ok {
-		return platformPeer{}, fmt.Errorf("unexpected socket type")
+		return linuxPrincipal{}, fmt.Errorf("unexpected socket type")
 	}
 	raw, err := uc.SyscallConn()
 	if err != nil {
-		return platformPeer{}, fmt.Errorf("error opening raw connection: %w", err)
+		return linuxPrincipal{}, fmt.Errorf("error opening raw connection: %w", err)
 	}
 
 	controlErr := raw.Control(func(fd uintptr) {
@@ -32,25 +32,25 @@ func authenticatePeer(connection net.Conn) (platformPeer, error) {
 		)
 	})
 	if err != nil {
-		return platformPeer{}, fmt.Errorf("failed to get socket credentials: %w", err)
+		return linuxPrincipal{}, fmt.Errorf("failed to get socket credentials: %w", err)
 	} else if controlErr != nil {
-		return platformPeer{}, fmt.Errorf("failed to control socket: %w", controlErr)
+		return linuxPrincipal{}, fmt.Errorf("failed to control socket: %w", controlErr)
 	}
 
 	authenticatedUser, err := user.LookupId(strconv.FormatUint(uint64(cred.Uid), 10))
 	if err != nil {
-		return platformPeer{}, fmt.Errorf("failed to lookup credential user: %w", err)
+		return linuxPrincipal{}, fmt.Errorf("failed to lookup credential user: %w", err)
 	}
 
 	groups, err := groupsOf(authenticatedUser)
 	if err != nil {
-		return platformPeer{}, err
+		return linuxPrincipal{}, err
 	}
 	groups, err = withPeerGid(groups, cred.Gid)
 	if err != nil {
-		return platformPeer{}, err
+		return linuxPrincipal{}, err
 	}
-	return platformPeer{user: authenticatedUser, groups: groups}, nil
+	return linuxPrincipal{user: authenticatedUser, groups: groups}, nil
 }
 
 func withPeerGid(groups []*user.Group, peerGid uint32) ([]*user.Group, error) {

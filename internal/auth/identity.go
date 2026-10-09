@@ -1,6 +1,6 @@
 package auth
 
 type Identity struct {
-	Principal string
-	Roles     RoleNames
+	Principal Principal
+	Roles     Roles
 }

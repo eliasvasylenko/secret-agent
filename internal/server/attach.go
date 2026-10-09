@@ -52,7 +52,7 @@ func (s *Controller) attachSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	slot, err := s.claimSlot(secretId, identity.Principal, stream)
+	slot, err := s.claimSlot(secretId, identity.Principal.GetName(), stream)
 	if err != nil {
 		writeError(w, err)
 		return

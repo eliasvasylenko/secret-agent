@@ -45,11 +45,14 @@ func requirePermit(w http.ResponseWriter, r *http.Request, secretID string) bool
 	if permitted(r, secretID) {
 		return true
 	}
-	var roles auth.RoleNames
+	var names []auth.RoleName
 	if identity := identityFromContext(r.Context()); identity != nil {
-		roles = identity.Roles
+		names = make([]auth.RoleName, len(identity.Roles))
+		for i, role := range identity.Roles {
+			names[i] = role.Name
+		}
 	}
-	writeError(w, NewErrorResponse(http.StatusForbidden, fmt.Errorf("operation not permitted with roles %v", roles)))
+	writeError(w, NewErrorResponse(http.StatusForbidden, fmt.Errorf("operation not permitted with roles %v", names)))
 	return false
 }
 
