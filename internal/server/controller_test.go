@@ -10,6 +10,9 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os/user"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -23,50 +26,73 @@ import (
 	"github.com/google/go-cmp/cmp"
 )
 
-type noopLimiter struct{}
-
-func (noopLimiter) Middleware(_ func(*http.Request) string, next http.Handler) http.Handler {
-	return next
-}
-
-type noopPermissions struct {
-	identity *auth.Identity
-}
-
-func (p noopPermissions) Middleware(_ auth.Permissions, next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ctx := r.Context()
-		if p.identity != nil {
-			ctx = context.WithValue(ctx, identityKey{}, p.identity)
+func policyForCurrentUser(t *testing.T, roles auth.Roles) (*auth.Policy, string) {
+	t.Helper()
+	self, err := user.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, err := strconv.ParseUint(self.Uid, 10, 32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	uid := uint32(n)
+	if len(roles) == 0 {
+		roles = auth.Roles{
+			"test": {Permissions: auth.Permissions{auth.All: auth.Any}},
 		}
-		ctx = contextWithPermit(ctx, func(string) bool { return true })
-		next.ServeHTTP(w, r.WithContext(ctx))
-	})
+	}
+	for name, role := range roles {
+		role.Name = name
+		role.Bindings = []auth.Binding{{
+			Auth:         "system",
+			LinuxBinding: auth.LinuxBinding{UID: &uid},
+		}}
+		roles[name] = role
+	}
+	return &auth.Policy{Roles: roles}, fmt.Sprintf("linux:%s/%s", self.Username, self.Uid)
 }
 
-type staticPermissions struct {
-	identity *auth.Identity
-	roles    auth.Roles
-}
+func unixTestConn(t *testing.T) net.Conn {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "sock")
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
 
-func (p staticPermissions) Middleware(perms auth.Permissions, next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var roles auth.RoleNames
-		if p.identity != nil {
-			roles = p.identity.Roles
-		}
-		if err := p.roles.AssertPermission(roles, perms, ""); err != nil {
-			writeError(w, NewErrorResponse(http.StatusForbidden, err))
+	errc := make(chan error, 1)
+	peer := make(chan net.Conn, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			errc <- err
 			return
 		}
-		ctx := r.Context()
-		if p.identity != nil {
-			ctx = context.WithValue(ctx, identityKey{}, p.identity)
-		}
-		ctx = contextWithPermit(ctx, func(secretID string) bool {
-			return p.roles.CheckPermission(roles, perms, secretID)
-		})
-		next.ServeHTTP(w, r.WithContext(ctx))
+		peer <- conn
+	}()
+	conn, err := net.Dial("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	select {
+	case accepted := <-peer:
+		t.Cleanup(func() { _ = accepted.Close() })
+		return accepted
+	case err := <-errc:
+		t.Fatal(err)
+	}
+	return nil
+}
+
+func handlerWithConn(c *Controller, conn net.Conn) http.Handler {
+	mux := http.NewServeMux()
+	c.buildHandler(mux.Handle)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := context.WithValue(r.Context(), connectionKey{}, conn)
+		mux.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
@@ -117,12 +143,11 @@ func (h *trackingHandle) wasCanceled() bool {
 	return h.canceled
 }
 
-func newTestController(t *testing.T, agent backend.Backend, identity *auth.Identity) (*Controller, *http.ServeMux) {
+func newTestController(t *testing.T, agent backend.Backend) (*Controller, http.Handler, string) {
 	t.Helper()
-	c := NewController(agent, noopLimiter{}, noopPermissions{identity: identity})
-	mux := http.NewServeMux()
-	c.buildHandler(mux.Handle)
-	return c, mux
+	policy, principal := policyForCurrentUser(t, nil)
+	c := NewController(agent, policy, NewLimiter(0, 0))
+	return c, handlerWithConn(c, unixTestConn(t)), principal
 }
 
 func expectCatalog(mockBackend *mocks.MockBackend, mockCatalog *mocks.MockCatalog) {
@@ -170,7 +195,7 @@ func TestController_listSecrets(t *testing.T) {
 		return secrets.Secrets{"s1": {Id: "s1", Version: 1}}, nil
 	})
 
-	_, mux := newTestController(t, mockBackend, nil)
+	_, mux, _ := newTestController(t, mockBackend)
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "http://test/secrets", nil)
@@ -190,7 +215,6 @@ func TestController_listSecrets(t *testing.T) {
 }
 
 func TestController_secretGrantAllowsOneSecret(t *testing.T) {
-	identity := &auth.Identity{Principal: "linux:john/1000", Roles: auth.RoleNames{"payroll"}}
 	roles := auth.Roles{
 		"payroll": {Name: "payroll", Secrets: map[string]auth.Permissions{"secret-a": {auth.All: auth.Any}}},
 	}
@@ -211,9 +235,9 @@ func TestController_secretGrantAllowsOneSecret(t *testing.T) {
 			}, nil
 		})
 
-		c := NewController(mockBackend, noopLimiter{}, staticPermissions{identity: identity, roles: roles})
-		mux := http.NewServeMux()
-		c.buildHandler(mux.Handle)
+		policy, _ := policyForCurrentUser(t, roles)
+		c := NewController(mockBackend, policy, NewLimiter(0, 0))
+		mux := handlerWithConn(c, unixTestConn(t))
 
 		rec := httptest.NewRecorder()
 		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "http://test/secrets", nil))
@@ -248,9 +272,9 @@ func TestController_secretGrantAllowsOneSecret(t *testing.T) {
 			return &secrets.Secret{Id: secretId, Version: 1}, nil
 		})
 
-		c := NewController(mockBackend, noopLimiter{}, staticPermissions{identity: identity, roles: roles})
-		mux := http.NewServeMux()
-		c.buildHandler(mux.Handle)
+		policy, _ := policyForCurrentUser(t, roles)
+		c := NewController(mockBackend, policy, NewLimiter(0, 0))
+		mux := handlerWithConn(c, unixTestConn(t))
 
 		rec := httptest.NewRecorder()
 		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "http://test/secrets/secret-a", nil))
@@ -305,9 +329,9 @@ func TestController_secretGrantAllowsOneSecret(t *testing.T) {
 			}, nil
 		})
 
-		c := NewController(mockBackend, noopLimiter{}, staticPermissions{identity: identity, roles: roles})
-		mux := http.NewServeMux()
-		c.buildHandler(mux.Handle)
+		policy, _ := policyForCurrentUser(t, roles)
+		c := NewController(mockBackend, policy, NewLimiter(0, 0))
+		mux := handlerWithConn(c, unixTestConn(t))
 
 		rec := httptest.NewRecorder()
 		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "http://test/instances/ib", nil))
@@ -355,7 +379,7 @@ func TestController_getSecret(t *testing.T) {
 		return &secrets.Secret{Id: "my-secret"}, nil
 	})
 
-	_, mux := newTestController(t, mockBackend, nil)
+	_, mux, _ := newTestController(t, mockBackend)
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "http://test/secrets/my-secret", nil)
@@ -389,7 +413,7 @@ func TestController_listInstances(t *testing.T) {
 		return secrets.Instances{}, nil
 	})
 
-	_, mux := newTestController(t, mockBackend, nil)
+	_, mux, _ := newTestController(t, mockBackend)
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "http://test/instances?secretId=sid", nil)
@@ -416,7 +440,7 @@ func TestController_listInstances_allSecrets(t *testing.T) {
 		return secrets.Instances{}, nil
 	})
 
-	_, mux := newTestController(t, mockBackend, nil)
+	_, mux, _ := newTestController(t, mockBackend)
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "http://test/instances", nil)
@@ -440,7 +464,7 @@ func TestController_getInstance(t *testing.T) {
 		return &secrets.Instance{Id: "i1", Secret: secrets.Secret{Id: "s1", Version: 1}}, nil
 	})
 
-	_, mux := newTestController(t, mockBackend, nil)
+	_, mux, _ := newTestController(t, mockBackend)
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "http://test/instances/i1", nil)
@@ -455,7 +479,7 @@ func TestController_createInstance_requiresAttachSlot(t *testing.T) {
 	mockBackend := &mocks.MockBackend{}
 	defer mockBackend.Mock.Validate(t)
 
-	_, mux := newTestController(t, mockBackend, &auth.Identity{Principal: "test-user"})
+	_, mux, _ := newTestController(t, mockBackend)
 
 	body := `{"secretId":"sid","env":{},"forced":false,"reason":"create-reason"}`
 	rec := httptest.NewRecorder()
@@ -474,6 +498,7 @@ func TestController_createInstance(t *testing.T) {
 	mockRunner := &mocks.MockRunner{}
 	defer mockRunner.Mock.Validate(t)
 	instance := &secrets.Instance{Id: "new-id", Secret: secrets.Secret{Id: "s1", Version: 1}, Status: secrets.Status{OperationNumber: 1}}
+	c, mux, principal := newTestController(t, mockBackend)
 	mocks.Expect(&mockBackend.Mock, mockBackend.Runner, func(secretId string) backend.Runner {
 		if secretId != "sid" {
 			t.Errorf("Runner secretId = %q", secretId)
@@ -488,14 +513,13 @@ func TestController_createInstance(t *testing.T) {
 		proposer backend.Proposer,
 		stdio command.Stdio,
 	) (*secrets.Instance, backend.Handle, error) {
-		if name != secrets.Create || params.StartedBy != "test-user" || params.Reason != "create-reason" {
+		if name != secrets.Create || params.StartedBy != principal || params.Reason != "create-reason" {
 			t.Errorf("Run name=%s StartedBy=%q Reason=%q", name, params.StartedBy, params.Reason)
 		}
 		return instance, immediateHandle{inst: instance}, nil
 	})
 
-	c, mux := newTestController(t, mockBackend, &auth.Identity{Principal: "test-user"})
-	readySlot(c, "sid", "test-user")
+	readySlot(c, "sid", principal)
 
 	body := `{"secretId":"sid","env":{},"forced":false,"reason":"create-reason"}`
 	rec := httptest.NewRecorder()
@@ -541,8 +565,8 @@ func TestController_createInstance_passesSlotStdio(t *testing.T) {
 		return instance, handle, nil
 	})
 
-	c, mux := newTestController(t, mockBackend, &auth.Identity{Principal: "test-user"})
-	slot := readySlot(c, "sid", "test-user")
+	c, mux, principal := newTestController(t, mockBackend)
+	slot := readySlot(c, "sid", principal)
 	go func() {
 		_, _ = slot.pipes.stdinW.Write([]byte("payload"))
 		_ = slot.pipes.stdinW.Close()
@@ -564,7 +588,7 @@ func TestController_createInstance_passesSlotStdio(t *testing.T) {
 }
 
 func TestController_attachSecret_rejectsMissingUpgrade(t *testing.T) {
-	_, mux := newTestController(t, &mocks.MockBackend{}, &auth.Identity{Principal: "test-user"})
+	_, mux, _ := newTestController(t, &mocks.MockBackend{})
 
 	attachRec := httptest.NewRecorder()
 	attachReq := httptest.NewRequest(http.MethodPost, "http://test/secrets/sid/attach/stdin", nil)
@@ -626,8 +650,8 @@ func TestController_createOperation(t *testing.T) {
 				return instance, immediateHandle{inst: instance}, nil
 			})
 
-			c, mux := newTestController(t, mockBackend, &auth.Identity{Principal: "op-user"})
-			readySlot(c, "sid", "op-user")
+			c, mux, principal := newTestController(t, mockBackend)
+			readySlot(c, "sid", principal)
 
 			body := fmt.Sprintf(`{"instanceId":"i1","name":%q,"env":{},"forced":false,"reason":%q}`, tt.opName, tt.reason)
 			rec := httptest.NewRecorder()
@@ -655,8 +679,8 @@ func TestController_createOperation_unknownInstance(t *testing.T) {
 		return nil, fmt.Errorf("no such instance")
 	})
 
-	c, mux := newTestController(t, mockBackend, &auth.Identity{Principal: "op-user"})
-	readySlot(c, "sid", "op-user")
+	c, mux, principal := newTestController(t, mockBackend)
+	readySlot(c, "sid", principal)
 
 	body := `{"instanceId":"missing","name":"activate","env":{},"forced":false,"reason":"r"}`
 	rec := httptest.NewRecorder()
@@ -673,7 +697,7 @@ func TestController_createOperation_requiresInstanceId(t *testing.T) {
 	mockBackend := &mocks.MockBackend{}
 	defer mockBackend.Mock.Validate(t)
 
-	_, mux := newTestController(t, mockBackend, &auth.Identity{Principal: "op-user"})
+	_, mux, _ := newTestController(t, mockBackend)
 
 	body := `{"name":"activate","env":{},"forced":false,"reason":"r"}`
 	rec := httptest.NewRecorder()
@@ -690,7 +714,7 @@ func TestController_createInstance_requiresSecretId(t *testing.T) {
 	mockBackend := &mocks.MockBackend{}
 	defer mockBackend.Mock.Validate(t)
 
-	_, mux := newTestController(t, mockBackend, &auth.Identity{Principal: "test-user"})
+	_, mux, _ := newTestController(t, mockBackend)
 
 	body := `{"env":{},"forced":false,"reason":"create-reason"}`
 	rec := httptest.NewRecorder()
@@ -719,7 +743,7 @@ func TestController_listOperations(t *testing.T) {
 		return []*secrets.Operation{}, nil
 	})
 
-	_, mux := newTestController(t, mockBackend, nil)
+	_, mux, _ := newTestController(t, mockBackend)
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "http://test/operations?secretId=sid&instanceId=i1&from=0&to=10", nil)
@@ -746,7 +770,7 @@ func TestController_getActive(t *testing.T) {
 		return &secrets.Instance{Id: "i1"}, nil
 	})
 
-	_, mux := newTestController(t, mockBackend, nil)
+	_, mux, _ := newTestController(t, mockBackend)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "http://test/secrets/sid/active", nil)
 	mux.ServeHTTP(rec, req)
@@ -759,8 +783,8 @@ func TestController_createInstance_slotNotReady(t *testing.T) {
 	mockBackend := &mocks.MockBackend{}
 	defer mockBackend.Mock.Validate(t)
 
-	c, mux := newTestController(t, mockBackend, &auth.Identity{Principal: "test-user"})
-	if _, err := c.claimSlot("sid", "test-user", attachStreamStdin); err != nil {
+	c, mux, principal := newTestController(t, mockBackend)
+	if _, err := c.claimSlot("sid", principal, attachStreamStdin); err != nil {
 		t.Fatal(err)
 	}
 
@@ -778,8 +802,8 @@ func TestController_createOperation_rejectsCreate(t *testing.T) {
 	mockBackend := &mocks.MockBackend{}
 	defer mockBackend.Mock.Validate(t)
 
-	c, mux := newTestController(t, mockBackend, &auth.Identity{Principal: "op-user"})
-	readySlot(c, "sid", "op-user")
+	c, mux, principal := newTestController(t, mockBackend)
+	readySlot(c, "sid", principal)
 
 	body := `{"instanceId":"i1","name":"create","env":{},"forced":false,"reason":"nope"}`
 	rec := httptest.NewRecorder()
@@ -792,8 +816,8 @@ func TestController_createOperation_rejectsCreate(t *testing.T) {
 }
 
 func TestAttachSlot_stdinEOFDoesNotCancel(t *testing.T) {
-	c, _ := newTestController(t, &mocks.MockBackend{}, &auth.Identity{Principal: "u"})
-	slot := readySlot(c, "sid", "u")
+	c, _, principal := newTestController(t, &mocks.MockBackend{})
+	slot := readySlot(c, "sid", principal)
 	handle := &trackingHandle{inst: &secrets.Instance{Id: "i1"}, done: make(chan struct{})}
 	startSlot(t, c, slot, handle)
 
@@ -805,8 +829,8 @@ func TestAttachSlot_stdinEOFDoesNotCancel(t *testing.T) {
 }
 
 func TestAttachSlot_stdoutDisconnectCancels(t *testing.T) {
-	c, _ := newTestController(t, &mocks.MockBackend{}, &auth.Identity{Principal: "u"})
-	slot := readySlot(c, "sid", "u")
+	c, _, principal := newTestController(t, &mocks.MockBackend{})
+	slot := readySlot(c, "sid", principal)
 	handle := &trackingHandle{inst: &secrets.Instance{Id: "i1"}, done: make(chan struct{})}
 	startSlot(t, c, slot, handle)
 
@@ -818,9 +842,9 @@ func TestAttachSlot_stdoutDisconnectCancels(t *testing.T) {
 }
 
 func TestController_takenSlotAllowsNextAttach(t *testing.T) {
-	c, _ := newTestController(t, &mocks.MockBackend{}, &auth.Identity{Principal: "u"})
-	active := readySlot(c, "sid", "u")
-	taken, err := c.takeSlot("sid", "u")
+	c, _, principal := newTestController(t, &mocks.MockBackend{})
+	active := readySlot(c, "sid", principal)
+	taken, err := c.takeSlot("sid", principal)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -828,7 +852,7 @@ func TestController_takenSlotAllowsNextAttach(t *testing.T) {
 		t.Fatal("takeSlot returned a different slot")
 	}
 
-	next, err := c.claimSlot("sid", "u", attachStreamStdin)
+	next, err := c.claimSlot("sid", principal, attachStreamStdin)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -863,7 +887,7 @@ func TestController_attachThenCreate_stdinReachesRun(t *testing.T) {
 		return instance, handle, nil
 	})
 
-	_, mux := newTestController(t, mockBackend, &auth.Identity{Principal: "test-user"})
+	_, mux, _ := newTestController(t, mockBackend)
 	server := httptest.NewServer(mux)
 	t.Cleanup(server.Close)
 

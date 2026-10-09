@@ -19,7 +19,7 @@ func TestLoadPermissions(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	validBody := `{"roles":{"admin":{"permissions":{"all":"any"}},"reader":{"permissions":{"secrets":"read","instances":"read"}}},"bindings":{}}`
+	validBody := `{"roles":{"admin":{"bindings":[{"auth":"system","uid":0}],"permissions":{"all":"any"}},"reader":{"permissions":{"secrets":"read","instances":"read"}}}}`
 	validPath := filepath.Join(t.TempDir(), "permissions.json")
 	if err := os.WriteFile(validPath, []byte(validBody), 0600); err != nil {
 		t.Fatal(err)
@@ -29,7 +29,7 @@ func TestLoadPermissions(t *testing.T) {
 		name       string
 		path       string
 		checkErr   func(t *testing.T, err error)
-		checkPerms func(t *testing.T, p *Permissions)
+		checkPerms func(t *testing.T, p *auth.Policy)
 	}{
 		{
 			name: "missing file",
@@ -52,9 +52,9 @@ func TestLoadPermissions(t *testing.T) {
 		{
 			name: "valid file",
 			path: validPath,
-			checkPerms: func(t *testing.T, p *Permissions) {
+			checkPerms: func(t *testing.T, p *auth.Policy) {
 				if p == nil {
-					t.Fatal("LoadPermissions returned nil *Permissions")
+					t.Fatal("LoadPermissions returned nil *auth.Policy")
 				}
 				if len(p.Roles) != 2 {
 					t.Errorf("len(Roles) = %d, want 2", len(p.Roles))
@@ -95,13 +95,13 @@ func TestPermissions_Middleware_returns401WhenIdentifyFails(t *testing.T) {
 	defer client.Close()
 	defer server.Close()
 
-	p := &Permissions{Roles: auth.Roles{"admin": {Name: "admin", Permissions: auth.Permissions{auth.All: auth.Any}}}}
+	policy := &auth.Policy{Roles: auth.Roles{"admin": {Name: "admin", Permissions: auth.Permissions{auth.All: auth.Any}}}}
 	nextCalled := false
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		nextCalled = true
 		w.WriteHeader(http.StatusOK)
 	})
-	handler := p.Middleware(auth.Permissions{auth.Secrets: auth.Read}, next)
+	handler := AuthMiddleware(policy, auth.Permissions{auth.Secrets: auth.Read}, next)
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req = req.WithContext(context.WithValue(req.Context(), connectionKey{}, server))

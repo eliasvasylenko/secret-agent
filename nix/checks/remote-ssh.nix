@@ -39,10 +39,16 @@ pkgs.testers.runNixOSTest {
         enable = true;
         ssh.enable = true;
         ssh.shared.alice.keyFiles = [ "${keys}/id_alice.pub" ];
-        bindings.users = {
-          root = "admin";
-          alice = "admin";
-          bob = "admin";
+        authenticators = [
+          { name = "ssh"; user = "secret-agent"; }
+        ];
+        roles.admin = {
+          permissions = { all = "any"; };
+          bindings = [
+            { uid = 0; }
+            { auth = "ssh"; name = "alice"; }
+            { auth = "ssh"; name = "bob"; }
+          ];
         };
         secrets.remote = {
           create = ''
@@ -124,7 +130,7 @@ pkgs.testers.runNixOSTest {
       )
       shared = instance_json(output)
       assert "remote-hello" in output, f"stdout missing from: {output}"
-      assert shared["status"]["startedBy"] == "http:alice", f"startedBy: {shared}"
+      assert shared["status"]["startedBy"] == "alice@secret-agent", f"startedBy: {shared}"
 
     with subtest("agent fragment is a second sshd source"):
       server.succeed("${installBobFragment}")
@@ -132,7 +138,7 @@ pkgs.testers.runNixOSTest {
         "secret-agent -a ssh://secret-agent@server-bob create remote </dev/null"
       )
       bob = instance_json(output)
-      assert bob["status"]["startedBy"] == "http:bob", f"startedBy: {bob}"
+      assert bob["status"]["startedBy"] == "bob@secret-agent", f"startedBy: {bob}"
 
     with subtest("local unix is still peercred"):
       output = server.succeed("secret-agent create remote </dev/null")

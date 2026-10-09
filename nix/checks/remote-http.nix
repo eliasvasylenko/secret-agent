@@ -42,12 +42,15 @@ pkgs.testers.runNixOSTest {
 
       services.secret-agent = {
         enable = true;
-        bindings = {
-          users = {
-            root = "admin";
-            john = "admin";
-          };
-          forwardAuth.peers = [ "caddy" ];
+        authenticators = [
+          { name = "caddy"; user = "caddy"; }
+        ];
+        roles.admin = {
+          permissions = { all = "any"; };
+          bindings = [
+            { uid = 0; }
+            { auth = "caddy"; name = "john"; }
+          ];
         };
         secrets.remote = {
           create = ''
@@ -113,7 +116,7 @@ pkgs.testers.runNixOSTest {
       output = client.succeed("secret-agent -a https://server create remote </dev/null")
       assert "remote-hello" in output, f"stdout missing from: {output}"
       created = instance_json(output)
-      assert created["status"]["startedBy"] == "http:john", f"startedBy: {created}"
+      assert created["status"]["startedBy"] == "john@caddy", f"startedBy: {created}"
       assert created["status"]["name"] == "create", f"op: {created}"
       instance_id = created["id"]
 
@@ -122,10 +125,10 @@ pkgs.testers.runNixOSTest {
         f"secret-agent -a https://server activate remote {instance_id} </dev/null"
       )
       activated = instance_json(output)
-      assert activated["status"]["startedBy"] == "http:john", f"startedBy: {activated}"
+      assert activated["status"]["startedBy"] == "john@caddy", f"startedBy: {activated}"
       assert activated["status"]["name"] == "activate", f"op: {activated}"
 
-    with subtest("local unix is still peercred, not the forward-auth header"):
+    with subtest("local unix is still the socket credential"):
       output = server.succeed("secret-agent create remote </dev/null")
       local = instance_json(output)
       assert local["status"]["startedBy"].startswith("linux:root/"), f"startedBy: {local}"

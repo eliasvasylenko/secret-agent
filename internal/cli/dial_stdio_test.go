@@ -31,7 +31,7 @@ func TestRunDialStdio_injectsUserHeader(t *testing.T) {
 		if err != nil {
 			return
 		}
-		gotCh <- req.Header.Get(auth.DefaultForwardAuthHeader)
+		gotCh <- req.Header.Get(auth.DefaultAssertHeader)
 		_, _ = io.WriteString(c, "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
 	}()
 

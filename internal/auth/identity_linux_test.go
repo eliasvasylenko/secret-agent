@@ -3,25 +3,29 @@
 package auth
 
 import (
-	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
 	"os/user"
 	"path/filepath"
+	"strconv"
 	"testing"
 )
 
-func slicesEqual(a, b RoleNames) bool {
-	if len(a) != len(b) {
-		return false
+func linuxBinding(b LinuxBinding) Binding {
+	return Binding{Auth: systemAuthenticator, LinuxBinding: b}
+}
+
+func id(n uint32) *uint32 {
+	return &n
+}
+
+func idString(s string) *uint32 {
+	n, err := strconv.ParseUint(s, 10, 32)
+	if err != nil {
+		panic(err)
 	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
+	return id(uint32(n))
 }
 
 // roleNamesSetEqual compares roles as sets (order-independent).
@@ -42,186 +46,84 @@ func roleNamesSetEqual(a, b RoleNames) bool {
 	return true
 }
 
-func TestPlatformBindingsUnmarshalMarshal(t *testing.T) {
-	tests := []struct {
-		name string
-		json string
-	}{
-		{
-			name: "users and groups by id and name",
-			json: `{"users":{"1000":["admin"],"alice":["reader"],"1001/bob":["writer"]},"groups":{"100":["admin"],"users":["reader"]}}`,
-		},
-		{
-			name: "users only",
-			json: `{"users":{"root":"admin"}}`,
-		},
-		{
-			name: "groups only",
-			json: `{"groups":{"secret-agent":["admin","reader"]}}`,
-		},
-		{
-			name: "empty",
-			json: `{}`,
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			var c PlatformBindings
-			if err := json.Unmarshal([]byte(tc.json), &c); err != nil {
-				t.Fatalf("Unmarshal: %v", err)
-			}
-			roundTrip, err := json.Marshal(c)
-			if err != nil {
-				t.Fatalf("Marshal: %v", err)
-			}
-			var c2 PlatformBindings
-			if err := json.Unmarshal(roundTrip, &c2); err != nil {
-				t.Fatalf("Unmarshal(roundTrip): %v", err)
-			}
-			// Compare decoded structs (map key order is undefined)
-			if len(c.Users) != len(c2.Users) {
-				t.Errorf("Users length: got %d, want %d", len(c2.Users), len(c.Users))
-			}
-			for entity, roles := range c.Users {
-				r2, ok := c2.Users[entity]
-				if !ok {
-					t.Errorf("Users: missing entity %+v", entity)
-					continue
-				}
-				if !slicesEqual(roles, r2) {
-					t.Errorf("Users[%+v]: got %v, want %v", entity, r2, roles)
-				}
-			}
-			if len(c.Groups) != len(c2.Groups) {
-				t.Errorf("Groups length: got %d, want %d", len(c2.Groups), len(c.Groups))
-			}
-			for entity, roles := range c.Groups {
-				r2, ok := c2.Groups[entity]
-				if !ok {
-					t.Errorf("Groups: missing entity %+v", entity)
-					continue
-				}
-				if !slicesEqual(roles, r2) {
-					t.Errorf("Groups[%+v]: got %v, want %v", entity, r2, roles)
-				}
-			}
-		})
-	}
-}
-
-func TestAuthorise(t *testing.T) {
+func TestMatchLinux(t *testing.T) {
 	alice := &user.User{Uid: "1000", Gid: "1000", Username: "alice", Name: "Alice", HomeDir: "/home/alice"}
 	usersGroup := &user.Group{Gid: "100", Name: "users"}
+	orig := lookupUser
+	lookupUser = func(name string) (*user.User, error) {
+		if name == "alice" {
+			return alice, nil
+		}
+		return nil, fmt.Errorf("unknown user %s", name)
+	}
+	t.Cleanup(func() { lookupUser = orig })
 
 	tests := []struct {
-		name          string
-		bindings      PlatformBindings
-		user          *user.User
-		groups        []*user.Group
-		wantPrincipal string
-		wantRoles     RoleNames
+		name      string
+		roles     Roles
+		groups    []*user.Group
+		wantRoles RoleNames
 	}{
 		{
-			name:          "empty bindings yields principal only",
-			bindings:      PlatformBindings{},
-			user:          alice,
-			groups:        []*user.Group{usersGroup},
-			wantPrincipal: "linux:alice/1000",
-			wantRoles:     nil,
+			name:      "empty roles",
+			roles:     Roles{},
+			groups:    []*user.Group{usersGroup},
+			wantRoles: nil,
 		},
 		{
-			name: "user matched by uid",
-			bindings: PlatformBindings{
-				Users: map[Entity]RoleNames{
-					{Id: "1000", Name: ""}: {"admin"},
-				},
-			},
-			user:          alice,
-			groups:        nil,
-			wantPrincipal: "linux:alice/1000",
-			wantRoles:     RoleNames{"admin"},
+			name:      "user matched by uid",
+			roles:     Roles{"admin": {Bindings: []Binding{linuxBinding(LinuxBinding{UID: id(1000)})}}},
+			wantRoles: RoleNames{"admin"},
 		},
 		{
-			name: "user matched by username",
-			bindings: PlatformBindings{
-				Users: map[Entity]RoleNames{
-					{Id: "", Name: "alice"}: {"reader"},
-				},
-			},
-			user:          alice,
-			groups:        nil,
-			wantPrincipal: "linux:alice/1000",
-			wantRoles:     RoleNames{"reader"},
+			name:      "user matched by username",
+			roles:     Roles{"reader": {Bindings: []Binding{linuxBinding(LinuxBinding{User: "alice"})}}},
+			wantRoles: RoleNames{"reader"},
 		},
 		{
-			name: "user matched by id/name",
-			bindings: PlatformBindings{
-				Users: map[Entity]RoleNames{
-					{Id: "1000", Name: "alice"}: {"writer"},
-				},
-			},
-			user:          alice,
-			groups:        nil,
-			wantPrincipal: "linux:alice/1000",
-			wantRoles:     RoleNames{"writer"},
+			name:      "user matched by uid and name",
+			roles:     Roles{"writer": {Bindings: []Binding{linuxBinding(LinuxBinding{UID: id(1000), User: "alice"})}}},
+			wantRoles: RoleNames{"writer"},
 		},
 		{
-			name: "group matched by gid",
-			bindings: PlatformBindings{
-				Groups: map[Entity]RoleNames{
-					{Id: "100", Name: ""}: {"reader"},
-				},
-			},
-			user:          alice,
-			groups:        []*user.Group{usersGroup},
-			wantPrincipal: "linux:alice/1000",
-			wantRoles:     RoleNames{"reader"},
+			name:      "uid and name disagree",
+			roles:     Roles{"writer": {Bindings: []Binding{linuxBinding(LinuxBinding{UID: id(1001), User: "alice"})}}},
+			wantRoles: nil,
 		},
 		{
-			name: "group matched by name",
-			bindings: PlatformBindings{
-				Groups: map[Entity]RoleNames{
-					{Id: "", Name: "users"}: {"reader"},
-				},
-			},
-			user:          alice,
-			groups:        []*user.Group{usersGroup},
-			wantPrincipal: "linux:alice/1000",
-			wantRoles:     RoleNames{"reader"},
+			name:      "group matched by gid",
+			roles:     Roles{"reader": {Bindings: []Binding{linuxBinding(LinuxBinding{GID: id(100)})}}},
+			groups:    []*user.Group{usersGroup},
+			wantRoles: RoleNames{"reader"},
 		},
 		{
-			name: "user and group roles merged and deduplicated",
-			bindings: PlatformBindings{
-				Users: map[Entity]RoleNames{
-					{Id: "1000", Name: ""}: {"admin", "reader"},
-				},
-				Groups: map[Entity]RoleNames{
-					{Id: "100", Name: ""}: {"reader", "writer"},
-				},
-			},
-			user:          alice,
-			groups:        []*user.Group{usersGroup},
-			wantPrincipal: "linux:alice/1000",
-			wantRoles:     RoleNames{"admin", "reader", "writer"},
+			name:      "group matched by name",
+			roles:     Roles{"reader": {Bindings: []Binding{linuxBinding(LinuxBinding{Group: "users"})}}},
+			groups:    []*user.Group{usersGroup},
+			wantRoles: RoleNames{"reader"},
 		},
 		{
-			name: "no matching entity yields empty roles",
-			bindings: PlatformBindings{
-				Users:  map[Entity]RoleNames{{Id: "9999", Name: ""}: {"admin"}},
-				Groups: map[Entity]RoleNames{{Id: "9999", Name: ""}: {"admin"}},
+			name: "user and group roles are both kept",
+			roles: Roles{
+				"admin":  {Bindings: []Binding{linuxBinding(LinuxBinding{UID: id(1000)})}},
+				"reader": {Bindings: []Binding{linuxBinding(LinuxBinding{GID: id(100)})}},
+				"writer": {Bindings: []Binding{linuxBinding(LinuxBinding{GID: id(100)})}},
 			},
-			user:          alice,
-			groups:        []*user.Group{usersGroup},
-			wantPrincipal: "linux:alice/1000",
-			wantRoles:     nil,
+			groups:    []*user.Group{usersGroup},
+			wantRoles: RoleNames{"admin", "reader", "writer"},
+		},
+		{
+			name: "no match",
+			roles: Roles{
+				"admin": {Bindings: []Binding{linuxBinding(LinuxBinding{UID: id(9999)}), linuxBinding(LinuxBinding{GID: id(9999)})}},
+			},
+			groups:    []*user.Group{usersGroup},
+			wantRoles: nil,
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			principal, roles := tc.bindings.Authorise(tc.user, tc.groups)
-			if principal != tc.wantPrincipal {
-				t.Errorf("principal: got %q, want %q", principal, tc.wantPrincipal)
-			}
+			roles := tc.roles.matchSystem(platformPeer{user: alice, groups: tc.groups})
 			if !roleNamesSetEqual(roles, tc.wantRoles) {
 				t.Errorf("roles: got %v, want %v", roles, tc.wantRoles)
 			}
@@ -230,11 +132,10 @@ func TestAuthorise(t *testing.T) {
 }
 
 func TestIdentify_nonUnixConn_returnsError(t *testing.T) {
-	c := &Bindings{}
 	_, conn := net.Pipe()
 	defer conn.Close()
 
-	_, err := c.Identify(&http.Request{}, conn)
+	_, err := (Policy{}).Identify(&http.Request{}, conn)
 	if err == nil {
 		t.Error("expected error for non-UnixConn")
 	}
@@ -252,11 +153,7 @@ func TestIdentify_unixPeercreds(t *testing.T) {
 
 	t.Run("direct peer is the caller", func(t *testing.T) {
 		conn := unixPeer(t)
-		got, err := (&Bindings{
-			PlatformBindings: PlatformBindings{
-				Users: map[Entity]RoleNames{{Name: self.Username}: {"admin"}},
-			},
-		}).Identify(&http.Request{}, conn)
+		got, err := (Policy{Roles: Roles{"admin": {Bindings: []Binding{linuxBinding(LinuxBinding{User: self.Username})}}}}).Identify(&http.Request{}, conn)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -268,10 +165,10 @@ func TestIdentify_unixPeercreds(t *testing.T) {
 		}
 	})
 
-	t.Run("header ignored without forward-auth config", func(t *testing.T) {
+	t.Run("header ignored when the peer is not an asserter", func(t *testing.T) {
 		conn := unixPeer(t)
-		req := &http.Request{Header: http.Header{DefaultForwardAuthHeader: []string{"root"}}}
-		got, err := (&Bindings{}).Identify(req, conn)
+		req := &http.Request{Header: http.Header{DefaultAssertHeader: []string{"root"}}}
+		got, err := (Policy{}).Identify(req, conn)
 		if err != nil {
 			t.Fatal(err)
 		}

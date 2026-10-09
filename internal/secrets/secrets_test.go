@@ -46,6 +46,37 @@ func TestNew(t *testing.T) {
 			t.Errorf("expected duplicate id error, got %v", err)
 		}
 	})
+	t.Run("parents", func(t *testing.T) {
+		got, err := New([]*Secret{
+			{Id: "child", Version: 1, Parents: []Parent{"db", "remote-db"}},
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if diff := cmp.Diff([]Parent{"db", "remote-db"}, got["child"].Parents); diff != "" {
+			t.Errorf("parents: %s", diff)
+		}
+	})
+	t.Run("empty parent", func(t *testing.T) {
+		_, err := New([]*Secret{{Id: "child", Version: 1, Parents: []Parent{""}}})
+		if err == nil {
+			t.Fatal("expected error for empty parent")
+		}
+		if fmt.Sprint(err) != "Secret 'child' parent must not be empty" {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+	t.Run("duplicate parent", func(t *testing.T) {
+		_, err := New([]*Secret{
+			{Id: "child", Version: 1, Parents: []Parent{"db", "db"}},
+		})
+		if err == nil {
+			t.Fatal("expected error for duplicate parent")
+		}
+		if fmt.Sprint(err) != "Secret 'child' parent 'db' is duplicated" {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
 	t.Run("version below 1 rejected", func(t *testing.T) {
 		for _, mv := range []int{-1, 0} {
 			_, err := New([]*Secret{{Id: "x", Version: mv}})
@@ -57,6 +88,31 @@ func TestNew(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestParentJSON(t *testing.T) {
+	raw := `[{"id":"child","version":1,"parents":["db","remote-db"]}]`
+	var secrets Secrets
+	if err := json.Unmarshal([]byte(raw), &secrets); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	data, err := json.Marshal(secrets["child"].Parents)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if diff := cmp.Diff(`["db","remote-db"]`, string(data)); diff != "" {
+		t.Errorf("parents JSON: %s", diff)
+	}
+
+	for _, raw := range []string{
+		`[{"id":"child","version":1,"parents":[{"host":"b.example","id":"remote"}]}]`,
+		`[{"id":"child","version":1,"parents":[1]}]`,
+	} {
+		var secrets Secrets
+		if err := json.Unmarshal([]byte(raw), &secrets); err == nil {
+			t.Errorf("Unmarshal(%s): expected error", raw)
+		}
+	}
 }
 
 func TestSecrets_MarshalJSON(t *testing.T) {

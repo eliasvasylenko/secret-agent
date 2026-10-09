@@ -20,26 +20,18 @@ type Controller struct {
 	middleware  func(perms auth.Permissions, next http.HandlerFunc) http.Handler
 }
 
-func NewController(secretStore backend.Backend, limiter limiter, permissions permissions) *Controller {
+func NewController(secretStore backend.Backend, policy *auth.Policy, limiter *Limiter) *Controller {
 	limiterKey := func(r *http.Request) string {
 		return identityFromContext(r.Context()).Principal
 	}
 	middleware := func(perms auth.Permissions, next http.HandlerFunc) http.Handler {
-		return permissions.Middleware(perms, limiter.Middleware(limiterKey, next))
+		return AuthMiddleware(policy, perms, limiter.Middleware(limiterKey, next))
 	}
 	return &Controller{
 		secretStore: secretStore,
 		slots:       make(map[attachSlotKey]*attachSlot),
 		middleware:  middleware,
 	}
-}
-
-type limiter interface {
-	Middleware(keyFunc func(r *http.Request) string, next http.Handler) http.Handler
-}
-
-type permissions interface {
-	Middleware(perms auth.Permissions, next http.Handler) http.Handler
 }
 
 type noopProposer struct{}

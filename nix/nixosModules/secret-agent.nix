@@ -77,6 +77,71 @@ let
     activate = mkCommandOptions "activate the secret";
     deactivate = mkCommandOptions "deactivate the secret";
     test = mkCommandOptions "test the activated secret";
+    parents = lib.mkOption {
+      description = ''
+        Roles allowed to propose work on this secret.
+        Omitted means this secret accepts no parent. Direct calls are unchanged.
+      '';
+      type = lib.types.listOf lib.types.str;
+      default = [ ];
+    };
+  };
+
+  accountOptions = {
+    uid = lib.mkOption {
+      description = "Numeric user id. May be combined with user.";
+      type = lib.types.nullOr lib.types.ints.unsigned;
+      default = null;
+    };
+    user = lib.mkOption {
+      description = "User name, resolved to a uid at connection time. May be combined with uid.";
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+    };
+    gid = lib.mkOption {
+      description = "Numeric group id. May be combined with group.";
+      type = lib.types.nullOr lib.types.ints.unsigned;
+      default = null;
+    };
+    group = lib.mkOption {
+      description = "Group name. May be combined with gid.";
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+    };
+  };
+
+  authenticatorType = lib.types.submodule {
+    options = accountOptions // {
+      name = lib.mkOption {
+        description = "Name role bindings use in auth.";
+        type = lib.types.str;
+      };
+      kind = lib.mkOption {
+        description = "How this authenticator names the caller.";
+        type = lib.types.enum [ "assert" ];
+        default = "assert";
+      };
+      header = lib.mkOption {
+        description = "Header the asserter writes the name in. Empty uses the service default.";
+        type = lib.types.str;
+        default = "";
+      };
+    };
+  };
+
+  bindingType = lib.types.submodule {
+    options = accountOptions // {
+      auth = lib.mkOption {
+        description = "Authenticator this match applies to. system is the socket credential.";
+        type = lib.types.str;
+        default = "system";
+      };
+      name = lib.mkOption {
+        description = "Name an assert authenticator must have written. Used when auth is not system.";
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+      };
+    };
   };
 
   # One or more strings
@@ -108,6 +173,14 @@ let
     package = lib.mkPackageOption packages.${pkgs.stdenv.hostPlatform.system} "secret-agent" {
       default = "default";
     };
+    authenticators = lib.mkOption {
+      description = ''
+        How a connection is named, in first-match order. system is always
+        present and last, and is the socket credential.
+      '';
+      type = lib.types.listOf authenticatorType;
+      default = [ ];
+    };
     roles = lib.mkOption {
       description = "Roles and their permissions";
       type =
@@ -118,6 +191,15 @@ let
               description = "Actions granted on every secret. Subjects are all, secrets, and instances.";
               type = stringOrStrings;
               default = { };
+            };
+            bindings = lib.mkOption {
+              description = ''
+                Who holds this role. Each entry matches one authenticator.
+                A caller matching any entry has this role. auth defaults to
+                system, the socket credential.
+              '';
+              type = lib.types.listOf bindingType;
+              default = [ ];
             };
             secrets = lib.mkOption {
               description = ''
@@ -131,41 +213,12 @@ let
             };
           };
         });
-      default.admin.permissions = {
-        all = "any";
-      };
-    };
-    bindings = {
-      users = lib.mkOption {
-        description = "Users and the roles they can assume";
-        type = stringOrStrings;
-        default.root = "admin";
-      };
-      groups = lib.mkOption {
-        description = "Groups and the roles they can assume";
-        type = stringOrStrings;
-        default.secret-agent = "admin";
-      };
-      forwardAuth = {
-        peers = lib.mkOption {
-          description = ''
-            Unix peers allowed to assert the end-user via HTTP header (typically
-            the reverse-proxy user, e.g. `caddy`). The header is ignored unless
-            `SO_PEERCRED` matches one of these names or uids.
-          '';
-          type = lib.types.listOf lib.types.str;
-          default = [ ];
-          example = [ "caddy" ];
-        };
-        header = lib.mkOption {
-          description = ''
-            Header a trusted hop uses to name the end user. Empty (default)
-            uses the agent's default; only set this to pass `-H` on
-            dial-stdio and override ForwardAuth.Header.
-          '';
-          type = lib.types.str;
-          default = "";
-        };
+      default.admin = {
+        bindings = [
+          { uid = 0; }
+          { group = "secret-agent"; }
+        ];
+        permissions.all = "any";
       };
     };
     ssh = {
@@ -213,14 +266,42 @@ let
     lib.attrValues cfg.ssh.shared
   );
   sshAgentKeysDir = "/var/lib/secret-agent/ssh/authorized_keys.d";
-  forwardAuthPeers = lib.unique (
-    cfg.bindings.forwardAuth.peers ++ lib.optionals cfg.ssh.enable [ "secret-agent" ]
-  );
 
   dialStdio = "${cfg.package}/bin/secret-agent dial-stdio";
-  dialStdioHeader = lib.optionalString (
-    cfg.bindings.forwardAuth.header != ""
-  ) " -H ${cfg.bindings.forwardAuth.header}";
+
+  headersForAssertedName =
+    name:
+    let
+      auths = lib.unique (
+        lib.concatMap (
+          spec:
+          lib.concatMap (binding: lib.optional (binding.name == name) binding.auth) spec.bindings
+        ) (lib.attrValues cfg.roles)
+      );
+    in
+    lib.unique (
+      lib.concatMap (
+        authenticator: lib.optional (lib.elem authenticator.name auths) authenticator.header
+      ) cfg.authenticators
+    );
+
+  dialStdioHeader =
+    name:
+    let
+      headers = headersForAssertedName name;
+    in
+    lib.optionalString (headers != [ ] && lib.head headers != "") " -H ${lib.head headers}";
+
+  stripNull = attrs: lib.filterAttrs (_: v: v != null) attrs;
+
+  userArm = account: account.uid != null || account.user != null;
+  groupArm = account: account.gid != null || account.group != null;
+  accountSet = account: userArm account || groupArm account;
+  accountXor = account: userArm account != groupArm account;
+
+  accountConfig = account: stripNull {
+    inherit (account) uid user gid group;
+  };
 
   wrapSharedKey =
     name: key:
@@ -229,7 +310,7 @@ let
     in
     lib.optionalString (
       k != ""
-    ) "restrict,command=\"${dialStdio} -u ${name}${dialStdioHeader}\" ${k}\n";
+    ) "restrict,command=\"${dialStdio} -u ${name}${dialStdioHeader name}\" ${k}\n";
 
   sharedAuthorizedKeys = pkgs.writeText "secret-agent-authorized-keys" (
     lib.concatStrings (
@@ -279,26 +360,48 @@ let
           activate = makeCommandConfig secret.activate;
           deactivate = makeCommandConfig secret.deactivate;
           test = makeCommandConfig secret.test;
+          parents = if secret.parents == [ ] then null else secret.parents;
         }
       ) secrets
     );
 
+  makeAuthenticators = map (
+    authenticator:
+    {
+      inherit (authenticator) name kind;
+      asserter = accountConfig authenticator;
+    }
+    // lib.optionalAttrs (authenticator.header != "") { inherit (authenticator) header; }
+  );
+
+  makeBindings = map (
+    binding:
+    {
+      inherit (binding) auth;
+    }
+    // lib.optionalAttrs (binding.auth == "system") (accountConfig binding)
+    // lib.optionalAttrs (binding.name != null) { inherit (binding) name; }
+  );
+
+  makeRolesConfig = lib.mapAttrs (
+    _: spec:
+    {
+      permissions = spec.permissions;
+    }
+    // lib.optionalAttrs (spec.secrets != { }) { inherit (spec) secrets; }
+    // lib.optionalAttrs (spec.bindings != [ ]) { bindings = makeBindings spec.bindings; }
+  ) cfg.roles;
+
   # Write the permissions config file for the service backend
   permissionsFile = pkgs.writeText "permissions.config" (
-    builtins.toJSON {
-      bindings = {
-        inherit (cfg.bindings) users groups;
+    builtins.toJSON (
+      {
+        roles = makeRolesConfig;
       }
-      // lib.optionalAttrs (forwardAuthPeers != [ ]) {
-        forwardAuth = {
-          peers = forwardAuthPeers;
-        }
-        // lib.optionalAttrs (cfg.bindings.forwardAuth.header != "") {
-          header = cfg.bindings.forwardAuth.header;
-        };
-      };
-      inherit (cfg) roles;
-    }
+      // lib.optionalAttrs (cfg.authenticators != [ ]) {
+        authenticators = makeAuthenticators cfg.authenticators;
+      }
+    )
   );
 
   # Write the secrets config file for the service backend
@@ -319,7 +422,49 @@ in
         assertion = !cfg.ssh.enable || config.services.openssh.enable;
         message = "services.secret-agent.ssh.enable requires services.openssh.enable.";
       }
-    ];
+    ]
+    ++ lib.optional (lib.length (map (a: a.name) cfg.authenticators) != lib.length (lib.unique (map (a: a.name) cfg.authenticators))) {
+      assertion = false;
+      message = "services.secret-agent.authenticators names must be unique.";
+    }
+    ++ lib.concatLists (
+      lib.imap0 (i: authenticator: [
+        {
+          assertion = authenticator.name != "" && authenticator.name != "system";
+          message = "services.secret-agent.authenticators.${toString i} name must not be empty or system.";
+        }
+        {
+          assertion = accountXor authenticator;
+          message = "services.secret-agent.authenticators.${toString i} must set a user (uid and/or user) or a group (gid and/or group).";
+        }
+      ]) cfg.authenticators
+    )
+    ++ lib.concatLists (
+      lib.mapAttrsToList (
+        role: spec:
+        lib.concatLists (
+          lib.imap0 (i: binding: [
+            {
+              assertion =
+                if binding.auth == "system" then
+                  accountXor binding && binding.name == null
+                else
+                  !accountSet binding && binding.name != null && binding.name != "" && lib.elem binding.auth (map (a: a.name) cfg.authenticators);
+              message = "services.secret-agent.roles.${role}.bindings.${toString i} must match system with a user or group, or name an assert authenticator.";
+            }
+          ]) spec.bindings
+        )
+      ) cfg.roles
+    )
+    ++ lib.concatLists (
+      lib.mapAttrsToList (
+        name: _:
+        lib.optional (lib.length (headersForAssertedName name) > 1) {
+          assertion = false;
+          message = "services.secret-agent assert authenticators for ${name} must use the same header.";
+        }
+      ) cfg.ssh.shared
+    );
 
     systemd.services.secret-agent = {
       enable = true;

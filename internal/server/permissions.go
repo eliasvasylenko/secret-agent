@@ -12,11 +12,6 @@ import (
 	"github.com/eliasvasylenko/secret-agent/internal/auth"
 )
 
-type Permissions struct {
-	Roles    auth.Roles    `json:"roles"`
-	Bindings auth.Bindings `json:"bindings"`
-}
-
 type identityKey struct{}
 
 func identityFromContext(ctx context.Context) *auth.Identity {
@@ -58,41 +53,41 @@ func requirePermit(w http.ResponseWriter, r *http.Request, secretID string) bool
 	return false
 }
 
-func LoadPermissions(permissionsFileName string) (*Permissions, error) {
+func LoadPermissions(permissionsFileName string) (*auth.Policy, error) {
 	permissionsFile, err := os.Open(permissionsFileName)
 	if err != nil {
-		return &Permissions{}, err
+		return &auth.Policy{}, err
 	}
 
 	permissionsBytes, err := io.ReadAll(permissionsFile)
 	if err != nil {
-		return &Permissions{}, err
+		return &auth.Policy{}, err
 	}
 
-	var permissions Permissions
-	err = json.Unmarshal(permissionsBytes, &permissions)
+	var policy auth.Policy
+	err = json.Unmarshal(permissionsBytes, &policy)
 
-	return &permissions, err
+	return &policy, err
 }
 
-func (p *Permissions) Middleware(permissions auth.Permissions, next http.Handler) http.Handler {
+func AuthMiddleware(policy *auth.Policy, permissions auth.Permissions, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		connection := r.Context().Value(connectionKey{}).(net.Conn)
-		identity, err := p.Bindings.Identify(r, connection)
+		identity, err := policy.Identify(r, connection)
 		if err != nil {
 			writeError(w, NewErrorResponse(http.StatusUnauthorized, err))
 			return
 		}
 
 		// No secret yet: the action must be granted globally or on some secret.
-		err = p.Roles.AssertPermission(identity.Roles, permissions, "")
+		err = policy.Roles.AssertPermission(identity.Roles, permissions, "")
 		if err != nil {
 			writeError(w, NewErrorResponse(http.StatusForbidden, err))
 			return
 		}
 
 		permit := func(secretID string) bool {
-			return p.Roles.CheckPermission(identity.Roles, permissions, secretID)
+			return policy.Roles.CheckPermission(identity.Roles, permissions, secretID)
 		}
 		ctx := context.WithValue(r.Context(), identityKey{}, identity)
 		ctx = contextWithPermit(ctx, permit)
