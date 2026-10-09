@@ -83,14 +83,14 @@ func AuthMiddleware(policy *auth.Policy, permissions auth.Permissions, next http
 		}
 
 		// No secret yet: the action must be granted globally or on some secret.
-		err = policy.Roles.AssertPermission(identity.Roles, permissions, "")
+		err = identity.AssertPermission(permissions, "")
 		if err != nil {
 			writeError(w, NewErrorResponse(http.StatusForbidden, err))
 			return
 		}
 
 		permit := func(secretID string) bool {
-			return policy.Roles.CheckPermission(identity.Roles, permissions, secretID)
+			return identity.CheckPermission(permissions, secretID)
 		}
 		ctx := context.WithValue(r.Context(), identityKey{}, identity)
 		ctx = contextWithPermit(ctx, permit)

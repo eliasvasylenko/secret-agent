@@ -35,6 +35,15 @@ func newRoles(roles []*Role) (Roles, error) {
 	return roles, nil
 }
 
+func (role *Role) allows(permissions Permissions, secretID string) bool {
+	for subject, action := range permissions {
+		if !role.Permissions.matches(subject, action) && !role.Secrets[secretID].matches(subject, action) {
+			return false
+		}
+	}
+	return true
+}
+
 func (r Roles) BoundRoles(principal Principal) (Roles, error) {
 	var matched Roles
 	for _, role := range r {
