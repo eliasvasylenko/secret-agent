@@ -48,7 +48,7 @@ func (r Roles) BoundRoles(principal Principal) (Roles, error) {
 	var matched Roles
 	for _, role := range r {
 		for _, binding := range role.Bindings {
-			ok, err := binding.Bind(principal)
+			ok, err := binding.Bind(principal.credential)
 			if err != nil {
 				return nil, err
 			}

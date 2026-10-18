@@ -50,7 +50,7 @@ func policyForCurrentUser(t *testing.T, roles auth.Roles) (*auth.Policy, string)
 	for _, role := range roles {
 		role.Bindings = auth.Bindings{binding}
 	}
-	return &auth.Policy{Authenticators: loaded.Authenticators, Roles: roles}, fmt.Sprintf("linux:%s/%s", self.Username, self.Uid)
+	return &auth.Policy{Authenticators: loaded.Authenticators, Roles: roles}, fmt.Sprintf("%s/%s@system", self.Username, self.Uid)
 }
 
 func unixTestConn(t *testing.T) net.Conn {

@@ -12,46 +12,44 @@ import (
 const assertKind = "assert"
 
 func init() {
-	var prototype Authenticator[assertPrincipal] = &assertAuthenticator{}
+	var prototype Authenticator[assertCredential] = &assertAuthenticator{}
 	RegisterAuthenticatorPrototype(assertKind, &prototype)
 }
 
-// assertPrincipal is a name written by a peer that matched the asserter binding.
-// GetName is the header value, then @, then that peer's name.
-type assertPrincipal struct {
+// assertCredential is the name written by a peer that matched the asserter binding.
+type assertCredential struct {
 	name string
-	peer Principal
 }
 
-func (p assertPrincipal) GetName() string {
-	return p.name + "@" + p.peer.GetName()
+func (c assertCredential) Name() string {
+	return c.name
 }
 
 // assertAuthenticator claims the connection when the peer matches asserter,
 // then requires that authenticator's header. The asserter is any binding.
 type assertAuthenticator struct {
 	header   string
-	asserter Binding[Principal]
+	asserter Binding[Credential]
 }
 
-func (a assertAuthenticator) Authenticate(request *http.Request, connection net.Conn) (assertPrincipal, error) {
+func (a assertAuthenticator) Authenticate(request *http.Request, connection net.Conn) (assertCredential, error) {
 	if a.asserter == nil {
-		return assertPrincipal{}, fmt.Errorf("assert authenticator asserter is required")
+		return assertCredential{}, fmt.Errorf("assert authenticator asserter is required")
 	}
 	system, err := getAuthenticatorPrototype(linuxKind)
 	if err != nil {
-		return assertPrincipal{}, err
+		return assertCredential{}, err
 	}
 	peer, err := system.Authenticate(request, connection)
 	if err != nil {
-		return assertPrincipal{}, err
+		return assertCredential{}, err
 	}
 	matches, err := a.asserter.Bind(peer)
 	if err != nil {
-		return assertPrincipal{}, err
+		return assertCredential{}, err
 	}
 	if !matches {
-		return assertPrincipal{}, errNotClaimed
+		return assertCredential{}, errNotClaimed
 	}
 	header := a.header
 	if header == "" {
@@ -59,12 +57,12 @@ func (a assertAuthenticator) Authenticate(request *http.Request, connection net.
 	}
 	name, err := headerValue(request, header)
 	if err != nil {
-		return assertPrincipal{}, err
+		return assertCredential{}, err
 	}
-	return assertPrincipal{name: name, peer: peer}, nil
+	return assertCredential{name: name}, nil
 }
 
-func (assertAuthenticator) NewBinding() Binding[assertPrincipal] {
+func (assertAuthenticator) NewBinding() Binding[assertCredential] {
 	return &assertBinding{}
 }
 
@@ -106,11 +104,11 @@ func (b *assertBinding) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-func (b assertBinding) Bind(principal assertPrincipal) (bool, error) {
+func (b assertBinding) Bind(credential assertCredential) (bool, error) {
 	if b.Name == "" {
 		return false, fmt.Errorf("assert binding name must not be empty")
 	}
-	return b.Name == principal.name, nil
+	return b.Name == credential.name, nil
 }
 
 func headerValue(request *http.Request, header string) (string, error) {

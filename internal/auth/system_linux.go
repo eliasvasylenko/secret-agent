@@ -13,33 +13,33 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-var systemAuthenticator Authenticator[Principal] = AnyAuthenticator[linuxPrincipal]{authenticator: linuxAuthenticator{}}
+var systemAuthenticator Authenticator[Credential] = AnyAuthenticator[linuxCredential]{authenticator: linuxAuthenticator{}}
 
 const linuxKind = "linux"
 
 func init() {
-	var prototype Authenticator[linuxPrincipal] = linuxAuthenticator{}
+	var prototype Authenticator[linuxCredential] = linuxAuthenticator{}
 	RegisterAuthenticatorPrototype(linuxKind, &prototype)
 }
 
-// linuxPrincipal is the socket credential.
-type linuxPrincipal struct {
+// linuxCredential is the socket credential.
+type linuxCredential struct {
 	user   *user.User
 	groups []*user.Group
 }
 
-func (p linuxPrincipal) GetName() string {
-	return fmt.Sprintf("linux:%s/%s", p.user.Username, p.user.Uid)
+func (c linuxCredential) Name() string {
+	return c.user.Username + "/" + c.user.Uid
 }
 
 // linuxAuthenticator is the reserved system authenticator. Kind is linux.
 type linuxAuthenticator struct{}
 
-func (linuxAuthenticator) Authenticate(_ *http.Request, connection net.Conn) (linuxPrincipal, error) {
+func (linuxAuthenticator) Authenticate(_ *http.Request, connection net.Conn) (linuxCredential, error) {
 	return authenticatePeer(connection)
 }
 
-func (linuxAuthenticator) NewBinding() Binding[linuxPrincipal] {
+func (linuxAuthenticator) NewBinding() Binding[linuxCredential] {
 	return &linuxBinding{}
 }
 
@@ -57,8 +57,8 @@ type linuxBinding struct {
 	Group string  `json:"group,omitempty"`
 }
 
-func systemBinding(b linuxBinding) Binding[Principal] {
-	return AnyBinding[linuxPrincipal]{binding: &b}
+func systemBinding(b linuxBinding) Binding[Credential] {
+	return AnyBinding[linuxCredential]{binding: &b}
 }
 
 func (b *linuxBinding) UnmarshalJSON(data []byte) error {
@@ -72,15 +72,15 @@ func (b *linuxBinding) UnmarshalJSON(data []byte) error {
 	return b.validate()
 }
 
-func (b linuxBinding) Bind(principal linuxPrincipal) (bool, error) {
+func (b linuxBinding) Bind(credential linuxCredential) (bool, error) {
 	err := b.validate()
 	if err != nil {
 		return false, err
 	}
 	if b.userArm() {
-		return b.matchUser(principal.user), nil
+		return b.matchUser(credential.user), nil
 	}
-	return b.matchGroup(principal.groups)
+	return b.matchGroup(credential.groups)
 }
 
 func (b linuxBinding) validate() error {
@@ -131,16 +131,16 @@ func idEquals(id uint32, decimal string) bool {
 
 // authenticatePeer reads the socket peer from SO_PEERCRED. The username and
 // groups come from the user database. The uid is what later matchers compare.
-func authenticatePeer(connection net.Conn) (linuxPrincipal, error) {
+func authenticatePeer(connection net.Conn) (linuxCredential, error) {
 	var cred *unix.Ucred
 
 	uc, ok := connection.(*net.UnixConn)
 	if !ok {
-		return linuxPrincipal{}, fmt.Errorf("unexpected socket type")
+		return linuxCredential{}, fmt.Errorf("unexpected socket type")
 	}
 	raw, err := uc.SyscallConn()
 	if err != nil {
-		return linuxPrincipal{}, fmt.Errorf("error opening raw connection: %w", err)
+		return linuxCredential{}, fmt.Errorf("error opening raw connection: %w", err)
 	}
 
 	controlErr := raw.Control(func(fd uintptr) {
@@ -150,25 +150,25 @@ func authenticatePeer(connection net.Conn) (linuxPrincipal, error) {
 		)
 	})
 	if err != nil {
-		return linuxPrincipal{}, fmt.Errorf("failed to get socket credentials: %w", err)
+		return linuxCredential{}, fmt.Errorf("failed to get socket credentials: %w", err)
 	} else if controlErr != nil {
-		return linuxPrincipal{}, fmt.Errorf("failed to control socket: %w", controlErr)
+		return linuxCredential{}, fmt.Errorf("failed to control socket: %w", controlErr)
 	}
 
 	authenticatedUser, err := user.LookupId(strconv.FormatUint(uint64(cred.Uid), 10))
 	if err != nil {
-		return linuxPrincipal{}, fmt.Errorf("failed to lookup credential user: %w", err)
+		return linuxCredential{}, fmt.Errorf("failed to lookup credential user: %w", err)
 	}
 
 	groups, err := groupsOf(authenticatedUser)
 	if err != nil {
-		return linuxPrincipal{}, err
+		return linuxCredential{}, err
 	}
 	groups, err = withPeerGid(groups, cred.Gid)
 	if err != nil {
-		return linuxPrincipal{}, err
+		return linuxCredential{}, err
 	}
-	return linuxPrincipal{user: authenticatedUser, groups: groups}, nil
+	return linuxCredential{user: authenticatedUser, groups: groups}, nil
 }
 
 func withPeerGid(groups []*user.Group, peerGid uint32) ([]*user.Group, error) {

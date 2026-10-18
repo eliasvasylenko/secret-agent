@@ -99,7 +99,7 @@ func TestLinuxBinding(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			roles, err := tc.roles.BoundRoles(linuxPrincipal{user: alice, groups: tc.groups})
+			roles, err := tc.roles.BoundRoles(Principal{credential: linuxCredential{user: alice, groups: tc.groups}})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -128,7 +128,7 @@ func TestIdentify_system(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantPrincipal := fmt.Sprintf("linux:%s/%s", self.Username, self.Uid)
+	wantPrincipal := fmt.Sprintf("%s/%s@%s", self.Username, self.Uid, systemAuthenticatorName)
 
 	t.Run("direct peer is the caller", func(t *testing.T) {
 		got, err := policyWith(t, Roles{role("admin", systemBinding(linuxBinding{User: self.Username}))}).Identify(&http.Request{}, unixPeer(t))
@@ -183,7 +183,7 @@ func TestIdentify_assert(t *testing.T) {
 		t.Fatal(err)
 	}
 	uid := uint32(n)
-	socketName := fmt.Sprintf("linux:%s/%s", self.Username, self.Uid)
+	socketName := fmt.Sprintf("%s/%s@%s", self.Username, self.Uid, systemAuthenticatorName)
 
 	t.Run("header ignored when the peer is not an asserter", func(t *testing.T) {
 		policy := loadPolicy(t, fmt.Sprintf(`{
@@ -230,7 +230,7 @@ func TestIdentify_assert(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got.Principal.GetName() != "john@"+socketName {
+		if got.Principal.GetName() != "john@caddy" {
 			t.Errorf("principal: got %q", got.Principal.GetName())
 		}
 		if !sameRoleNames(got.Roles, []RoleName{"reader"}) {
@@ -248,7 +248,7 @@ func TestIdentify_assert(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got.Principal.GetName() != "alice@"+socketName {
+		if got.Principal.GetName() != "alice@caddy" {
 			t.Errorf("principal: got %q", got.Principal.GetName())
 		}
 		if len(got.Roles) != 0 {
@@ -266,8 +266,26 @@ func TestIdentify_assert(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got.Principal.GetName() != "john@"+socketName {
+		if got.Principal.GetName() != "john@caddy" {
 			t.Errorf("principal: got %q", got.Principal.GetName())
+		}
+	})
+
+	t.Run("name may contain @", func(t *testing.T) {
+		policy := loadPolicy(t, fmt.Sprintf(`{
+			"authenticators": [{"name":"caddy","kind":"assert","asserter":{"user":%q}}],
+			"roles": [{"name":"reader","bindings":[{"auth":"caddy","name":"alice@example.com"}]}]
+		}`, self.Username))
+		req := &http.Request{Header: http.Header{DefaultAssertHeader: []string{"alice@example.com"}}}
+		got, err := policy.Identify(req, unixPeer(t))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Principal.GetName() != "alice@example.com@caddy" {
+			t.Errorf("principal: got %q", got.Principal.GetName())
+		}
+		if !sameRoleNames(got.Roles, []RoleName{"reader"}) {
+			t.Errorf("roles: got %v, want [reader]", got.Roles)
 		}
 	})
 
@@ -299,7 +317,7 @@ func TestIdentify_assert(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got.Principal.GetName() != "john@"+socketName {
+		if got.Principal.GetName() != "john@second" {
 			t.Errorf("principal: got %q", got.Principal.GetName())
 		}
 		if !sameRoleNames(got.Roles, []RoleName{"reader"}) {
@@ -418,6 +436,20 @@ func TestPolicy_load(t *testing.T) {
 		}`, `duplicate authenticator "caddy"`)
 	})
 
+	t.Run("authenticator name containing @", func(t *testing.T) {
+		mustReject(t, `{
+			"authenticators": [{"name":"a@b","kind":"assert","asserter":{"user":"caddy"}}],
+			"roles": []
+		}`, `authenticator name "a@b" must be non-empty and must not contain '@'`)
+	})
+
+	t.Run("empty authenticator name", func(t *testing.T) {
+		mustReject(t, `{
+			"authenticators": [{"name":"","kind":"assert","asserter":{"user":"caddy"}}],
+			"roles": []
+		}`, `authenticator name "" must be non-empty and must not contain '@'`)
+	})
+
 	t.Run("explicit system", func(t *testing.T) {
 		mustReject(t, `{
 			"authenticators": [
@@ -458,7 +490,7 @@ func loadPolicy(t *testing.T, raw string) Policy {
 	return policy
 }
 
-func role(name RoleName, bindings ...Binding[Principal]) *Role {
+func role(name RoleName, bindings ...Binding[Credential]) *Role {
 	return &Role{Name: name, Bindings: bindings}
 }
 

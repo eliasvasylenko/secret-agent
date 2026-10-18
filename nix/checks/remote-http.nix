@@ -131,6 +131,6 @@ pkgs.testers.runNixOSTest {
     with subtest("local unix is still the socket credential"):
       output = server.succeed("secret-agent create remote </dev/null")
       local = instance_json(output)
-      assert local["status"]["startedBy"].startswith("linux:root/"), f"startedBy: {local}"
+      assert local["status"]["startedBy"] == "root/0@system", f"startedBy: {local}"
   '';
 }
