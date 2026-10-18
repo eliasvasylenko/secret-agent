@@ -26,19 +26,6 @@ import (
 	"github.com/google/go-cmp/cmp"
 )
 
-func systemUIDBinding(t *testing.T, uid uint32) auth.Binding[auth.Principal] {
-	t.Helper()
-	var policy auth.Policy
-	if err := json.Unmarshal([]byte(`{}`), &policy); err != nil {
-		t.Fatal(err)
-	}
-	binding, err := auth.UnmarshalJSONBinding([]byte(fmt.Sprintf(`{"auth":"system","uid":%d}`, uid)), policy.Authenticators)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return binding
-}
-
 func policyForCurrentUser(t *testing.T, roles auth.Roles) (*auth.Policy, string) {
 	t.Helper()
 	self, err := user.Current()
@@ -49,17 +36,21 @@ func policyForCurrentUser(t *testing.T, roles auth.Roles) (*auth.Policy, string)
 	if err != nil {
 		t.Fatal(err)
 	}
-	uid := uint32(n)
+	var loaded auth.Policy
+	raw := fmt.Sprintf(`{"roles":[{"name":"binding","bindings":[{"auth":"system","uid":%d}]}]}`, uint32(n))
+	if err := json.Unmarshal([]byte(raw), &loaded); err != nil {
+		t.Fatal(err)
+	}
 	if len(roles) == 0 {
 		roles = auth.Roles{
 			&auth.Role{Name: "test", Permissions: auth.Permissions{auth.All: auth.Any}},
 		}
 	}
-	binding := systemUIDBinding(t, uid)
+	binding := loaded.Roles[0].Bindings[0]
 	for _, role := range roles {
 		role.Bindings = auth.Bindings{binding}
 	}
-	return &auth.Policy{Roles: roles}, fmt.Sprintf("linux:%s/%s", self.Username, self.Uid)
+	return &auth.Policy{Authenticators: loaded.Authenticators, Roles: roles}, fmt.Sprintf("linux:%s/%s", self.Username, self.Uid)
 }
 
 func unixTestConn(t *testing.T) net.Conn {

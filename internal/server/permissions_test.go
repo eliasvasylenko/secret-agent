@@ -65,6 +65,9 @@ func TestLoadPermissions(t *testing.T) {
 				if p == nil {
 					t.Fatal("LoadPermissions returned nil *auth.Policy")
 				}
+				if _, ok := p.Authenticators.Get("system"); !ok {
+					t.Error("system authenticator missing")
+				}
 				if len(p.Roles) != 2 {
 					t.Errorf("len(Roles) = %d, want 2", len(p.Roles))
 				}
@@ -85,9 +88,7 @@ func TestLoadPermissions(t *testing.T) {
 				if err == nil {
 					t.Fatal("LoadPermissions = nil, want error")
 				}
-				if tt.checkErr != nil {
-					tt.checkErr(t, err)
-				}
+				tt.checkErr(t, err)
 			} else if err != nil {
 				t.Fatalf("LoadPermissions = %v", err)
 			}
@@ -104,13 +105,16 @@ func TestPermissions_Middleware_returns401WhenIdentifyFails(t *testing.T) {
 	defer client.Close()
 	defer server.Close()
 
-	policy := &auth.Policy{Roles: auth.Roles{&auth.Role{Name: "admin", Permissions: auth.Permissions{auth.All: auth.Any}}}}
+	var policy auth.Policy
+	if err := json.Unmarshal([]byte(`{"roles":[{"name":"admin","permissions":{"all":"any"}}]}`), &policy); err != nil {
+		t.Fatal(err)
+	}
 	nextCalled := false
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		nextCalled = true
 		w.WriteHeader(http.StatusOK)
 	})
-	handler := AuthMiddleware(policy, auth.Permissions{auth.Secrets: auth.Read}, next)
+	handler := AuthMiddleware(&policy, auth.Permissions{auth.Secrets: auth.Read}, next)
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req = req.WithContext(context.WithValue(req.Context(), connectionKey{}, server))

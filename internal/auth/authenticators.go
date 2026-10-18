@@ -2,39 +2,94 @@ package auth
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"reflect"
 )
 
-const (
-	systemAuthenticator = "system"
-	linuxKind           = "linux"
-)
+// errNotClaimed means this authenticator does not apply to the connection.
+var errNotClaimed = errors.New("authenticator did not claim the connection")
+
+const systemAuthenticatorName = "system"
 
 var authenticatorRegistry = make(map[string]func() Authenticator[Principal])
 
-type Authenticators map[string]Authenticator[Principal]
+type Authenticators struct {
+	order          []string
+	authenticators map[string]Authenticator[Principal]
+}
 
-func (a *Authenticators) UnmarshalJSON(data []byte) error {
-	var list []json.RawMessage
-	err := json.Unmarshal(data, &list)
-	if err != nil {
-		return err
+func NewAuthenticators() *Authenticators {
+	return &Authenticators{
+		order:          make([]string, 0),
+		authenticators: make(map[string]Authenticator[Principal]),
 	}
-	*a = make(Authenticators, len(list))
-	for _, item := range list {
-		name, authenticator, err := UnmarshalJSONAuthenticator(item)
+}
+
+func (a *Authenticators) unmarshal(data []byte, existing *Authenticators) error {
+	var list []json.RawMessage
+	if len(data) > 0 {
+		err := json.Unmarshal(data, &list)
 		if err != nil {
 			return err
 		}
-		if _, ok := (*a)[name]; ok {
+	}
+	existingOrder := existing.order
+	existingAuthenticators := existing.authenticators
+	*a = Authenticators{
+		order:          make([]string, len(list)+len(existingOrder)),
+		authenticators: make(map[string]Authenticator[Principal]),
+	}
+	for i, name := range existingOrder {
+		(*a).order[len(list)+i] = name
+		(*a).authenticators[name] = existingAuthenticators[name]
+	}
+	for i := len(list) - 1; i >= 0; i-- {
+		name, authenticator, err := unmarshalAuthenticator(list[i], *a)
+		if err != nil {
+			return err
+		}
+		if _, ok := (*a).authenticators[name]; ok {
 			return fmt.Errorf("duplicate authenticator %q", name)
 		}
-		(*a)[name] = authenticator
+		(*a).order[i] = name
+		(*a).authenticators[name] = authenticator
 	}
 	return nil
+}
+
+func (a *Authenticators) Add(name string, authenticator Authenticator[Principal]) error {
+	if _, ok := (*a).authenticators[name]; ok {
+		return fmt.Errorf("duplicate authenticator %q", name)
+	}
+	a.order = append([]string{name}, a.order...)
+	a.authenticators[name] = authenticator
+	return nil
+}
+
+func (a *Authenticators) Get(name string) (Authenticator[Principal], bool) {
+	authenticator, ok := a.authenticators[name]
+	return authenticator, ok
+}
+
+func (a *Authenticators) Authenticate(request *http.Request, connection net.Conn) (Principal, error) {
+	for _, name := range a.order {
+		authenticator, ok := a.authenticators[name]
+		if !ok {
+			continue
+		}
+		principal, err := authenticator.Authenticate(request, connection)
+		if errors.Is(err, errNotClaimed) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		return principal, nil
+	}
+	return nil, fmt.Errorf("failed to authenticate")
 }
 
 type Authenticator[T Principal] interface {
@@ -42,7 +97,7 @@ type Authenticator[T Principal] interface {
 
 	NewBinding() Binding[T]
 
-	json.Unmarshaler
+	unmarshal([]byte, Authenticators) error
 }
 
 type Principal interface {
@@ -73,12 +128,16 @@ func (a AnyAuthenticator[T]) NewBinding() Binding[Principal] {
 	return AnyBinding[T]{binding: a.authenticator.NewBinding()}
 }
 
-func (a AnyAuthenticator[T]) UnmarshalJSON(data []byte) error {
-	return a.authenticator.UnmarshalJSON(data)
+func (a AnyAuthenticator[T]) unmarshal(data []byte, authenticators Authenticators) error {
+	return a.authenticator.unmarshal(data, authenticators)
 }
 
 func (a AnyBinding[T]) Bind(principal Principal) (bool, error) {
-	return a.binding.Bind(principal.(T))
+	typed, ok := principal.(T)
+	if !ok {
+		return false, nil
+	}
+	return a.binding.Bind(typed)
 }
 
 func (a AnyBinding[T]) UnmarshalJSON(data []byte) error {
@@ -100,7 +159,7 @@ func RegisterAuthenticatorPrototype[T Principal](name string, authenticatorProto
 	}
 }
 
-func getAuthenticator(kind string) (Authenticator[Principal], error) {
+func getAuthenticatorPrototype(kind string) (Authenticator[Principal], error) {
 	factory, ok := authenticatorRegistry[kind]
 	if !ok {
 		return nil, fmt.Errorf("authenticator prototype not found for %s", kind)
@@ -108,7 +167,7 @@ func getAuthenticator(kind string) (Authenticator[Principal], error) {
 	return factory(), nil
 }
 
-func UnmarshalJSONAuthenticator(data []byte) (string, Authenticator[Principal], error) {
+func unmarshalAuthenticator(data []byte, available Authenticators) (string, Authenticator[Principal], error) {
 	var envelope struct {
 		Name string `json:"name"`
 		Kind string `json:"kind"`
@@ -118,20 +177,20 @@ func UnmarshalJSONAuthenticator(data []byte) (string, Authenticator[Principal], 
 		return "", nil, err
 	}
 
-	authenticator, err := getAuthenticator(envelope.Kind)
+	prototype, err := getAuthenticatorPrototype(envelope.Kind)
 	if err != nil {
 		return "", nil, err
 	}
 
-	err = authenticator.UnmarshalJSON(data)
+	err = prototype.unmarshal(data, available)
 	if err != nil {
 		return "", nil, err
 	}
 
-	return envelope.Name, authenticator, nil
+	return envelope.Name, prototype, nil
 }
 
-func UnmarshalJSONBinding(data []byte, authenticators Authenticators) (Binding[Principal], error) {
+func unmarshalBinding(data []byte, authenticators *Authenticators) (Binding[Principal], error) {
 	var envelope struct {
 		Authenticator string `json:"auth"`
 	}
@@ -139,8 +198,11 @@ func UnmarshalJSONBinding(data []byte, authenticators Authenticators) (Binding[P
 	if err != nil {
 		return nil, err
 	}
+	if envelope.Authenticator == "" {
+		envelope.Authenticator = systemAuthenticatorName
+	}
 
-	authenticator, ok := authenticators[envelope.Authenticator]
+	authenticator, ok := authenticators.Get(envelope.Authenticator)
 	if !ok {
 		return nil, fmt.Errorf("authenticator not found for %s", envelope.Authenticator)
 	}
