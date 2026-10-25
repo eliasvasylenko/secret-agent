@@ -11,8 +11,6 @@ import (
 
 const AttachUpgradeProtocol = "secret-agent-process/1"
 
-var errNoAttachSlot = NewErrorResponse(http.StatusNotFound, fmt.Errorf("no attach slot"))
-
 type attachStream string
 
 const (
@@ -30,11 +28,7 @@ func parseAttachStream(name string) (attachStream, error) {
 	}
 }
 
-func (s *Controller) attachSecret(w http.ResponseWriter, r *http.Request) {
-	secretId := r.PathValue("secretId")
-	if !requirePermit(w, r, secretId) {
-		return
-	}
+func (s *Controller) attachOperation(w http.ResponseWriter, r *http.Request) {
 	stream, err := parseAttachStream(r.PathValue("stream"))
 	if err != nil {
 		writeError(w, err)
@@ -52,7 +46,7 @@ func (s *Controller) attachSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	slot, err := s.claimSlot(secretId, identity.Principal.GetName(), stream)
+	op, err := s.claimAttach(r.PathValue("operationId"), identity.Principal.GetName(), stream)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -61,7 +55,7 @@ func (s *Controller) attachSecret(w http.ResponseWriter, r *http.Request) {
 	armed := true
 	defer func() {
 		if armed {
-			s.closeSlot(slot)
+			s.dropPending(op)
 		}
 	}()
 
@@ -97,7 +91,7 @@ func (s *Controller) attachSecret(w http.ResponseWriter, r *http.Request) {
 	}
 
 	armed = false
-	s.attachFinished(slot, stream, slot.serveAttach(slot.ctx, stream, bodyPrefix, conn))
+	s.attachFinished(op, stream, op.serveAttach(op.ctx, stream, bodyPrefix, conn))
 }
 
 func connectionUpgrade(r *http.Request, protocol string) bool {
@@ -129,22 +123,22 @@ func splitHeaderList(value string) []string {
 	return parts
 }
 
-func (slot *attachSlot) serveAttach(ctx context.Context, stream attachStream, bodyPrefix []byte, conn net.Conn) error {
+func (op *pendingOperation) serveAttach(ctx context.Context, stream attachStream, bodyPrefix []byte, conn net.Conn) error {
 	switch stream {
 	case attachStreamStdin:
-		defer slot.pipes.stdinW.Close()
+		defer op.pipes.stdinW.Close()
 		if len(bodyPrefix) > 0 {
-			if _, err := slot.pipes.stdinW.Write(bodyPrefix); err != nil {
+			if _, err := op.pipes.stdinW.Write(bodyPrefix); err != nil {
 				return err
 			}
 		}
-		_, err := copyWithContext(ctx, slot.pipes.stdinW, conn)
+		_, err := copyWithContext(ctx, op.pipes.stdinW, conn)
 		return err
 	case attachStreamStdout:
-		_, err := copyWithContext(ctx, conn, slot.pipes.stdoutR)
+		_, err := copyWithContext(ctx, conn, op.pipes.stdoutR)
 		return err
 	case attachStreamStderr:
-		_, err := copyWithContext(ctx, conn, slot.pipes.stderrR)
+		_, err := copyWithContext(ctx, conn, op.pipes.stderrR)
 		return err
 	default:
 		return fmt.Errorf("unknown attach stream %q", stream)

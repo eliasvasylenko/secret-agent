@@ -101,18 +101,19 @@ func TestBuildRequest(t *testing.T) {
 		}
 	})
 	t.Run("with body", func(t *testing.T) {
-		body := server.SecretOperationRequest{
+		body := server.StartOperationRequest{
 			SecretId: "s1",
+			Name:     secrets.Create,
 			OperationRequest: server.OperationRequest{
 				Reason: "create",
 			},
 		}
-		req, err := (&SecretClient{}).buildRequest(ctx, http.MethodPost, "/instances", body)
+		req, err := (&SecretClient{}).buildRequest(ctx, http.MethodPost, "/operations", body)
 		if err != nil {
 			t.Fatal(err)
 		}
 		got := requestString(req)
-		want := "POST /instances\n" + `{"secretId":"s1","env":null,"forced":false,"reason":"create"}` + "\n"
+		want := "POST /operations\n" + `{"secretId":"s1","name":"create","env":null,"forced":false,"reason":"create"}` + "\n"
 		if got != want {
 			t.Errorf("request:\n%s", cmp.Diff(want, got))
 		}
@@ -324,22 +325,28 @@ func holdAttach(t *testing.T) func(context.Context, string) (io.ReadWriteCloser,
 	}
 }
 
-func TestRunner_Create_attachesBeforePOST(t *testing.T) {
+func TestRunner_Create_attachesBeforeStart(t *testing.T) {
 	ctx := context.Background()
 	var attached atomic.Int32
 	rec := &recordingClient{handler: func(req *http.Request) (*http.Response, error) {
-		if req.Method == http.MethodPost {
-			if attached.Load() != 3 {
-				t.Errorf("POST with %d attaches, want 3", attached.Load())
+		if isCreatePost(req) {
+			if attached.Load() != 0 {
+				t.Errorf("create with %d attaches, want 0", attached.Load())
 			}
-			if req.URL.Path != "/instances" {
+			return createdResponse(), nil
+		}
+		if isStartPost(req) {
+			if attached.Load() != 3 {
+				t.Errorf("start with %d attaches, want 3", attached.Load())
+			}
+			if req.URL.Path != "/operations/op1/start" {
 				t.Errorf("path = %s", req.URL.Path)
 			}
 		}
 		return jsonResponse(200, `{"id":"new-id","secret":{"id":"s1","version":1},"status":{}}`), nil
 	}}
 	c := &SecretClient{client: rec, attach: func(ctx context.Context, path string) (io.ReadWriteCloser, error) {
-		if !strings.Contains(path, "/secrets/sid/attach/") {
+		if !strings.Contains(path, "/operations/op1/attach/") {
 			t.Errorf("attach path = %s", path)
 		}
 		attached.Add(1)
@@ -359,7 +366,7 @@ func TestRunner_Create_attachesBeforePOST(t *testing.T) {
 	if len(gots) < 1 {
 		t.Fatal("no requests")
 	}
-	wantReq := "POST /instances\n" + `{"secretId":"sid","env":null,"forced":false,"reason":"test"}` + "\n"
+	wantReq := "POST /operations\n" + `{"secretId":"sid","name":"create","env":null,"forced":false,"reason":"test"}` + "\n"
 	if gots[0] != wantReq {
 		t.Errorf("request:\n%s", cmp.Diff(wantReq, gots[0]))
 	}
@@ -370,7 +377,10 @@ func TestRunner_Create_attachesBeforePOST(t *testing.T) {
 
 func TestRunner_Create_POSTBodyHasNoInput(t *testing.T) {
 	ctx := context.Background()
-	rec := &recordingClient{handler: func(*http.Request) (*http.Response, error) {
+	rec := &recordingClient{handler: func(req *http.Request) (*http.Response, error) {
+		if isCreatePost(req) {
+			return createdResponse(), nil
+		}
 		return jsonResponse(200, `{"id":"new-id","secret":{"id":"s1","version":1},"status":{}}`), nil
 	}}
 	c := &SecretClient{client: rec, attach: holdAttach(t)}
@@ -386,7 +396,10 @@ func TestRunner_Create_POSTBodyHasNoInput(t *testing.T) {
 
 func TestRunner_NamedOperation(t *testing.T) {
 	ctx := context.Background()
-	rec := &recordingClient{handler: func(*http.Request) (*http.Response, error) {
+	rec := &recordingClient{handler: func(req *http.Request) (*http.Response, error) {
+		if isCreatePost(req) {
+			return createdResponse(), nil
+		}
 		return jsonResponse(200, `{"id":"i1","secret":{"id":"s1","version":1},"status":{}}`), nil
 	}}
 	c := &SecretClient{client: rec, attach: holdAttach(t)}
@@ -396,7 +409,7 @@ func TestRunner_NamedOperation(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 	t.Cleanup(func() { _ = handle.Cancel(context.Background()) })
-	wantReq := "POST /operations\n" + `{"instanceId":"i1","name":"activate","env":null,"forced":false,"reason":"activate-reason"}` + "\n"
+	wantReq := "POST /operations\n" + `{"secretId":"sid","instanceId":"i1","name":"activate","env":null,"forced":false,"reason":"activate-reason"}` + "\n"
 	if rec.got()[0] != wantReq {
 		t.Errorf("request:\n%s", cmp.Diff(wantReq, rec.got()[0]))
 	}
@@ -408,7 +421,9 @@ func TestRunner_Wait_getsInstanceAfterPumps(t *testing.T) {
 	var peersMu sync.Mutex
 	rec := &recordingClient{handler: func(req *http.Request) (*http.Response, error) {
 		switch {
-		case req.Method == http.MethodPost:
+		case isCreatePost(req):
+			return createdResponse(), nil
+		case isStartPost(req):
 			return jsonResponse(200, `{"id":"i1","secret":{"id":"s1","version":1},"status":{}}`), nil
 		case strings.HasSuffix(req.URL.Path, "/instances/i1"):
 			return jsonResponse(200, `{"id":"i1","secret":{"id":"s1","version":1},"status":{"completedAt":"2024-01-01T00:00:00Z"}}`), nil
@@ -462,7 +477,9 @@ func TestRunner_Wait_successWithoutCancel(t *testing.T) {
 
 	rec := &recordingClient{handler: func(req *http.Request) (*http.Response, error) {
 		switch {
-		case req.Method == http.MethodPost:
+		case isCreatePost(req):
+			return createdResponse(), nil
+		case isStartPost(req):
 			return jsonResponse(200, `{"id":"i1","secret":{"id":"s1","version":1},"status":{}}`), nil
 		case req.URL.Path == "/instances/i1":
 			return jsonResponse(200, `{"id":"i1","secret":{"id":"s1","version":1},"status":{"completedAt":"2024-01-01T00:00:00Z"}}`), nil
@@ -489,9 +506,9 @@ func TestRunner_Wait_successWithoutCancel(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	stdinPeer := attachPeers["/secrets/sid/attach/stdin"]
-	stdoutPeer := attachPeers["/secrets/sid/attach/stdout"]
-	stderrPeer := attachPeers["/secrets/sid/attach/stderr"]
+	stdinPeer := attachPeers["/operations/op1/attach/stdin"]
+	stdoutPeer := attachPeers["/operations/op1/attach/stdout"]
+	stderrPeer := attachPeers["/operations/op1/attach/stderr"]
 	if stdinPeer == nil || stdoutPeer == nil || stderrPeer == nil {
 		t.Fatal("missing attach peer")
 	}
@@ -525,7 +542,9 @@ func TestRunner_Wait_finishesIfStdinRemainsOpen(t *testing.T) {
 
 	rec := &recordingClient{handler: func(req *http.Request) (*http.Response, error) {
 		switch {
-		case req.Method == http.MethodPost:
+		case isCreatePost(req):
+			return createdResponse(), nil
+		case isStartPost(req):
 			return jsonResponse(200, `{"id":"i1","secret":{"id":"s1","version":1},"status":{}}`), nil
 		case req.URL.Path == "/instances/i1":
 			return jsonResponse(200, `{"id":"i1","secret":{"id":"s1","version":1},"status":{"completedAt":"2024-01-01T00:00:00Z"}}`), nil
@@ -552,9 +571,9 @@ func TestRunner_Wait_finishesIfStdinRemainsOpen(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 
-	stdoutPeer := attachPeers["/secrets/sid/attach/stdout"]
-	stderrPeer := attachPeers["/secrets/sid/attach/stderr"]
-	if stdoutPeer == nil || stderrPeer == nil || attachPeers["/secrets/sid/attach/stdin"] == nil {
+	stdoutPeer := attachPeers["/operations/op1/attach/stdout"]
+	stderrPeer := attachPeers["/operations/op1/attach/stderr"]
+	if stdoutPeer == nil || stderrPeer == nil || attachPeers["/operations/op1/attach/stdin"] == nil {
 		t.Fatal("missing attach peer")
 	}
 	_ = stdoutPeer.Close()
@@ -571,14 +590,17 @@ func TestRunner_Wait_finishesIfStdinRemainsOpen(t *testing.T) {
 	}
 }
 
-func TestRunner_closesAttachOnPOSTFailure(t *testing.T) {
+func TestRunner_closesAttachOnStartFailure(t *testing.T) {
 	ctx := context.Background()
 	stdinClient, stdinServer := net.Pipe()
 	t.Cleanup(func() { _ = stdinServer.Close() })
 
 	attachN := 0
 	c := &SecretClient{
-		client: &recordingClient{handler: func(*http.Request) (*http.Response, error) {
+		client: &recordingClient{handler: func(req *http.Request) (*http.Response, error) {
+			if isCreatePost(req) {
+				return createdResponse(), nil
+			}
 			return jsonResponse(400, `{"error":{"status":400,"message":"bad"}}`), nil
 		}},
 		attach: func(_ context.Context, path string) (io.ReadWriteCloser, error) {
@@ -597,10 +619,10 @@ func TestRunner_closesAttachOnPOSTFailure(t *testing.T) {
 
 	_, _, err := c.Runner("sid").Run(ctx, secrets.Create, "", executor.OperationParameters{Reason: "r"}, nil, command.Stdio{})
 	if err == nil {
-		t.Fatal("want POST error")
+		t.Fatal("want start POST error")
 	}
 	if attachN != 3 {
-		t.Fatalf("attaches = %d, want 3 before failed POST", attachN)
+		t.Fatalf("attaches = %d, want 3 before failed start", attachN)
 	}
 
 	buf := make([]byte, 1)
@@ -655,6 +677,18 @@ func TestRunner_Wait_failedAt(t *testing.T) {
 	if final == nil || final.Status.FailedAt == nil {
 		t.Fatal("expected failedAt")
 	}
+}
+
+func createdResponse() *http.Response {
+	return jsonResponse(201, `{"operationId":"op1","state":"pending","expiresAt":"2026-01-01T00:00:00Z"}`)
+}
+
+func isCreatePost(req *http.Request) bool {
+	return req.Method == http.MethodPost && req.URL.Path == "/operations"
+}
+
+func isStartPost(req *http.Request) bool {
+	return req.Method == http.MethodPost && strings.HasSuffix(req.URL.Path, "/start")
 }
 
 func jsonResponse(status int, body string) *http.Response {

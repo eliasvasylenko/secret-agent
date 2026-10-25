@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"time"
@@ -137,7 +138,7 @@ func (c *CLI) Run(ctx context.Context) {
 
 type noopProposer struct{}
 
-func (noopProposer) Propose(context.Context, secrets.OperationName, executor.OperationParameters) error {
+func (noopProposer) Propose(context.Context, string, secrets.OperationName, executor.OperationParameters, io.ReadWriteCloser) error {
 	return nil
 }
 

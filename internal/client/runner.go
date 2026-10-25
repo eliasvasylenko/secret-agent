@@ -28,13 +28,15 @@ func (r *httpRunner) Run(
 	proposer backend.Proposer,
 	stdio command.Stdio,
 ) (*secrets.Instance, backend.Handle, error) {
-	_ = proposer
-
-	conns, err := r.client.attachAll(ctx, r.secretId)
+	operationId, err := r.postCreate(ctx, name, instanceId, params)
 	if err != nil {
 		return nil, nil, err
 	}
 
+	conns, err := r.client.attachAll(ctx, operationId)
+	if err != nil {
+		return nil, nil, err
+	}
 	handle := newRunHandle(r.client, conns)
 	armed := true
 	defer func() {
@@ -43,7 +45,7 @@ func (r *httpRunner) Run(
 		}
 	}()
 
-	instance, err := r.postStart(ctx, name, instanceId, params)
+	instance, err := r.postStart(ctx, operationId)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -55,33 +57,32 @@ func (r *httpRunner) Run(
 	return instance, handle, nil
 }
 
-func (r *httpRunner) postStart(
+// postCreate records the pending operation and returns its ID.
+func (r *httpRunner) postCreate(
 	ctx context.Context,
 	name secrets.OperationName,
 	instanceId string,
 	params executor.OperationParameters,
-) (*secrets.Instance, error) {
-	body := server.OperationRequest{
-		Env:    params.Env,
-		Forced: params.Forced,
-		Reason: params.Reason,
+) (string, error) {
+	req, err := r.client.buildRequest(ctx, http.MethodPost, "/operations", server.StartOperationRequest{
+		SecretId:   r.secretId,
+		InstanceId: instanceId,
+		Name:       name,
+		OperationRequest: server.OperationRequest{
+			Env:    params.Env,
+			Forced: params.Forced,
+			Reason: params.Reason,
+		},
+	})
+	created, err := Do[*server.OperationCreatedResponse](r.client.client, req, err)
+	if err != nil {
+		return "", err
 	}
-	var (
-		req *http.Request
-		err error
-	)
-	if name == secrets.Create {
-		req, err = r.client.buildRequest(ctx, http.MethodPost, "/instances", server.SecretOperationRequest{
-			SecretId:         r.secretId,
-			OperationRequest: body,
-		})
-	} else {
-		req, err = r.client.buildRequest(ctx, http.MethodPost, "/operations", server.InstanceOperationRequest{
-			InstanceId:       instanceId,
-			Name:             name,
-			OperationRequest: body,
-		})
-	}
+	return created.OperationID, nil
+}
+
+func (r *httpRunner) postStart(ctx context.Context, operationId string) (*secrets.Instance, error) {
+	req, err := r.client.buildRequest(ctx, http.MethodPost, "/operations/"+operationId+"/start", nil)
 	return Do[*secrets.Instance](r.client.client, req, err)
 }
 
@@ -122,7 +123,7 @@ func (h *runHandle) startPumps(stdio command.Stdio) {
 	// Stdin is forwarded but not joined. A process can exit without reading
 	// it; waiting for stdin EOF would hang a CLI whose stdin is still open.
 	go func() { _ = copyAttach(h.conns.stdin, stdin, h.conns.stdin) }()
- 	h.pump(func() error { return copyAttach(stdout, h.conns.stdout, h.conns.stdout) })
+	h.pump(func() error { return copyAttach(stdout, h.conns.stdout, h.conns.stdout) })
 	h.pump(func() error { return copyAttach(stderr, h.conns.stderr, h.conns.stderr) })
 }
 

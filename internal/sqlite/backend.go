@@ -99,8 +99,6 @@ func (r *runner) Run(
 	proposer backend.Proposer,
 	stdio command.Stdio,
 ) (*secrets.Instance, backend.Handle, error) {
-	_ = proposer
-
 	var (
 		instance  *secrets.Instance
 		operation secrets.Operation
@@ -115,7 +113,7 @@ func (r *runner) Run(
 	if err != nil {
 		return nil, nil, err
 	}
-	return instance, r.state.launch(instance, operation, params, stdio), nil
+	return instance, r.state.launch(instance, operation, params, proposer, stdio), nil
 }
 
 func (h *opHandle) Wait(ctx context.Context) (*secrets.Instance, error) {

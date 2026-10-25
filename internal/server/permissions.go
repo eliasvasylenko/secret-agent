@@ -3,7 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
-	"fmt"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -41,18 +41,11 @@ func permitted(r *http.Request, secretID string) bool {
 	return permit != nil && permit(secretID)
 }
 
-func requirePermit(w http.ResponseWriter, r *http.Request, secretID string) bool {
+func requirePermission(w http.ResponseWriter, r *http.Request, secretID string) bool {
 	if permitted(r, secretID) {
 		return true
 	}
-	var names []auth.RoleName
-	if identity := identityFromContext(r.Context()); identity != nil {
-		names = make([]auth.RoleName, len(identity.Roles))
-		for i, role := range identity.Roles {
-			names[i] = role.Name
-		}
-	}
-	writeError(w, NewErrorResponse(http.StatusForbidden, fmt.Errorf("operation not permitted with roles %v", names)))
+	writeError(w, NewErrorResponse(http.StatusForbidden, errors.New("operation not permitted")))
 	return false
 }
 

@@ -22,7 +22,7 @@ import (
 
 type noopProposer struct{}
 
-func (noopProposer) Propose(context.Context, secrets.OperationName, executor.OperationParameters) error {
+func (noopProposer) Propose(context.Context, string, secrets.OperationName, executor.OperationParameters, io.ReadWriteCloser) error {
 	return nil
 }
 

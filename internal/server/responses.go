@@ -6,10 +6,30 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
+
+	"github.com/eliasvasylenko/secret-agent/internal/secrets"
 )
 
 type ItemsResponse[T any] struct {
 	Items T `json:"items"`
+}
+
+// OperationCreatedResponse answers POST /operations: a pending operation.
+type OperationCreatedResponse struct {
+	OperationID string    `json:"operationId"`
+	State       string    `json:"state"`
+	ExpiresAt   time.Time `json:"expiresAt"`
+}
+
+// OperationStatusResponse answers GET /operations/{operationId}.
+type OperationStatusResponse struct {
+	OperationID string                `json:"operationId"`
+	State       string                `json:"state"`
+	SecretID    string                `json:"secretId"`
+	InstanceID  string                `json:"instanceId,omitempty"`
+	Name        secrets.OperationName `json:"name"`
+	Instance    *secrets.Instance     `json:"instance,omitempty"`
 }
 
 type ErrorResponse struct {

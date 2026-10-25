@@ -10,6 +10,7 @@
 
 - Remote HTTPS / OpenSSH: [plan-remote.md](plan-remote.md) (authn outside the agent)
 - Federation introduce vs pipe: [plan-federation.md](plan-federation.md) / [design.md](design.md) § Proposer
+- Generic operation/resource manager (parked): [plan-generic.md](plan-generic.md)
 - OAuth?
 
 **Service**

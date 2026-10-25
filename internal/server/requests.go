@@ -13,17 +13,12 @@ type OperationRequest struct {
 	Reason string              `json:"reason"`
 }
 
-// SecretOperationRequest starts an operation on a secret: POST /instances.
-// Create is the only such operation, so no name is carried.
-type SecretOperationRequest struct {
-	SecretId         string `json:"secretId"`
-	OperationRequest `json:""`
-}
-
-// InstanceOperationRequest starts a named operation on an instance: POST /operations.
-// The operation's secret is derived from InstanceId, never sent by the client.
-type InstanceOperationRequest struct {
-	InstanceId       string                `json:"instanceId"`
+// StartOperationRequest creates an operation: POST /operations.
+// Create operations carry SecretId and no InstanceId; other operations carry
+// InstanceId (and derive their secret from it), with Name saying which.
+type StartOperationRequest struct {
+	SecretId         string                `json:"secretId,omitempty"`
+	InstanceId       string                `json:"instanceId,omitempty"`
 	Name             secrets.OperationName `json:"name"`
 	OperationRequest `json:""`
 }

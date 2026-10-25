@@ -104,7 +104,7 @@ func TestAttachAll_closesPriorOnFailure(t *testing.T) {
 		return nil, io.ErrUnexpectedEOF
 	}}
 
-	_, err := c.attachAll(context.Background(), "sid")
+	_, err := c.attachAll(context.Background(), "op1")
 	if err == nil {
 		t.Fatal("want error")
 	}

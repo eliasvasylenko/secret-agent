@@ -6,16 +6,17 @@ Concise record of settled constraints and open tensions. Supersedes [`plan-proce
 
 - **Secret** — versioned plan (scripts for create/activate/…).
 - **Instance** — deployed copy of a secret; many instances, **one active** per secret.
-- **Operation** (`secrets.Operation`) — audit record: op number, name, status, timestamps. Not the same as HTTP attach state.
-- Attach discovery is serial only while assembling one unnamed pending slot per
-  `(secretId, principal)`. Consuming that slot does **not** serialize operation execution.
-  Reads (`List`/`Get`) are unconstrained.
+- **Operation** (`secrets.Operation`) — one transition attempt (the *edge*): name, creator/starter, timestamps. Ephemeral as a resource; the instance keeps only the last one that started. Not an audit record and not HTTP attach state.
+- **State** (`secrets.State`) — the instance's established lifecycle state (the *node*): the last operation that completed, read as its postcondition. Operation names double as state names. See [plan-federation.md](plan-federation.md) § Operation and status model.
+- Pending operations are keyed by their own global operation ID, so assembling one
+  does not serialize another for the same `(secret, principal)`. Reads (`List`/`Get`)
+  are unconstrained.
 
 ## Layering
 
 | Layer | Package (target) | Role |
 |-------|------------------|------|
-| **Catalog** | `backend` | Read-only: secrets, instances, operation history. |
+| **Catalog** | `backend` | Read-only: secrets, instances (current status snapshot). No operation history — see plan-federation § model. |
 | **Runner** | `backend` | `Run(name, target, params, proposer, stdio)` — blocking mutation + I/O. |
 | **Porcelain** | `ops` (separate) | Typed `Create`/`Activate`/… calling `Runner.Run`. CLI imports `ops`, not raw runner. |
 | **HTTP** | `server` | Attach routes + JSON start; maps to runner semantics. |
@@ -24,13 +25,14 @@ Concise record of settled constraints and open tensions. Supersedes [`plan-proce
 
 ## HTTP attach (current direction)
 
-- **Attach before start**: open stdio upgrades, then POST start/run.
-- **Slot key**: `(secretId, principal)` — principal from transport (Unix peer creds), not request body.
-- **One pending slot per (secret, principal)**; POST consumes it, allowing the next
-  slot to attach while the previous operation runs. No reattach to a consumed slot.
-- Routes (target shape): `POST /secrets/{secretId}/attach/{stdin|stdout|stderr}` → then `POST /instances` or `/operations`.
-- Instances and operations are **root collections** (`/instances`, `/operations`) because instance ids are globally unique: a nested `secretId` would be ignored by the lookup, or worse, trusted for slot selection without being checked. Creates carry the parent id in the body (`secretId` / `instanceId`); catalog reads filter by query. `POST /operations` derives the secret from the instance. See [`http-api.md`](http-api.md).
-- Server in-memory type: **`attachSlot`** (not `operation`) — pipes, attach claims, `startedBy`. Registry keyed by `(secretId, principal)` until op number exists.
+- **Create → attach → start**: `POST /operations` creates a pending operation, stdio
+  upgrades hang off it, `POST /operations/{id}/start` runs it. Execute begins only at
+  start, with streams connected, so the old attach-before-execute guarantee holds.
+- **Operation key**: the global operation ID assigned at create. Only the creator
+  (principal from transport, never request body) may attach. Pending operations
+  expire; a stream drop before start deletes the operation.
+- Instances and operations are **root collections** (`/instances`, `/operations`) because ids are globally unique: a nested `secretId` would be ignored by the lookup, or worse, trusted for operation selection without being checked. Creates carry the parent id in the body (`secretId` / `instanceId`); catalog reads filter by query. `POST /operations` derives the secret from the instance for non-create ops. See [`http-api.md`](http-api.md).
+- Server in-memory type: **`pendingOperation`** — the domain `secrets.Operation` plus pipes, attach claims, token, expiry. It is written onto the instance's status snapshot only at start, and retained in the registry for a grace period after completion so the creator can collect the outcome.
 
 ## Store `Run` — caller feedback & cancellation
 
@@ -88,7 +90,7 @@ If HTTP only started the op on `wait`, attach-before-start would be pointless (y
 **Historical “delay until attach” (Jul 2025):** for **HTTP / federation**, not sqlite. Problems it solved:
 
 1. **Fast-script race** — subprocess must not run until stdio streams exist (otherwise exit before attach, or block on full pipe buffers).
-2. **Decoupled attacher** — ~~starter ≠ attacher (human B attaches later)~~ **replaced:** orchestrator A is always starter+attacher on B; B gates on **John’s authorisation proof**, not a second attach principal (see [plan-federation.md](plan-federation.md)).
+2. **Decoupled attacher** — ~~starter ≠ attacher (human B attaches later)~~ **now:** orchestrator A creates the operation and attaches; B holds it `awaiting-approval`; **John starts it** as himself. Attaches belong to the operation, not the starter (see [plan-federation.md](plan-federation.md)).
 
 That delay is **“until attach + start gate”**, not **“until `wait()`”**. Attach-before-start is the gate: attach streams → POST → then execute. Sqlite has no transport gap — stdio is wired before any goroutine starts — so no attach delay; it still matches the invariant because execute starts at end of accept with I/O already connected.
 
@@ -109,9 +111,9 @@ Failure: **`failedAt`** in store, `err != nil` — **`errors.As`** for typed exi
 ## Proposer
 
 - **`Proposer`** on **`Runner.Run(...)`** — invoked from **inside** a parent op script when a dependent op on another secret/host is needed ([plan-federation.md](plan-federation.md)).
-- **`Propose(ctx, name, params) error`** — nil = approved; error = rejected. Blocks the parent script until resolved.
+- **`Propose(ctx, Proposal{ID, Token, Dial}) error`** — puts the operator on B for one **pending proposal**; nil = John's start was accepted by B; error = declined / expired / unreachable. Blocks the parent script until resolved.
 
-**Federated shape (sketch):** parent host **A** must not be able to approve on **John’s** behalf by assertion alone. Two John↔B patterns, both valid:
+**Settled model (Oct 2026, [plan-federation.md](plan-federation.md) § The model):** every operation is created pending (`POST /operations`), hangs its stdio attaches, then starts. A creates the operation on B and attaches; seeing a parent without permission, B marks it `awaiting-approval` and starts nothing. John reaches B as himself, reads **B's** record (`GET /operations/{operationId}`), and **starts it**. B runs it with A's stdio and records `startedBy = John`, `createdBy = A`. A carries only an opaque handle to John, never the description. Parent host **A** must not be able to approve on **John’s** behalf by assertion alone. Two John↔B patterns, both valid:
 
 | | **Introduce** (direct) | **Pipe** (splice through A) |
 |--|------------------------|------------------------------|
@@ -123,21 +125,23 @@ Failure: **`failedAt`** in store, `err != nil` — **`errors.As`** for typed exi
 
 Anti-MITM is John authenticating **to B** (or A off-path). The pipe itself is untrusted bytes. Peercreds do not ride it. The agent on B still does not authenticate — `sshd` or B’s reverse proxy does.
 
-1. Script on A hits `Propose` for an op on host **B**.
-2. John authenticates **to B as John**, either by dialing B or over A’s pipe.
-3. **John’s OK** is recorded **by B** — not “A says John OK’d”.
+1. Script on A hits `Propose` for an op on host **B**; A has already created the pending operation on B and attached its stdio, and B holds it `awaiting-approval`.
+2. John authenticates **to B as John**, either by dialing B or over A’s pipe, and reads B's record of the request.
+3. **John starts it** (`POST /operations/{operationId}/start`). That call is the approval; there is no separate “approved” message to forge, and B records John as the starter.
 
 **Threat model:** **A must not MITM John ↔ B.**
 
 | Allowed | Not allowed |
 |---------|-------------|
 | John dials B directly, or John handshakes to B on a splice A does not terminate | A sends `approved: true` on B’s API with no John↔B auth |
-| B records OK from a connection whose principal is John | A presents a bearer “John approved” B cannot tie to John |
-| Parent op on A blocks in `Propose` until B records John’s decision | Policy “trust parent op X” **without** a John↔B step when cross-host |
+| B runs the op from a **start call whose principal is John**, naming A's pending request | A presents a bearer “John approved” B cannot tie to John |
+| John's CLI shows **B's** record of the request | John's CLI shows A's description of it |
+| Parent op on A blocks in `Propose` until John's start lands or the request ends | Policy “trust parent op X” **without** a John↔B step when cross-host |
+| A's stdio attaches carry the op John started | B runs anything on A's say-so, or creates an op row before John starts |
 
 Same-host tests can use two Unix peers (John vs A) with the same logic: B still verifies **John**, not A’s say-so.
 
-No behaviour in sqlite yet; HTTP control stream for `Propose` deferred (see Open).
+Server-side pending operations are federation Phase 0 and the approval gate at start is Phase 1; HTTP control stream for `Propose` is Phase 3 (see Open).
 
 ## Catalog / Runner split — why
 
@@ -161,24 +165,24 @@ If the split feels heavy, minimum viable split is still **`Runner` only for muta
 
 Supersedes the “U@C starts, human B attaches later” sketch in `plan-process-io.md`.
 
-**Starter is always attacher.** No decoupled second connection from a different principal to attach stdio.
+**Starter is the authorised principal; attacher is the requester.** (Replaces the earlier “starter is always attacher”, Oct 2026.) Attaches hang off the operation, and the start comes from whoever B lets run the op.
 
 Example: John runs an op on **host A**; the script triggers a dependent op on **host B**.
 
-| Host | Who runs the op (transport) | `startedBy` on audit row | Who attaches stdio |
-|------|----------------------------|--------------------------|-------------------|
-| **A** | John | John | John (local CLI or John’s client session) |
-| **B** | **Host A** (orchestrator) | **Host A** | **Host A** — same connection/session that started the op |
+| Host | Who attaches stdio | Who posts the request | `startedBy` | `createdBy` |
+|------|-------------------|-----------------------|-------------|-------------|
+| **A** | John | John | John | John |
+| **B** | **Host A** (orchestrator) | **Host A** (`POST /operations`, held `awaiting-approval`) | **John** (`POST /operations/{operationId}/start`) | **Host A** |
 
-**Attach rule unchanged:** `transport principal == startedBy` on that host. On B, A is both starter and attacher.
+**Attach rule:** only the operation's creator attaches; the starter never re-attaches. For a direct operation creator == starter, as before. An `awaiting-approval` operation can be started only with its proposal token by a permitted principal.
 
-**What B must gate on:** **John’s authorisation for this specific op on B at this time** — verified **on B**, not taken on faith from A.
+**What B must gate on:** **John’s authorisation for this specific op on B at this time** — verified **on B** by John making the start call himself, against B's own record of A's request.
 
-**How (federation — not v1):** A is starter+attacher on B for **stdio of B’s script**. **John’s consent** is a separate leg, either **introduce** (John dials B) or **pipe** (John handshakes to B on a splice through A). See § Proposer. Implementation: parked in [plan-federation.md](plan-federation.md) until remote auth exists ([plan-remote.md](plan-remote.md)).
+**How:** A creates the operation and attaches; B holds it. John reaches B by **introduce** (dials B) or **pipe** (handshakes to B on a splice through A), reads B's record, starts it. See § Proposer and [plan-federation.md](plan-federation.md).
 
-**Implications for attach-before-start:** unchanged for A↔B stdio — A attaches streams, then POST invokes B's `Runner.Run`. **Authorisation** may complete inside `Propose` (blocking parent on A) before A POSTs start on B, or B holds start until John’s OK is on record — exact ordering TBD in federation Phase 0.
+**Implications for attach:** intent now precedes streams — create, attach, start — replacing `(secret, principal)` slots with the operation ID. Execute still begins only at the start call with streams connected, so the attach-before-execute guarantee is unchanged; **nothing executes until the start**, John's in the federated case.
 
-**Audit:** B’s op records `startedBy = A`; John’s involvement is in the **authorisation proof** and/or parent op on A (reason chain, proposer log), not as B’s transport principal.
+**Record:** B's instance snapshot records `startedBy = John`, `createdBy = A` for the last started operation. John's parent op on A carries the proposer log and reason chain. This is current status, not an audit trail (plan-federation § model).
 
 ## Remote transports
 
@@ -245,7 +249,8 @@ The SSH stdio bridge carries the same bytes after `101`.
 
 - Startup cleanup of DB ops stuck without `completedAt` after agent restart (attach fails; row may lie until cleaned).
 - Orphan slot if attach never followed by start (timeout?).
-- Control stream for `Proposer` on HTTP (4th upgrade vs mux).
+- Control stream for `Proposer` on HTTP (4th upgrade on the parent op's attach; federation Phase 3).
+- Proposal expiry default (federation Phase 1). Status snapshot schema — `Revision`, `State`, `createdBy` — is federation Phase 0.5.
 - Real exit code over HTTP attach (typed error on remote client; local caller still has stderr).
 
 ---
@@ -322,7 +327,7 @@ type Proposer interface {
 
 **Why `Handle` not bare `Wait`:** join and op-cancel are distinct; **`wait(ctx)` must not be overloaded** to kill the subprocess. HTTP attach disconnect, CLI Ctrl+C, and sqlite all map to **`Cancel`**; **`Wait`** only joins.
 
-**Why `Operations` not `OperationsHistory`:** Same accessor name as today’s catalog surface; only **`List`** remains (mutations moved to `Runner`). Distinct from `secrets.Operation` (audit row type) — package prefix disambiguates.
+**Why `Operations` not `OperationsHistory`:** Same accessor name as today’s catalog surface; only **`List`** remains (mutations moved to `Runner`). Distinct from `secrets.Operation` — package prefix disambiguates. *(Superseded: `Catalog.Operations()` is removed in federation Phase 0.5 — there is no operation history.)*
 
 **Active instance:** **`Instances.GetActive(ctx, secretId)`** + **`GET /secrets/{secretId}/active`** — kept as a singular read (not a list filter); see [`http-api.md`](http-api.md).
 
@@ -344,9 +349,9 @@ type Proposer interface {
 |----------------|----------------------------|------------|----------|
 | **sqlite** | Passed into background `Execute` goroutine started before `Run` returns | **`Execute`** | `Wait` joins; `Cancel` stops execute ctx |
 | **HTTP client** | Attach in `Run`; pump uses stdio in background goroutines | **Pump attach** (POST starts server runner) | `Wait` joins pump; `Cancel` tears down attach |
-| **HTTP server POST** | Slot pipes bound before POST | **`Runner.Run`** starts execute before returning | Handle kept by slot; disconnect → **`Cancel`** |
+| **HTTP server POST** | Operation pipes bound before start | **`Runner.Run`** starts execute before returning | Handle kept by pending operation; disconnect → **`Cancel`** |
 
-**Context rule (mandatory):** `Runner.Run(ctx)` uses `ctx` only for accept. **`Execute` and attach copy loops use the handle/slot lifetime**, cancelled on slot teardown. Never retain `Run`’s ctx (including `r.Context()`) for subprocess or attach pumps.
+**Context rule (mandatory):** `Runner.Run(ctx)` uses `ctx` only for accept. **`Execute` and attach copy loops use the handle/operation lifetime**, cancelled on operation teardown. Never retain `Run`’s ctx (including `r.Context()`) for subprocess or attach pumps.
 
 **Exit code:** subprocess non-zero → **`failedAt`** in DB + typed error from **`Handle.Wait`**. No **`ExitCode`** field on backend results.
 
@@ -356,7 +361,7 @@ type Proposer interface {
 2. Reload instance; **`err == nil`** iff **`completedAt`** set.
 3. If **`failedAt`** set → return instance **and** an error (`OperationFailed` or synthesized from attach session). Numeric exit code on remote attach deferred unless control channel adds it; **stderr** already streamed to caller.
 
-**Cancel before POST start:** If attach disconnects before POST, **no op row** — slot torn down, nothing to roll back. If POST succeeds then client disconnects, **disconnect cancels** running op (slot `cancel()` → kill subprocess, mark op failed).
+**Cancel before start:** If attach disconnects before the start call, **no op row** — pending operation deleted, nothing to roll back. If start succeeds then client disconnects, **disconnect cancels** running op (operation `cancel()` → kill subprocess, mark op failed).
 
 #### Pseudo-code — per-Run handle (sqlite + client)
 

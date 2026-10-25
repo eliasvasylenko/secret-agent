@@ -60,7 +60,8 @@ func isClosedPipe(err error) bool {
 		err == io.EOF
 }
 
-// attachConns is one attach upgrade per stream, opened before the start POST.
+// attachConns is one attach upgrade per stream, opened against a pending
+// operation before its start POST.
 type attachConns struct {
 	stdin  io.ReadWriteCloser
 	stdout io.ReadWriteCloser
@@ -75,7 +76,7 @@ func (a attachConns) close() {
 	}
 }
 
-func (c *SecretClient) attachAll(ctx context.Context, secretId string) (attachConns, error) {
+func (c *SecretClient) attachAll(ctx context.Context, operationId string) (attachConns, error) {
 	var conns attachConns
 	armed := true
 	defer func() {
@@ -85,13 +86,13 @@ func (c *SecretClient) attachAll(ctx context.Context, secretId string) (attachCo
 	}()
 
 	var err error
-	if conns.stdin, err = c.upgrade(ctx, "/secrets/"+secretId+"/attach/stdin"); err != nil {
+	if conns.stdin, err = c.upgrade(ctx, "/operations/"+operationId+"/attach/stdin"); err != nil {
 		return conns, err
 	}
-	if conns.stdout, err = c.upgrade(ctx, "/secrets/"+secretId+"/attach/stdout"); err != nil {
+	if conns.stdout, err = c.upgrade(ctx, "/operations/"+operationId+"/attach/stdout"); err != nil {
 		return conns, err
 	}
-	if conns.stderr, err = c.upgrade(ctx, "/secrets/"+secretId+"/attach/stderr"); err != nil {
+	if conns.stderr, err = c.upgrade(ctx, "/operations/"+operationId+"/attach/stderr"); err != nil {
 		return conns, err
 	}
 

@@ -150,36 +150,87 @@ func newTestController(t *testing.T, agent backend.Backend) (*Controller, http.H
 	return c, handlerWithConn(c, unixTestConn(t)), principal
 }
 
+func expectNoParents(t *testing.T, mockBackend *mocks.MockBackend) {
+	t.Helper()
+	mockCatalog := &mocks.MockCatalog{}
+	t.Cleanup(func() { mockCatalog.Mock.Validate(t) })
+	mockSecrets := &mocks.MockSecrets{}
+	t.Cleanup(func() { mockSecrets.Mock.Validate(t) })
+	expectCatalog(mockBackend, mockCatalog)
+	mocks.Expect(&mockCatalog.Mock, mockCatalog.Secrets, func() backend.Secrets { return mockSecrets })
+	mocks.Expect(&mockSecrets.Mock, mockSecrets.Get, func(context.Context, string) (*secrets.Secret, error) {
+		return &secrets.Secret{Version: 1}, nil
+	})
+}
+
+// expectSecretGets is expectNoParents for flows that look the secret up n times
+// (for example create, then the start gate).
+func expectSecretGets(t *testing.T, mockBackend *mocks.MockBackend, n int) {
+	t.Helper()
+	mockCatalog := &mocks.MockCatalog{}
+	t.Cleanup(func() { mockCatalog.Mock.Validate(t) })
+	mockSecrets := &mocks.MockSecrets{}
+	t.Cleanup(func() { mockSecrets.Mock.Validate(t) })
+	for i := 0; i < n; i++ {
+		expectCatalog(mockBackend, mockCatalog)
+		mocks.Expect(&mockCatalog.Mock, mockCatalog.Secrets, func() backend.Secrets { return mockSecrets })
+		mocks.Expect(&mockSecrets.Mock, mockSecrets.Get, func(context.Context, string) (*secrets.Secret, error) {
+			return &secrets.Secret{Version: 1}, nil
+		})
+	}
+}
+
 func expectCatalog(mockBackend *mocks.MockBackend, mockCatalog *mocks.MockCatalog) {
 	mocks.Expect(&mockBackend.Mock, mockBackend.Catalog, func() backend.Catalog {
 		return mockCatalog
 	})
 }
 
-func readySlot(c *Controller, secretId, principal string) *attachSlot {
-	slot, err := c.claimSlot(secretId, principal, attachStreamStdin)
-	if err != nil {
-		panic(err)
-	}
-	if _, err := c.claimSlot(secretId, principal, attachStreamStdout); err != nil {
-		panic(err)
-	}
-	if _, err := c.claimSlot(secretId, principal, attachStreamStderr); err != nil {
-		panic(err)
-	}
-	return slot
+func readyOp(c *Controller, principal string) *pendingOperation {
+	op := newPendingOperation(principal, "sid", "", secrets.Create, executor.OperationParameters{})
+	c.addPending(op)
+	attachAllClaims(c, op.id, principal)
+	return op
 }
 
-func startSlot(t *testing.T, c *Controller, slot *attachSlot, handle backend.Handle) {
+func attachAllClaims(c *Controller, operationId, principal string) {
+	for _, stream := range []attachStream{attachStreamStdin, attachStreamStdout, attachStreamStderr} {
+		if _, err := c.claimAttach(operationId, principal, stream); err != nil {
+			panic(err)
+		}
+	}
+}
+
+func beginOp(t *testing.T, c *Controller, op *pendingOperation, handle backend.Handle) {
 	t.Helper()
-	taken, err := c.takeSlot(slot.key.secretId, slot.key.principal)
-	if err != nil {
+	if err := c.beginStart(op); err != nil {
 		t.Fatal(err)
 	}
-	if taken != slot {
-		t.Fatal("took a different slot")
+	op.watch(c, handle)
+}
+
+func postCreate(t *testing.T, mux http.Handler, body string) (string, *httptest.ResponseRecorder) {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "http://test/operations", bytes.NewReader([]byte(body)))
+	req.Header.Set("Content-Type", "application/json")
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create status = %d, want 201\nbody: %s", rec.Code, rec.Body.Bytes())
 	}
-	slot.watch(handle)
+	var created OperationCreatedResponse
+	if err := json.NewDecoder(rec.Body).Decode(&created); err != nil {
+		t.Fatalf("decode create: %v", err)
+	}
+	return created.OperationID, rec
+}
+
+func postStart(t *testing.T, mux http.Handler, operationId string) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "http://test/operations/"+operationId+"/start", nil)
+	mux.ServeHTTP(rec, req)
+	return rec
 }
 
 func TestController_listSecrets(t *testing.T) {
@@ -271,6 +322,22 @@ func TestController_secretGrantAllowsOneSecret(t *testing.T) {
 			}
 			return &secrets.Secret{Id: secretId, Version: 1}, nil
 		})
+		expectCatalog(mockBackend, mockCatalog)
+		mocks.Expect(&mockCatalog.Mock, mockCatalog.Secrets, func() backend.Secrets { return mockSecrets })
+		mocks.Expect(&mockSecrets.Mock, mockSecrets.Get, func(ctx context.Context, secretId string) (*secrets.Secret, error) {
+			if secretId != "secret-b" {
+				t.Errorf("Get secretId = %q", secretId)
+			}
+			return &secrets.Secret{Id: secretId, Version: 1}, nil
+		})
+		expectCatalog(mockBackend, mockCatalog)
+		mocks.Expect(&mockCatalog.Mock, mockCatalog.Secrets, func() backend.Secrets { return mockSecrets })
+		mocks.Expect(&mockSecrets.Mock, mockSecrets.Get, func(ctx context.Context, secretId string) (*secrets.Secret, error) {
+			if secretId != "secret-a" {
+				t.Errorf("Get secretId = %q", secretId)
+			}
+			return &secrets.Secret{Id: secretId, Version: 1}, nil
+		})
 
 		policy, _ := policyForCurrentUser(t, roles)
 		c := NewController(mockBackend, policy, NewLimiter(0, 0))
@@ -289,17 +356,72 @@ func TestController_secretGrantAllowsOneSecret(t *testing.T) {
 		}
 
 		rec = httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodPost, "http://test/instances", strings.NewReader(`{"secretId":"secret-b","reason":"no"}`))
+		req := httptest.NewRequest(http.MethodPost, "http://test/operations", strings.NewReader(`{"secretId":"secret-b","name":"create","reason":"no"}`))
 		mux.ServeHTTP(rec, req)
-		if rec.Code != http.StatusForbidden {
-			t.Fatalf("create B status = %d, want 403\n%s", rec.Code, rec.Body.Bytes())
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("create B status = %d, want 201 (creation runs nothing; the gate is at start)\n%s", rec.Code, rec.Body.Bytes())
 		}
 
 		rec = httptest.NewRecorder()
-		req = httptest.NewRequest(http.MethodPost, "http://test/instances", strings.NewReader(`{"secretId":"secret-a","reason":"yes"}`))
+		req = httptest.NewRequest(http.MethodPost, "http://test/operations", strings.NewReader(`{"secretId":"secret-a","name":"create","reason":"yes"}`))
 		mux.ServeHTTP(rec, req)
-		if rec.Code != http.StatusNotFound {
-			t.Fatalf("create A status = %d, want 404 (past auth, no attach slot)\n%s", rec.Code, rec.Body.Bytes())
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("create A status = %d, want 201 (pending operation)\n%s", rec.Code, rec.Body.Bytes())
+		}
+	})
+
+	t.Run("permission without the parent role is refused at start", func(t *testing.T) {
+		mockBackend := &mocks.MockBackend{}
+		defer mockBackend.Mock.Validate(t)
+		mockCatalog := &mocks.MockCatalog{}
+		defer mockCatalog.Mock.Validate(t)
+		mockSecrets := &mocks.MockSecrets{}
+		defer mockSecrets.Mock.Validate(t)
+		for i := 0; i < 2; i++ {
+			expectCatalog(mockBackend, mockCatalog)
+			mocks.Expect(&mockCatalog.Mock, mockCatalog.Secrets, func() backend.Secrets { return mockSecrets })
+			mocks.Expect(&mockSecrets.Mock, mockSecrets.Get, func(ctx context.Context, secretId string) (*secrets.Secret, error) {
+				return &secrets.Secret{Id: secretId, Version: 1, Parents: []secrets.Parent{"other"}}, nil
+			})
+		}
+
+		policy, _ := policyForCurrentUser(t, nil)
+		c := NewController(mockBackend, policy, NewLimiter(0, 0))
+		mux := handlerWithConn(c, unixTestConn(t))
+
+		operationId, _ := postCreate(t, mux, `{"secretId":"secret-b","name":"create","reason":"no"}`)
+		rec := postStart(t, mux, operationId)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("status = %d, want 403\n%s", rec.Code, rec.Body.Bytes())
+		}
+		if !strings.Contains(rec.Body.String(), "operation not permitted") {
+			t.Fatalf("body = %s", rec.Body.Bytes())
+		}
+	})
+
+	t.Run("parent without permission cannot start", func(t *testing.T) {
+		mockBackend := &mocks.MockBackend{}
+		defer mockBackend.Mock.Validate(t)
+		mockCatalog := &mocks.MockCatalog{}
+		defer mockCatalog.Mock.Validate(t)
+		mockSecrets := &mocks.MockSecrets{}
+		defer mockSecrets.Mock.Validate(t)
+		for i := 0; i < 2; i++ {
+			expectCatalog(mockBackend, mockCatalog)
+			mocks.Expect(&mockCatalog.Mock, mockCatalog.Secrets, func() backend.Secrets { return mockSecrets })
+			mocks.Expect(&mockSecrets.Mock, mockSecrets.Get, func(ctx context.Context, secretId string) (*secrets.Secret, error) {
+				return &secrets.Secret{Id: secretId, Version: 1, Parents: []secrets.Parent{"payroll"}}, nil
+			})
+		}
+
+		policy, _ := policyForCurrentUser(t, roles)
+		c := NewController(mockBackend, policy, NewLimiter(0, 0))
+		mux := handlerWithConn(c, unixTestConn(t))
+
+		operationId, _ := postCreate(t, mux, `{"secretId":"secret-b","name":"create","reason":"propose"}`)
+		rec := postStart(t, mux, operationId)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("status = %d, want 403\n%s", rec.Code, rec.Body.Bytes())
 		}
 	})
 
@@ -508,30 +630,28 @@ func TestController_getInstance(t *testing.T) {
 	}
 }
 
-func TestController_createInstance_requiresAttachSlot(t *testing.T) {
+func TestController_startOperation_requiresAttach(t *testing.T) {
 	mockBackend := &mocks.MockBackend{}
 	defer mockBackend.Mock.Validate(t)
+	expectSecretGets(t, mockBackend, 2)
 
 	_, mux, _ := newTestController(t, mockBackend)
 
-	body := `{"secretId":"sid","env":{},"forced":false,"reason":"create-reason"}`
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "http://test/instances", bytes.NewReader([]byte(body)))
-	req.Header.Set("Content-Type", "application/json")
-	mux.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusNotFound {
-		t.Errorf("status = %d, want 404\nbody: %s", rec.Code, rec.Body.Bytes())
+	operationId, _ := postCreate(t, mux, `{"secretId":"sid","name":"create","env":{},"forced":false,"reason":"create-reason"}`)
+	rec := postStart(t, mux, operationId)
+	if rec.Code != http.StatusConflict {
+		t.Errorf("status = %d, want 409\nbody: %s", rec.Code, rec.Body.Bytes())
 	}
 }
 
-func TestController_createInstance(t *testing.T) {
+func TestController_createAndStartOperation(t *testing.T) {
 	mockBackend := &mocks.MockBackend{}
 	defer mockBackend.Mock.Validate(t)
 	mockRunner := &mocks.MockRunner{}
 	defer mockRunner.Mock.Validate(t)
 	instance := &secrets.Instance{Id: "new-id", Secret: secrets.Secret{Id: "s1", Version: 1}, Status: secrets.Status{OperationNumber: 1}}
 	c, mux, principal := newTestController(t, mockBackend)
+	expectSecretGets(t, mockBackend, 2)
 	mocks.Expect(&mockBackend.Mock, mockBackend.Runner, func(secretId string) backend.Runner {
 		if secretId != "sid" {
 			t.Errorf("Runner secretId = %q", secretId)
@@ -552,14 +672,10 @@ func TestController_createInstance(t *testing.T) {
 		return instance, immediateHandle{inst: instance}, nil
 	})
 
-	readySlot(c, "sid", principal)
+	operationId, _ := postCreate(t, mux, `{"secretId":"sid","name":"create","env":{},"forced":false,"reason":"create-reason"}`)
+	attachAllClaims(c, operationId, principal)
 
-	body := `{"secretId":"sid","env":{},"forced":false,"reason":"create-reason"}`
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "http://test/instances", bytes.NewReader([]byte(body)))
-	req.Header.Set("Content-Type", "application/json")
-	mux.ServeHTTP(rec, req)
-
+	rec := postStart(t, mux, operationId)
 	if rec.Code != http.StatusOK {
 		t.Errorf("status = %d, want 200\nbody: %s", rec.Code, rec.Body.Bytes())
 	}
@@ -572,7 +688,7 @@ func TestController_createInstance(t *testing.T) {
 	}
 }
 
-func TestController_createInstance_passesSlotStdio(t *testing.T) {
+func TestController_startOperation_passesAttachedStdio(t *testing.T) {
 	mockBackend := &mocks.MockBackend{}
 	defer mockBackend.Mock.Validate(t)
 	mockRunner := &mocks.MockRunner{}
@@ -581,6 +697,7 @@ func TestController_createInstance_passesSlotStdio(t *testing.T) {
 	stdinRead := make(chan struct{})
 	handle := &trackingHandle{inst: instance, done: make(chan struct{})}
 	var capturedStdin []byte
+	expectNoParents(t, mockBackend)
 	mocks.Expect(&mockBackend.Mock, mockBackend.Runner, func(string) backend.Runner { return mockRunner })
 	mocks.Expect(&mockRunner.Mock, mockRunner.Run, func(
 		_ context.Context,
@@ -599,19 +716,15 @@ func TestController_createInstance_passesSlotStdio(t *testing.T) {
 	})
 
 	c, mux, principal := newTestController(t, mockBackend)
-	slot := readySlot(c, "sid", principal)
+	op := readyOp(c, principal)
 	go func() {
-		_, _ = slot.pipes.stdinW.Write([]byte("payload"))
-		_ = slot.pipes.stdinW.Close()
+		_, _ = op.pipes.stdinW.Write([]byte("payload"))
+		_ = op.pipes.stdinW.Close()
 	}()
 
-	createBody := `{"secretId":"sid","env":{},"forced":false,"reason":"create-reason"}`
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "http://test/instances", bytes.NewReader([]byte(createBody)))
-	req.Header.Set("Content-Type", "application/json")
-	mux.ServeHTTP(rec, req)
+	rec := postStart(t, mux, op.id)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("create status = %d, want 200\nbody: %s", rec.Code, rec.Body.Bytes())
+		t.Fatalf("start status = %d, want 200\nbody: %s", rec.Code, rec.Body.Bytes())
 	}
 
 	<-stdinRead
@@ -620,11 +733,11 @@ func TestController_createInstance_passesSlotStdio(t *testing.T) {
 	}
 }
 
-func TestController_attachSecret_rejectsMissingUpgrade(t *testing.T) {
+func TestController_attachOperation_rejectsMissingUpgrade(t *testing.T) {
 	_, mux, _ := newTestController(t, &mocks.MockBackend{})
 
 	attachRec := httptest.NewRecorder()
-	attachReq := httptest.NewRequest(http.MethodPost, "http://test/secrets/sid/attach/stdin", nil)
+	attachReq := httptest.NewRequest(http.MethodPost, "http://test/operations/op1/attach/stdin", nil)
 	mux.ServeHTTP(attachRec, attachReq)
 	if attachRec.Code != http.StatusUpgradeRequired {
 		t.Fatalf("status = %d, want 426\nbody: %s", attachRec.Code, attachRec.Body.Bytes())
@@ -663,6 +776,7 @@ func TestController_createOperation(t *testing.T) {
 				}
 				return instance, nil
 			})
+			expectNoParents(t, mockBackend)
 			mocks.Expect(&mockBackend.Mock, mockBackend.Runner, func(secretId string) backend.Runner {
 				if secretId != "sid" {
 					t.Errorf("Runner secretId = %q, want the instance's secret", secretId)
@@ -684,14 +798,12 @@ func TestController_createOperation(t *testing.T) {
 			})
 
 			c, mux, principal := newTestController(t, mockBackend)
-			readySlot(c, "sid", principal)
 
 			body := fmt.Sprintf(`{"instanceId":"i1","name":%q,"env":{},"forced":false,"reason":%q}`, tt.opName, tt.reason)
-			rec := httptest.NewRecorder()
-			req := httptest.NewRequest(http.MethodPost, "http://test/operations", bytes.NewReader([]byte(body)))
-			req.Header.Set("Content-Type", "application/json")
-			mux.ServeHTTP(rec, req)
+			operationId, _ := postCreate(t, mux, body)
+			attachAllClaims(c, operationId, principal)
 
+			rec := postStart(t, mux, operationId)
 			if rec.Code != http.StatusOK {
 				t.Errorf("status = %d, want 200\nbody: %s", rec.Code, rec.Body.Bytes())
 			}
@@ -712,8 +824,7 @@ func TestController_createOperation_unknownInstance(t *testing.T) {
 		return nil, fmt.Errorf("no such instance")
 	})
 
-	c, mux, principal := newTestController(t, mockBackend)
-	readySlot(c, "sid", principal)
+	_, mux, _ := newTestController(t, mockBackend)
 
 	body := `{"instanceId":"missing","name":"activate","env":{},"forced":false,"reason":"r"}`
 	rec := httptest.NewRecorder()
@@ -743,15 +854,15 @@ func TestController_createOperation_requiresInstanceId(t *testing.T) {
 	}
 }
 
-func TestController_createInstance_requiresSecretId(t *testing.T) {
+func TestController_createOperation_requiresSecretIdForCreate(t *testing.T) {
 	mockBackend := &mocks.MockBackend{}
 	defer mockBackend.Mock.Validate(t)
 
 	_, mux, _ := newTestController(t, mockBackend)
 
-	body := `{"env":{},"forced":false,"reason":"create-reason"}`
+	body := `{"name":"create","env":{},"forced":false,"reason":"create-reason"}`
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "http://test/instances", bytes.NewReader([]byte(body)))
+	req := httptest.NewRequest(http.MethodPost, "http://test/operations", bytes.NewReader([]byte(body)))
 	req.Header.Set("Content-Type", "application/json")
 	mux.ServeHTTP(rec, req)
 
@@ -812,33 +923,31 @@ func TestController_getActive(t *testing.T) {
 	}
 }
 
-func TestController_createInstance_slotNotReady(t *testing.T) {
+func TestController_startOperation_attachNotReady(t *testing.T) {
 	mockBackend := &mocks.MockBackend{}
 	defer mockBackend.Mock.Validate(t)
+	expectNoParents(t, mockBackend)
 
 	c, mux, principal := newTestController(t, mockBackend)
-	if _, err := c.claimSlot("sid", principal, attachStreamStdin); err != nil {
+	op := newPendingOperation(principal, "sid", "", secrets.Create, executor.OperationParameters{})
+	c.addPending(op)
+	if _, err := c.claimAttach(op.id, principal, attachStreamStdin); err != nil {
 		t.Fatal(err)
 	}
 
-	body := `{"secretId":"sid","env":{},"forced":false,"reason":"create-reason"}`
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "http://test/instances", bytes.NewReader([]byte(body)))
-	req.Header.Set("Content-Type", "application/json")
-	mux.ServeHTTP(rec, req)
+	rec := postStart(t, mux, op.id)
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("status = %d, want 409\nbody: %s", rec.Code, rec.Body.Bytes())
 	}
 }
 
-func TestController_createOperation_rejectsCreate(t *testing.T) {
+func TestController_createOperation_rejectsCreateWithInstance(t *testing.T) {
 	mockBackend := &mocks.MockBackend{}
 	defer mockBackend.Mock.Validate(t)
 
-	c, mux, principal := newTestController(t, mockBackend)
-	readySlot(c, "sid", principal)
+	_, mux, _ := newTestController(t, mockBackend)
 
-	body := `{"instanceId":"i1","name":"create","env":{},"forced":false,"reason":"nope"}`
+	body := `{"secretId":"sid","instanceId":"i1","name":"create","env":{},"forced":false,"reason":"nope"}`
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "http://test/operations", bytes.NewReader([]byte(body)))
 	req.Header.Set("Content-Type", "application/json")
@@ -848,53 +957,42 @@ func TestController_createOperation_rejectsCreate(t *testing.T) {
 	}
 }
 
-func TestAttachSlot_stdinEOFDoesNotCancel(t *testing.T) {
+func TestPendingOperation_stdinEOFDoesNotCancel(t *testing.T) {
 	c, _, principal := newTestController(t, &mocks.MockBackend{})
-	slot := readySlot(c, "sid", principal)
+	op := readyOp(c, principal)
 	handle := &trackingHandle{inst: &secrets.Instance{Id: "i1"}, done: make(chan struct{})}
-	startSlot(t, c, slot, handle)
+	beginOp(t, c, op, handle)
 
-	c.attachFinished(slot, attachStreamStdin, nil)
+	c.attachFinished(op, attachStreamStdin, nil)
 	if handle.wasCanceled() {
 		t.Fatal("stdin EOF canceled the op")
 	}
 	handle.complete()
 }
 
-func TestAttachSlot_stdoutDisconnectCancels(t *testing.T) {
+func TestPendingOperation_stdoutDisconnectCancels(t *testing.T) {
 	c, _, principal := newTestController(t, &mocks.MockBackend{})
-	slot := readySlot(c, "sid", principal)
+	op := readyOp(c, principal)
 	handle := &trackingHandle{inst: &secrets.Instance{Id: "i1"}, done: make(chan struct{})}
-	startSlot(t, c, slot, handle)
+	beginOp(t, c, op, handle)
 
-	c.attachFinished(slot, attachStreamStdout, nil)
+	c.attachFinished(op, attachStreamStdout, nil)
 	<-handle.done
 	if !handle.wasCanceled() {
 		t.Fatal("stdout disconnect did not cancel the op")
 	}
 }
 
-func TestController_takenSlotAllowsNextAttach(t *testing.T) {
+func TestPendingOperation_twoPendingCoexist(t *testing.T) {
 	c, _, principal := newTestController(t, &mocks.MockBackend{})
-	active := readySlot(c, "sid", principal)
-	taken, err := c.takeSlot("sid", principal)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if taken != active {
-		t.Fatal("takeSlot returned a different slot")
-	}
-
-	next, err := c.claimSlot("sid", principal, attachStreamStdin)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if next == active {
-		t.Fatal("new attach reused the active slot")
+	first := readyOp(c, principal)
+	second := readyOp(c, principal)
+	if first == second || first.id == second.id {
+		t.Fatal("pending operations are not distinct")
 	}
 }
 
-func TestController_attachThenCreate_stdinReachesRun(t *testing.T) {
+func TestController_attachThenStart_stdinReachesRun(t *testing.T) {
 	mockBackend := &mocks.MockBackend{}
 	defer mockBackend.Mock.Validate(t)
 	mockRunner := &mocks.MockRunner{}
@@ -903,6 +1001,7 @@ func TestController_attachThenCreate_stdinReachesRun(t *testing.T) {
 	stdinRead := make(chan struct{})
 	handle := &trackingHandle{inst: instance, done: make(chan struct{})}
 	var capturedStdin []byte
+	expectSecretGets(t, mockBackend, 2)
 	mocks.Expect(&mockBackend.Mock, mockBackend.Runner, func(string) backend.Runner { return mockRunner })
 	mocks.Expect(&mockRunner.Mock, mockRunner.Run, func(
 		_ context.Context,
@@ -924,24 +1023,38 @@ func TestController_attachThenCreate_stdinReachesRun(t *testing.T) {
 	server := httptest.NewServer(mux)
 	t.Cleanup(server.Close)
 
-	stdoutConn := upgradeAttach(t, server.URL, "sid", "stdout", "")
+	createResp, err := http.Post(server.URL+"/operations", "application/json", strings.NewReader(`{"secretId":"sid","name":"create","reason":"create-reason"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer createResp.Body.Close()
+	if createResp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(createResp.Body)
+		t.Fatalf("create status = %d, want 201\nbody: %s", createResp.StatusCode, body)
+	}
+	var created OperationCreatedResponse
+	if err := json.NewDecoder(createResp.Body).Decode(&created); err != nil {
+		t.Fatalf("decode create: %v", err)
+	}
+
+	stdoutConn := upgradeAttach(t, server.URL, created.OperationID, "stdout", "")
 	t.Cleanup(func() { _ = stdoutConn.Close() })
-	stderrConn := upgradeAttach(t, server.URL, "sid", "stderr", "")
+	stderrConn := upgradeAttach(t, server.URL, created.OperationID, "stderr", "")
 	t.Cleanup(func() { _ = stderrConn.Close() })
-	stdinConn := upgradeAttach(t, server.URL, "sid", "stdin", "")
+	stdinConn := upgradeAttach(t, server.URL, created.OperationID, "stdin", "")
 	t.Cleanup(func() { _ = stdinConn.Close() })
 
 	go io.Copy(io.Discard, stdoutConn)
 	go io.Copy(io.Discard, stderrConn)
 
-	resp, err := http.Post(server.URL+"/instances", "application/json", strings.NewReader(`{"secretId":"sid","reason":"create-reason"}`))
+	resp, err := http.Post(server.URL+"/operations/"+created.OperationID+"/start", "application/json", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("create status = %d, want 200\nbody: %s", resp.StatusCode, body)
+		t.Fatalf("start status = %d, want 200\nbody: %s", resp.StatusCode, body)
 	}
 
 	if _, err := stdinConn.Write([]byte("payload")); err != nil {
@@ -957,7 +1070,7 @@ func TestController_attachThenCreate_stdinReachesRun(t *testing.T) {
 	}
 }
 
-func upgradeAttach(t *testing.T, serverURL, secretId, stream, body string) net.Conn {
+func upgradeAttach(t *testing.T, serverURL, operationId, stream, body string) net.Conn {
 	t.Helper()
 	host := strings.TrimPrefix(serverURL, "http://")
 	conn, err := net.Dial("tcp", host)
@@ -965,8 +1078,8 @@ func upgradeAttach(t *testing.T, serverURL, secretId, stream, body string) net.C
 		t.Fatal(err)
 	}
 	req := fmt.Sprintf(
-		"POST /secrets/%s/attach/%s HTTP/1.1\r\nHost: %s\r\nConnection: Upgrade\r\nUpgrade: %s\r\nContent-Length: %d\r\n\r\n%s",
-		secretId, stream, host, AttachUpgradeProtocol, len(body), body,
+		"POST /operations/%s/attach/%s HTTP/1.1\r\nHost: %s\r\nConnection: Upgrade\r\nUpgrade: %s\r\nContent-Length: %d\r\n\r\n%s",
+		operationId, stream, host, AttachUpgradeProtocol, len(body), body,
 	)
 	if _, err := conn.Write([]byte(req)); err != nil {
 		t.Fatal(err)

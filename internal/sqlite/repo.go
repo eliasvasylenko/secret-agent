@@ -12,6 +12,7 @@ import (
 
 	"database/sql"
 
+	"github.com/eliasvasylenko/secret-agent/internal/backend"
 	"github.com/eliasvasylenko/secret-agent/internal/command"
 	"github.com/eliasvasylenko/secret-agent/internal/executor"
 	"github.com/eliasvasylenko/secret-agent/internal/marshal"
@@ -433,11 +434,12 @@ func (st *secretState) beginUpdate(ctx context.Context, instanceId string, opera
 	return instance, operation, nil
 }
 
-func (st *secretState) launch(instance *secrets.Instance, operation secrets.Operation, parameters executor.OperationParameters, stdio command.Stdio) *opHandle {
+func (st *secretState) launch(instance *secrets.Instance, operation secrets.Operation, parameters executor.OperationParameters, proposer backend.Proposer, stdio command.Stdio) *opHandle {
 	execCtx, execCancel := context.WithCancel(context.Background())
 	h := &opHandle{
 		done:       make(chan struct{}),
 		execCancel: execCancel,
+		proposer:   proposer,
 	}
 
 	repo := st.repo
@@ -463,6 +465,7 @@ func (st *secretState) launch(instance *secrets.Instance, operation secrets.Oper
 type opHandle struct {
 	done       chan struct{}
 	execCancel context.CancelFunc
+	proposer   backend.Proposer
 	final      *secrets.Instance
 	waitErr    error
 }

@@ -3,6 +3,7 @@ package backend
 import (
 	"context"
 	"fmt"
+	"io"
 
 	"github.com/eliasvasylenko/secret-agent/internal/command"
 	"github.com/eliasvasylenko/secret-agent/internal/executor"
@@ -58,7 +59,10 @@ type Handle interface {
 }
 
 type Proposer interface {
-	Propose(ctx context.Context, name secrets.OperationName, params executor.OperationParameters) error
+	// Propose puts the operator on pipe, a raw connection to the host that asked
+	// for approval. The operator authenticates to that host on those bytes.
+	// Nil means the host recorded the approval. pipe is nil only for an in-process call.
+	Propose(ctx context.Context, secretID string, name secrets.OperationName, params executor.OperationParameters, pipe io.ReadWriteCloser) error
 }
 
 type StaleOperationError struct {

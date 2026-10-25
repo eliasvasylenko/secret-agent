@@ -1,9 +1,6 @@
 package auth
 
-import (
-	"fmt"
-	"testing"
-)
+import "testing"
 
 func TestCheckPermission(t *testing.T) {
 	admin := &Role{Name: "admin", Permissions: Permissions{All: Any}}
@@ -56,12 +53,35 @@ func TestAssertPermission(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	err := id.AssertPermission(Permissions{Secrets: Write}, "s")
-	if fmt.Sprint(err) != "operation not permitted with roles [reader]" {
+	if err == nil || err.Error() != "operation not permitted" {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
 	err = Identity{}.AssertPermission(Permissions{Secrets: Read}, "")
-	if fmt.Sprint(err) != "operation not permitted with roles []" {
+	if err == nil || err.Error() != "operation not permitted" {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestHasRole(t *testing.T) {
+	db := &Role{Name: "db", Permissions: Permissions{All: Any}}
+	other := &Role{Name: "other"}
+	tests := []struct {
+		name  string
+		roles Roles
+		role  RoleName
+		want  bool
+	}{
+		{name: "held role", roles: Roles{db}, role: "db", want: true},
+		{name: "one of several", roles: Roles{other, db}, role: "db", want: true},
+		{name: "different name", roles: Roles{db}, role: "remote-db", want: false},
+		{name: "no roles", role: "db", want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := (Identity{Roles: tc.roles}).HasRole(tc.role); got != tc.want {
+				t.Errorf("HasRole = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
