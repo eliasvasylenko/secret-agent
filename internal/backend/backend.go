@@ -18,7 +18,6 @@ type Backend interface {
 type Catalog interface {
 	Secrets() Secrets
 	Instances() Instances
-	Operations() Operations
 }
 
 type Secrets interface {
@@ -32,10 +31,6 @@ type Instances interface {
 	GetActive(ctx context.Context, secretId string) (*secrets.Instance, error)
 }
 
-type Operations interface {
-	List(ctx context.Context, secretId, instanceId *string, from, to int) ([]*secrets.Operation, error)
-}
-
 type Runner interface {
 	// Run persists the operation and starts background work before returning.
 	// ctx covers this invocation only (accept / persist). Implementations must
@@ -46,7 +41,7 @@ type Runner interface {
 		instanceId string,
 		params executor.OperationParameters,
 		proposer Proposer,
-		stdio command.Stdio,
+		stdio command.Files,
 	) (startedInstance *secrets.Instance, handle Handle, err error)
 }
 

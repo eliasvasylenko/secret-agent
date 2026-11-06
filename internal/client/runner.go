@@ -1,12 +1,12 @@
 package client
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/eliasvasylenko/secret-agent/internal/backend"
 	"github.com/eliasvasylenko/secret-agent/internal/command"
@@ -14,6 +14,8 @@ import (
 	"github.com/eliasvasylenko/secret-agent/internal/secrets"
 	"github.com/eliasvasylenko/secret-agent/internal/server"
 )
+
+const operationWaitUntilDoneHold = 30 * time.Second
 
 type httpRunner struct {
 	client   *SecretClient
@@ -26,22 +28,24 @@ func (r *httpRunner) Run(
 	instanceId string,
 	params executor.OperationParameters,
 	proposer backend.Proposer,
-	stdio command.Stdio,
+	files command.Files,
 ) (*secrets.Instance, backend.Handle, error) {
 	operationId, err := r.postCreate(ctx, name, instanceId, params)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	conns, err := r.client.attachAll(ctx, operationId)
+	conns, err := r.attachAll(ctx, operationId, files)
 	if err != nil {
 		return nil, nil, err
 	}
-	handle := newRunHandle(r.client, conns)
+	handle := newRunHandle(r, conns)
 	armed := true
 	defer func() {
 		if armed {
-			handle.conns.close()
+			for _, group := range handle.groups {
+				group.close()
+			}
 		}
 	}()
 
@@ -50,8 +54,8 @@ func (r *httpRunner) Run(
 		return nil, nil, err
 	}
 
-	handle.instanceId = instance.Id
-	handle.startPumps(stdio)
+	handle.operationId = operationId
+	handle.startPumps()
 	handle.startJoin()
 	armed = false
 	return instance, handle, nil
@@ -81,50 +85,90 @@ func (r *httpRunner) postCreate(
 	return created.OperationID, nil
 }
 
+func (r *httpRunner) attachAll(ctx context.Context, operationId string, files command.Files) ([]attached, error) {
+	groups, err := fileGroups(files)
+	if err != nil {
+		return nil, err
+	}
+	opened := make([]attached, 0, len(groups))
+	for _, group := range groups {
+		conn, err := openAttach(r.client, ctx, operationId, group)
+		if err != nil {
+			for _, att := range opened {
+				att.close()
+			}
+			return nil, err
+		}
+		opened = append(opened, attached{fileGroup: group, conn: conn})
+	}
+	return opened, nil
+}
+
 func (r *httpRunner) postStart(ctx context.Context, operationId string) (*secrets.Instance, error) {
 	req, err := r.client.buildRequest(ctx, http.MethodPost, "/operations/"+operationId+"/start", nil)
 	return Do[*secrets.Instance](r.client.client, req, err)
 }
 
+func (r *httpRunner) getOperation(ctx context.Context, operationId string, untilDone time.Duration) (*server.OperationStatusResponse, error) {
+	req, err := r.client.buildRequest(ctx, http.MethodGet, "/operations/"+operationId, nil)
+	if err == nil && untilDone > 0 {
+		query := req.URL.Query()
+		query.Set("untilDone", untilDone.String())
+		req.URL.RawQuery = query.Encode()
+	}
+	return Do[*server.OperationStatusResponse](r.client.client, req, err)
+}
+
+func (r *httpRunner) deleteOperation(ctx context.Context, operationId string) error {
+	req, err := r.client.buildRequest(ctx, http.MethodDelete, "/operations/"+operationId, nil)
+	_, err = Do[struct{}](r.client.client, req, err)
+	return err
+}
+
 type runHandle struct {
-	client     *SecretClient
-	instanceId string
-	conns      attachConns
+	runner      *httpRunner
+	operationId string
+	groups      []attached
 
 	pumpWG sync.WaitGroup
 	done   chan struct{}
 
 	final   *secrets.Instance
 	waitErr error
+
+	joinCtx  context.Context
+	stopJoin context.CancelFunc
 }
 
-func newRunHandle(client *SecretClient, conns attachConns) *runHandle {
+func newRunHandle(runner *httpRunner, groups []attached) *runHandle {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &runHandle{
-		client: client,
-		conns:  conns,
-		done:   make(chan struct{}),
+		runner:   runner,
+		groups:   groups,
+		done:     make(chan struct{}),
+		joinCtx:  ctx,
+		stopJoin: cancel,
 	}
 }
 
-func (h *runHandle) startPumps(stdio command.Stdio) {
-	stdin := stdio.Stdin
-	if stdin == nil {
-		stdin = bytes.NewReader(nil)
+func (h *runHandle) startPumps() {
+	for _, group := range h.groups {
+		if group.mode.Writes() {
+			// Output is joined. Wait drains it after the process exits.
+			if group.mode.Reads() {
+				conn, in := group.conn, group.reader()
+				go func() { _, _ = io.Copy(conn, in) }()
+			}
+			out, conn := group.writer(), group.conn
+			h.pump(func() error { return copyAttach(out, conn, conn) })
+			continue
+		}
+		if group.mode.Reads() {
+			// Input is not joined. The process can exit while this is still open.
+			conn, in := group.conn, group.reader()
+			go func() { _ = copyAttach(conn, in, conn) }()
+		}
 	}
-	stdout := stdio.Stdout
-	if stdout == nil {
-		stdout = io.Discard
-	}
-	stderr := stdio.Stderr
-	if stderr == nil {
-		stderr = io.Discard
-	}
-
-	// Stdin is forwarded but not joined. A process can exit without reading
-	// it; waiting for stdin EOF would hang a CLI whose stdin is still open.
-	go func() { _ = copyAttach(h.conns.stdin, stdin, h.conns.stdin) }()
-	h.pump(func() error { return copyAttach(stdout, h.conns.stdout, h.conns.stdout) })
-	h.pump(func() error { return copyAttach(stderr, h.conns.stderr, h.conns.stderr) })
 }
 
 func (h *runHandle) pump(copyFn func() error) {
@@ -137,23 +181,34 @@ func (h *runHandle) pump(copyFn func() error) {
 
 func (h *runHandle) startJoin() {
 	go func() {
+		defer close(h.done)
+		inst, err := h.pollOperation()
 		h.pumpWG.Wait()
-		if h.conns.stdin != nil {
-			_ = h.conns.stdin.Close()
-		}
-		inst, err := h.client.Catalog().Instances().Get(context.Background(), h.instanceId)
-		if err == nil && inst != nil {
-			switch {
-			case inst.Status.FailedAt != nil:
-				err = fmt.Errorf("operation failed")
-			case inst.Status.CompletedAt == nil:
-				err = fmt.Errorf("operation not completed")
-			}
-		}
 		h.final = inst
 		h.waitErr = err
-		close(h.done)
 	}()
+}
+
+func (h *runHandle) pollOperation() (*secrets.Instance, error) {
+	var inst *secrets.Instance
+	for {
+		if err := h.joinCtx.Err(); err != nil {
+			return inst, err
+		}
+		status, err := h.runner.getOperation(h.joinCtx, h.operationId, operationWaitUntilDoneHold)
+		if err != nil {
+			return inst, err
+		}
+		if status != nil {
+			inst = status.Instance
+		}
+		if inst != nil && inst.Operation.FailedAt != nil {
+			return inst, fmt.Errorf("operation failed")
+		}
+		if inst != nil && inst.Operation.CompletedAt != nil {
+			return inst, nil
+		}
+	}
 }
 
 func (h *runHandle) Wait(ctx context.Context) (*secrets.Instance, error) {
@@ -165,9 +220,13 @@ func (h *runHandle) Wait(ctx context.Context) (*secrets.Instance, error) {
 	}
 }
 
-// Cancel tears down attach connections. Like net.Conn.Close, call at most once.
+// Cancel tears down attach connections. Call at most once.
 func (h *runHandle) Cancel(ctx context.Context) error {
-	h.conns.close()
+	h.stopJoin()
+	for _, group := range h.groups {
+		group.close()
+	}
+	_ = h.runner.deleteOperation(ctx, h.operationId)
 	select {
 	case <-h.done:
 		return nil

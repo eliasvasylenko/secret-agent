@@ -116,7 +116,6 @@ Phase 0 → Phase 1 → Phase 2
 | Item | Notes |
 |------|--------|
 | Agent restart marks in-flight ops failed | design.md § Open |
-| Orphan attach-slot timeout | `OutputTTL` CLI flag reserved |
 | Rich exit code over HTTP | `errors.As` on local path; stderr on wire |
 | Remote access / auth | **[plan-remote.md](plan-remote.md)** |
 | Federation / Proposer wire | Parked — [plan-federation.md](plan-federation.md) |

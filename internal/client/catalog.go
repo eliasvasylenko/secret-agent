@@ -21,10 +21,6 @@ func (c catalog) Instances() backend.Instances {
 	return instancesCatalog{client: c.client}
 }
 
-func (c catalog) Operations() backend.Operations {
-	return operationsCatalog{client: c.client}
-}
-
 type secretsCatalog struct {
 	client *SecretClient
 }
@@ -70,20 +66,6 @@ func (i instancesCatalog) GetActive(ctx context.Context, secretId string) (*secr
 	return Do[*secrets.Instance](i.client.client, req, err)
 }
 
-type operationsCatalog struct {
-	client *SecretClient
-}
-
-func (o operationsCatalog) List(ctx context.Context, secretId, instanceId *string, from, to int) ([]*secrets.Operation, error) {
-	req, err := o.client.buildRequest(ctx, http.MethodGet, "/operations", nil)
-	if err != nil {
-		return nil, err
-	}
-	setQuery(req, from, to, filters{"secretId": secretId, "instanceId": instanceId})
-	return Do[[]*secrets.Operation](o.client.client, req, err)
-}
-
 var _ backend.Catalog = catalog{}
 var _ backend.Secrets = secretsCatalog{}
 var _ backend.Instances = instancesCatalog{}
-var _ backend.Operations = operationsCatalog{}

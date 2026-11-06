@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os/exec"
+	"syscall"
 
 	"github.com/eliasvasylenko/secret-agent/internal/marshal"
 )
@@ -17,16 +17,10 @@ var execCommand = exec.CommandContext
 // A command to execute.
 // A command consists of the name of the program to run, the arguments to pass to the program, and the environment to supply to the program.
 type Command struct {
-	Script         string      `json:"script"`
-	Environment    Environment `json:"environment"`
-	Shell          string      `json:"shell"`
-	CommandOptions `json:","`
-}
-
-type Stdio struct {
-	Stdin  io.Reader
-	Stdout io.Writer
-	Stderr io.Writer
+	Script      string      `json:"script"`
+	Environment Environment `json:"environment"`
+	Shell       string      `json:"shell"`
+	CommandOptions
 }
 
 func New(script string, environment Environment, shell string) *Command {
@@ -62,7 +56,7 @@ func (c *Command) MarshalJSON() ([]byte, error) {
 	return marshal.JSON(command(*c))
 }
 
-func (c *Command) Process(ctx context.Context, stdio Stdio, environment Environment) error {
+func (c *Command) Process(ctx context.Context, files Files, environment Environment) error {
 	env := c.Environment.ExpandAndMergeWith(environment)
 
 	shell, args, err := BuildShellExec(c.Script, c.Shell)
@@ -74,32 +68,28 @@ func (c *Command) Process(ctx context.Context, stdio Stdio, environment Environm
 	subProcess.Env = append(subProcess.Env, env.Render()...)
 	c.CommandOptions.Apply(subProcess)
 
-	var stdinPipe io.WriteCloser
-	if stdio.Stdin != nil {
-		stdinPipe, err = subProcess.StdinPipe()
-		if err != nil {
-			return fmt.Errorf("process failed '%v' - %s", c, err.Error())
-		}
+	subProcess.Stdin = files.file(0)
+	subProcess.Stdout = files.file(1)
+	subProcess.Stderr = files.file(2)
+	if len(files.Fds) > 3 {
+		subProcess.ExtraFiles = files.Fds[3:]
 	}
-	subProcess.Stdout = stdio.Stdout
-	subProcess.Stderr = stdio.Stderr
+
+	if files.Tty >= 0 && files.file(files.Tty) != nil {
+		if subProcess.SysProcAttr == nil {
+			subProcess.SysProcAttr = &syscall.SysProcAttr{}
+		}
+		subProcess.SysProcAttr.Setsid = true
+		subProcess.SysProcAttr.Setctty = true
+		subProcess.SysProcAttr.Ctty = files.Tty
+	}
 
 	if err := subProcess.Start(); err != nil {
 		return fmt.Errorf("process failed '%v' - %s", c, err.Error())
 	}
 
-	if stdinPipe != nil {
-		go func() {
-			_, _ = io.Copy(stdinPipe, stdio.Stdin)
-			stdinPipe.Close()
-		}()
-	}
-
-	waitErr := subProcess.Wait()
-	stopStdinCopy(stdio.Stdin, stdinPipe)
-
-	if waitErr != nil {
-		return fmt.Errorf("process failed '%v' - %s", c, waitErr.Error())
+	if err := subProcess.Wait(); err != nil {
+		return fmt.Errorf("process failed '%v' - %s", c, err)
 	}
 	return nil
 }

@@ -196,8 +196,8 @@ func TestLoadPlans(t *testing.T) {
 func TestNewInstances(t *testing.T) {
 	t.Run("success", func(t *testing.T) {
 		instances, err := NewInstances([]*Instance{
-			{Id: "id1", Secret: Secret{Id: "s1"}, Status: Status{OperationNumber: 1}},
-			{Id: "id2", Secret: Secret{Id: "s2"}, Status: Status{OperationNumber: 2}},
+			{Id: "id1", Secret: Secret{Id: "s1"}, Revision: 1},
+			{Id: "id2", Secret: Secret{Id: "s2"}, Revision: 2},
 		})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
@@ -230,7 +230,7 @@ func TestNewInstances(t *testing.T) {
 }
 
 func TestInstances_UnmarshalJSON(t *testing.T) {
-	data := `[{"id":"i1","secret":{"id":"s1","version":1},"status":{"operationNumber":1,"name":"create"}}]`
+	data := `[{"id":"i1","secret":{"id":"s1","version":1},"revision":1,"state":{"name":"create"},"operation":{"name":"create"}}]`
 	var instances Instances
 	err := json.Unmarshal([]byte(data), &instances)
 	if err != nil {
@@ -249,8 +249,8 @@ func TestInstances_UnmarshalJSON(t *testing.T) {
 
 func TestInstances_MarshalJSON(t *testing.T) {
 	instances := Instances{
-		"id1": {Id: "id1", Secret: Secret{Id: "s1", Version: 1}, Status: Status{OperationNumber: 2}},
-		"id2": {Id: "id2", Secret: Secret{Id: "s2", Version: 1}, Status: Status{OperationNumber: 1}},
+		"id1": {Id: "id1", Secret: Secret{Id: "s1", Version: 1}, Revision: 2},
+		"id2": {Id: "id2", Secret: Secret{Id: "s2", Version: 1}, Revision: 1},
 	}
 	data, err := json.Marshal(instances)
 	if err != nil {

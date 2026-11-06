@@ -35,8 +35,8 @@ operation, not a separate resource:
    (see § HTTP surface). B assigns a global operation ID and records who created it.
    Nothing has started; no started-operation record exists yet. Because A holds only a parent role, the
    operation is `awaiting-approval` and B includes a proposal token in the response.
-2. **A attaches** stdin/stdout/stderr to it: `POST /operations/{operationId}/attach/{stream}`,
-   as A. The upgrades stay open.
+2. **A attaches** its files to it: `POST /operations/{operationId}/attach` with a
+   JSON body such as `{"fds":[0,1,2],"mode":"ctty"}`, as A. The upgrades stay open.
 3. **A puts John on B.** A's `Propose` callback gives John's CLI the handle
    `{operationId, token}` and a way to reach B: John's own route (**introduce**) or a raw
    connection A splices toward B's `sshd`/proxy (**pipe**). The handle is the only thing
@@ -96,11 +96,11 @@ forbids `instanceId`; other names require `instanceId`, derive the secret from i
 | Route | As | Does |
 |-------|----|------|
 | `POST /operations` | creator | Creates a **pending** operation, `201 {operationId, state, token?, expiresAt}`. Never runs anything. `state: awaiting-approval` (+ token) when the creator holds a parent role without permission; otherwise `state: pending`. No started-operation record yet. |
-| `POST /operations/{operationId}/attach/{stream}` | creator only | The three stdio upgrades, held open. Replaces `/secrets/{secretId}/attach/...`. |
-| `GET /operations/{operationId}` | creator | The operation record (§ model); once started, also the resulting instance. Kept for a short grace period after completion so the creator can collect the outcome; then `404`. |
+| `POST /operations/{operationId}/attach` (JSON body) | creator only | One upgrade per distinct open file, held open. Replaces `/secrets/{secretId}/attach/...`. |
+| `GET /operations/{operationId}` | creator | The operation record (§ model); once started, also the resulting instance. `?untilDone=30s` holds until it is `completed` or `failed`, or for that long. `expiresAt` is reset when it finishes so the creator can collect the outcome; after that, `404`. |
 | `GET /operations/{operationId}` + token | John | B's full record of what A proposed: secret, instance, name, params, `createdBy`, `createdAt`, `expiresAt`. (Per-instance numbers can't identify a pending op — hence the global ID.) |
-| `POST /operations/{operationId}/start` | creator, or John + token | Permission check for the *starter* on the described op; requires all streams attached; `Runner.Run` with the attached stdio; `startedBy = starter` (`createdBy` already recorded); returns the instance. Second start → `409`. |
-| `DELETE /operations/{operationId}` | creator, or John + token | Decline / cancel before start: drops attaches, deletes the pending op. After start, the existing cancel path. |
+| `POST /operations/{operationId}/start` | creator, or John + token | Permission check for the *starter* on the described op; `Runner.Run` with the attached files; `startedBy = starter` (`createdBy` already recorded); returns the instance. Second start → `409`. |
+| `DELETE /operations/{operationId}` | creator, or John + token | Decline / cancel: drops attaches; a started run is cancelled and the outcome stays readable. |
 
 Token: 32 random bytes, base64url; header `X-Proposal-Token`. Issued only for
 `awaiting-approval` operations; single use for `start`. Document in
@@ -197,8 +197,8 @@ Invariants (the state machine written as data):
   clock-monotonicity invariant is needed.
 
 **Where outcomes are read from.** A client learns an operation's outcome from
-`GET /operations/{operationId}`, which the registry keeps for a short grace period
-after completion, returning the outcome and the resulting instance — not by reading
+`GET /operations/{operationId}`, which stays readable until `expiresAt` (reset when
+the operation finishes) and returns the outcome and the resulting instance — not by reading
 the instance's current status and assuming the latest operation is its own. In the
 federated `create` case this route is needed post-start anyway: John's start response
 goes to John, and A learns the instance ID only from the operation.
@@ -285,7 +285,7 @@ slot binding.
 
 **Verification:** `go test ./...`
 
-## Phase 0.5 — Status snapshot model (prerequisite for Phase 1)
+## Phase 0.5 — Status snapshot model (prerequisite for Phase 1) — **done Oct 2026**
 
 Goal: land the § Operation and status model before federation adds a second principal
 to the record. Breaking change inside this repo only (zero users; no migration path
@@ -298,11 +298,11 @@ for existing databases — a fresh schema).
 2. `executor.OperationParameters.ExpectedRevision` replaces `ExpectedOperationNumber`;
    `StartedBy` stays as the start-time principal, `CreatedBy` is threaded alongside.
 3. sqlite: drop the `operation` table. Status columns live on `instance`: `revision`,
-   `state`, `stateAt`, and the `op*` group (`opName`, `opForced`, `opReason`,
+   `state`, `stateEnteredAt`, and the `op*` group (`opName`, `opForced`, `opReason`,
    `opCreatedBy`, `opCreatedAt`, `opStartedBy`, `opStartedAt`, `opCompletedAt`,
    `opFailedAt`). `beginCreate`/`beginUpdate` write the edge and bump `revision` in the
    same transaction as the transition guards; completion copies the edge into
-   `state`/`stateAt`, updates `activeInstanceId` for `activate`/`deactivate`, bumps
+   `state`/`stateEnteredAt`, updates `activeInstanceId` for `activate`/`deactivate`, bumps
    `revision`; failure sets `opFailedAt`, bumps `revision`, leaves `state` alone.
    Guards read `state`, the `op*` outcome, and `activeInstanceId` instead of
    `MAX(id)` joins. `getInstance`/list queries lose their joins.
@@ -312,18 +312,24 @@ for existing databases — a fresh schema).
    not the active instance → refuse. `forced` logs and proceeds, as today.
 5. Remove `Catalog.Operations()`, `GET /operations?…&from=&to=`, the `history` CLI
    command, and their client methods and tests.
-6. Server registry: `pendingOperation` wraps a `secrets.Operation` (the domain record)
-   plus pipes/claims/token/expiry. `GET /operations/{operationId}` returns the record
-   and, once started, the instance; completed/failed records are retained for a grace
-   period (`--operation-grace`, default a few minutes) before removal.
+6. Server registry: `operationEntry` wraps a `secrets.Operation` (the domain record)
+   plus pipes/claims/token/expiry, and owns its own lock and transitions
+   (`claimAttach`, `start`, `finish`, `cancel`, `expire`). `operationRegistry`
+   owns membership only; removal is two-phase (close the entry, then
+   compare-and-remove), so no two locks are ever held together. Expiry is a
+   timer per deadline, not a check on lookup. `GET /operations/{operationId}`
+   returns the record and, once started, the instance. `expiresAt` starts at
+   `pendingTTL` (default 10 min, `--pending-operation-ttl`) and resets to
+   `finishedTTL` (default 2 min, `--finished-operation-ttl`) when the
+   operation finishes, including when the backend rejects it at start.
 7. HTTP runner: the join reads the outcome from `GET /operations/{operationId}`, not
    `GET /instances/{id}`.
 8. Docs: [http-api.md](http-api.md) (remove the list route; document the record and
-   grace period), [design.md](design.md) glossary (“Operation — audit record” →
+   `expiresAt`), [design.md](design.md) glossary (“Operation — audit record” →
    edge/node wording; Catalog loses history), README (“full history” claim goes).
 9. Tests: invariants above (completed ⇒ state advanced; failed ⇒ state unchanged and
    only same-name retry allowed unforced; `Revision` bumps per write;
-   `ExpectedRevision` guard); registry grace period; runner join via the operation.
+   `ExpectedRevision` guard); finished-operation expiry; runner join via the operation.
 
 **Verification:** `go test ./...`
 

@@ -33,10 +33,6 @@ func (c *MockCatalog) Instances() backend.Instances {
 	return nextCall(&c.Mock, c.Instances)()
 }
 
-func (c *MockCatalog) Operations() backend.Operations {
-	return nextCall(&c.Mock, c.Operations)()
-}
-
 type MockSecrets struct {
 	Mock
 }
@@ -65,14 +61,6 @@ func (i *MockInstances) GetActive(ctx context.Context, secretId string) (*secret
 	return nextCall(&i.Mock, i.GetActive)(ctx, secretId)
 }
 
-type MockOperations struct {
-	Mock
-}
-
-func (o *MockOperations) List(ctx context.Context, secretId, instanceId *string, from, to int) ([]*secrets.Operation, error) {
-	return nextCall(&o.Mock, o.List)(ctx, secretId, instanceId, from, to)
-}
-
 type MockRunner struct {
 	Mock
 }
@@ -83,7 +71,7 @@ func (r *MockRunner) Run(
 	instanceId string,
 	params executor.OperationParameters,
 	proposer backend.Proposer,
-	stdio command.Stdio,
+	stdio command.Files,
 ) (*secrets.Instance, backend.Handle, error) {
 	return nextCall(&r.Mock, r.Run)(ctx, name, instanceId, params, proposer, stdio)
 }

@@ -14,7 +14,7 @@ func Create(
 	runner backend.Runner,
 	params executor.OperationParameters,
 	proposer backend.Proposer,
-	stdio command.Stdio,
+	stdio command.Files,
 ) (*secrets.Instance, error) {
 	return run(ctx, runner, secrets.Create, "", params, proposer, stdio)
 }
@@ -25,7 +25,7 @@ func Destroy(
 	instanceId string,
 	params executor.OperationParameters,
 	proposer backend.Proposer,
-	stdio command.Stdio,
+	stdio command.Files,
 ) (*secrets.Instance, error) {
 	return run(ctx, runner, secrets.Destroy, instanceId, params, proposer, stdio)
 }
@@ -36,7 +36,7 @@ func Activate(
 	instanceId string,
 	params executor.OperationParameters,
 	proposer backend.Proposer,
-	stdio command.Stdio,
+	stdio command.Files,
 ) (*secrets.Instance, error) {
 	return run(ctx, runner, secrets.Activate, instanceId, params, proposer, stdio)
 }
@@ -47,7 +47,7 @@ func Deactivate(
 	instanceId string,
 	params executor.OperationParameters,
 	proposer backend.Proposer,
-	stdio command.Stdio,
+	stdio command.Files,
 ) (*secrets.Instance, error) {
 	return run(ctx, runner, secrets.Deactivate, instanceId, params, proposer, stdio)
 }
@@ -58,7 +58,7 @@ func Test(
 	instanceId string,
 	params executor.OperationParameters,
 	proposer backend.Proposer,
-	stdio command.Stdio,
+	stdio command.Files,
 ) (*secrets.Instance, error) {
 	return run(ctx, runner, secrets.Test, instanceId, params, proposer, stdio)
 }
@@ -70,7 +70,7 @@ func run(
 	instanceId string,
 	params executor.OperationParameters,
 	proposer backend.Proposer,
-	stdio command.Stdio,
+	stdio command.Files,
 ) (*secrets.Instance, error) {
 	_, handle, err := runner.Run(ctx, name, instanceId, params, proposer, stdio)
 	if err != nil {

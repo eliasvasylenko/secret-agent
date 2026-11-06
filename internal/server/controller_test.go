@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/eliasvasylenko/secret-agent/internal/auth"
 	"github.com/eliasvasylenko/secret-agent/internal/backend"
@@ -146,7 +147,7 @@ func (h *trackingHandle) wasCanceled() bool {
 func newTestController(t *testing.T, agent backend.Backend) (*Controller, http.Handler, string) {
 	t.Helper()
 	policy, principal := policyForCurrentUser(t, nil)
-	c := NewController(agent, policy, NewLimiter(0, 0))
+	c := NewController(agent, policy, NewLimiter(0, 0), 0, 0)
 	return c, handlerWithConn(c, unixTestConn(t)), principal
 }
 
@@ -186,27 +187,52 @@ func expectCatalog(mockBackend *mocks.MockBackend, mockCatalog *mocks.MockCatalo
 	})
 }
 
-func readyOp(c *Controller, principal string) *pendingOperation {
-	op := newPendingOperation(principal, "sid", "", secrets.Create, executor.OperationParameters{})
-	c.addPending(op)
-	attachAllClaims(c, op.id, principal)
-	return op
+func newPendingOp(c *Controller, principal string) *operationEntry {
+	entry := newOperationEntry(principal, "sid", "", secrets.Create, executor.OperationParameters{}, c.leases)
+	c.operations.add(entry)
+	return entry
+}
+
+func readyOp(c *Controller, principal string) *operationEntry {
+	entry := newPendingOp(c, principal)
+	attachAllClaims(c, entry.id(), principal)
+	return entry
 }
 
 func attachAllClaims(c *Controller, operationId, principal string) {
-	for _, stream := range []attachStream{attachStreamStdin, attachStreamStdout, attachStreamStderr} {
-		if _, err := c.claimAttach(operationId, principal, stream); err != nil {
+	entry, err := c.operations.get(operationId)
+	if err != nil {
+		panic(err)
+	}
+	for fd := 0; fd <= 2; fd++ {
+		mode := command.Write
+		if fd == 0 {
+			mode = command.Read
+		}
+		if _, err := entry.claimAttach(principal, []int{fd}, mode); err != nil {
 			panic(err)
 		}
 	}
 }
 
-func beginOp(t *testing.T, c *Controller, op *pendingOperation, handle backend.Handle) {
+func beginOp(t *testing.T, c *Controller, entry *operationEntry, handle backend.Handle) {
 	t.Helper()
-	if err := c.beginStart(op); err != nil {
+	if err := entry.start(); err != nil {
 		t.Fatal(err)
 	}
-	op.watch(c, handle)
+	c.operations.watch(entry, handle)
+}
+
+// eventually polls until check passes or the deadline is hit.
+func eventually(t *testing.T, timeout time.Duration, check func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for !check() {
+		if time.Now().After(deadline) {
+			t.Fatal("condition not met in time")
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 func postCreate(t *testing.T, mux http.Handler, body string) (string, *httptest.ResponseRecorder) {
@@ -287,7 +313,7 @@ func TestController_secretGrantAllowsOneSecret(t *testing.T) {
 		})
 
 		policy, _ := policyForCurrentUser(t, roles)
-		c := NewController(mockBackend, policy, NewLimiter(0, 0))
+		c := NewController(mockBackend, policy, NewLimiter(0, 0), 0, 0)
 		mux := handlerWithConn(c, unixTestConn(t))
 
 		rec := httptest.NewRecorder()
@@ -340,7 +366,7 @@ func TestController_secretGrantAllowsOneSecret(t *testing.T) {
 		})
 
 		policy, _ := policyForCurrentUser(t, roles)
-		c := NewController(mockBackend, policy, NewLimiter(0, 0))
+		c := NewController(mockBackend, policy, NewLimiter(0, 0), 0, 0)
 		mux := handlerWithConn(c, unixTestConn(t))
 
 		rec := httptest.NewRecorder()
@@ -357,6 +383,7 @@ func TestController_secretGrantAllowsOneSecret(t *testing.T) {
 
 		rec = httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodPost, "http://test/operations", strings.NewReader(`{"secretId":"secret-b","name":"create","reason":"no"}`))
+		req.Header.Set("Content-Type", "application/json")
 		mux.ServeHTTP(rec, req)
 		if rec.Code != http.StatusCreated {
 			t.Fatalf("create B status = %d, want 201 (creation runs nothing; the gate is at start)\n%s", rec.Code, rec.Body.Bytes())
@@ -364,6 +391,7 @@ func TestController_secretGrantAllowsOneSecret(t *testing.T) {
 
 		rec = httptest.NewRecorder()
 		req = httptest.NewRequest(http.MethodPost, "http://test/operations", strings.NewReader(`{"secretId":"secret-a","name":"create","reason":"yes"}`))
+		req.Header.Set("Content-Type", "application/json")
 		mux.ServeHTTP(rec, req)
 		if rec.Code != http.StatusCreated {
 			t.Fatalf("create A status = %d, want 201 (pending operation)\n%s", rec.Code, rec.Body.Bytes())
@@ -386,7 +414,7 @@ func TestController_secretGrantAllowsOneSecret(t *testing.T) {
 		}
 
 		policy, _ := policyForCurrentUser(t, nil)
-		c := NewController(mockBackend, policy, NewLimiter(0, 0))
+		c := NewController(mockBackend, policy, NewLimiter(0, 0), 0, 0)
 		mux := handlerWithConn(c, unixTestConn(t))
 
 		operationId, _ := postCreate(t, mux, `{"secretId":"secret-b","name":"create","reason":"no"}`)
@@ -415,7 +443,7 @@ func TestController_secretGrantAllowsOneSecret(t *testing.T) {
 		}
 
 		policy, _ := policyForCurrentUser(t, roles)
-		c := NewController(mockBackend, policy, NewLimiter(0, 0))
+		c := NewController(mockBackend, policy, NewLimiter(0, 0), 0, 0)
 		mux := handlerWithConn(c, unixTestConn(t))
 
 		operationId, _ := postCreate(t, mux, `{"secretId":"secret-b","name":"create","reason":"propose"}`)
@@ -452,7 +480,7 @@ func TestController_secretGrantAllowsOneSecret(t *testing.T) {
 		})
 
 		policy, _ := policyForCurrentUser(t, roles)
-		c := NewController(mockBackend, policy, NewLimiter(0, 0))
+		c := NewController(mockBackend, policy, NewLimiter(0, 0), 0, 0)
 		mux := handlerWithConn(c, unixTestConn(t))
 
 		rec := httptest.NewRecorder()
@@ -630,17 +658,34 @@ func TestController_getInstance(t *testing.T) {
 	}
 }
 
-func TestController_startOperation_requiresAttach(t *testing.T) {
+func TestController_startOperation_allowsNoAttach(t *testing.T) {
 	mockBackend := &mocks.MockBackend{}
 	defer mockBackend.Mock.Validate(t)
+	mockRunner := &mocks.MockRunner{}
+	defer mockRunner.Mock.Validate(t)
+	instance := &secrets.Instance{Id: "new-id", Secret: secrets.Secret{Id: "s1", Version: 1}, Revision: 1}
 	expectSecretGets(t, mockBackend, 2)
+	mocks.Expect(&mockBackend.Mock, mockBackend.Runner, func(string) backend.Runner { return mockRunner })
+	mocks.Expect(&mockRunner.Mock, mockRunner.Run, func(
+		_ context.Context,
+		_ secrets.OperationName,
+		_ string,
+		_ executor.OperationParameters,
+		_ backend.Proposer,
+		files command.Files,
+	) (*secrets.Instance, backend.Handle, error) {
+		if len(files.Fds) != 0 {
+			t.Errorf("files.Fds = %v, want none attached", files.Fds)
+		}
+		return instance, immediateHandle{inst: instance}, nil
+	})
 
 	_, mux, _ := newTestController(t, mockBackend)
 
 	operationId, _ := postCreate(t, mux, `{"secretId":"sid","name":"create","env":{},"forced":false,"reason":"create-reason"}`)
 	rec := postStart(t, mux, operationId)
-	if rec.Code != http.StatusConflict {
-		t.Errorf("status = %d, want 409\nbody: %s", rec.Code, rec.Body.Bytes())
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200\nbody: %s", rec.Code, rec.Body.Bytes())
 	}
 }
 
@@ -649,7 +694,7 @@ func TestController_createAndStartOperation(t *testing.T) {
 	defer mockBackend.Mock.Validate(t)
 	mockRunner := &mocks.MockRunner{}
 	defer mockRunner.Mock.Validate(t)
-	instance := &secrets.Instance{Id: "new-id", Secret: secrets.Secret{Id: "s1", Version: 1}, Status: secrets.Status{OperationNumber: 1}}
+	instance := &secrets.Instance{Id: "new-id", Secret: secrets.Secret{Id: "s1", Version: 1}, Revision: 1}
 	c, mux, principal := newTestController(t, mockBackend)
 	expectSecretGets(t, mockBackend, 2)
 	mocks.Expect(&mockBackend.Mock, mockBackend.Runner, func(secretId string) backend.Runner {
@@ -664,7 +709,7 @@ func TestController_createAndStartOperation(t *testing.T) {
 		instanceId string,
 		params executor.OperationParameters,
 		proposer backend.Proposer,
-		stdio command.Stdio,
+		stdio command.Files,
 	) (*secrets.Instance, backend.Handle, error) {
 		if name != secrets.Create || params.StartedBy != principal || params.Reason != "create-reason" {
 			t.Errorf("Run name=%s StartedBy=%q Reason=%q", name, params.StartedBy, params.Reason)
@@ -688,12 +733,12 @@ func TestController_createAndStartOperation(t *testing.T) {
 	}
 }
 
-func TestController_startOperation_passesAttachedStdio(t *testing.T) {
+func TestController_startOperation_passesAttachedFiles(t *testing.T) {
 	mockBackend := &mocks.MockBackend{}
 	defer mockBackend.Mock.Validate(t)
 	mockRunner := &mocks.MockRunner{}
 	defer mockRunner.Mock.Validate(t)
-	instance := &secrets.Instance{Id: "new-id", Secret: secrets.Secret{Id: "sid", Version: 1}, Status: secrets.Status{OperationNumber: 1}}
+	instance := &secrets.Instance{Id: "new-id", Secret: secrets.Secret{Id: "sid", Version: 1}, Revision: 1}
 	stdinRead := make(chan struct{})
 	handle := &trackingHandle{inst: instance, done: make(chan struct{})}
 	var capturedStdin []byte
@@ -705,10 +750,10 @@ func TestController_startOperation_passesAttachedStdio(t *testing.T) {
 		_ string,
 		_ executor.OperationParameters,
 		_ backend.Proposer,
-		stdio command.Stdio,
+		stdio command.Files,
 	) (*secrets.Instance, backend.Handle, error) {
 		go func() {
-			capturedStdin, _ = io.ReadAll(stdio.Stdin)
+			capturedStdin, _ = io.ReadAll(stdio.Fds[0])
 			close(stdinRead)
 			handle.complete()
 		}()
@@ -716,13 +761,14 @@ func TestController_startOperation_passesAttachedStdio(t *testing.T) {
 	})
 
 	c, mux, principal := newTestController(t, mockBackend)
-	op := readyOp(c, principal)
+	entry := readyOp(c, principal)
 	go func() {
-		_, _ = op.pipes.stdinW.Write([]byte("payload"))
-		_ = op.pipes.stdinW.Close()
+		peer := entry.byFd[0].peer
+		_, _ = peer.Write([]byte("payload"))
+		_ = peer.Close()
 	}()
 
-	rec := postStart(t, mux, op.id)
+	rec := postStart(t, mux, entry.id())
 	if rec.Code != http.StatusOK {
 		t.Fatalf("start status = %d, want 200\nbody: %s", rec.Code, rec.Body.Bytes())
 	}
@@ -737,7 +783,7 @@ func TestController_attachOperation_rejectsMissingUpgrade(t *testing.T) {
 	_, mux, _ := newTestController(t, &mocks.MockBackend{})
 
 	attachRec := httptest.NewRecorder()
-	attachReq := httptest.NewRequest(http.MethodPost, "http://test/operations/op1/attach/stdin", nil)
+	attachReq := httptest.NewRequest(http.MethodPost, "http://test/operations/op1/attach", nil)
 	mux.ServeHTTP(attachRec, attachReq)
 	if attachRec.Code != http.StatusUpgradeRequired {
 		t.Fatalf("status = %d, want 426\nbody: %s", attachRec.Code, attachRec.Body.Bytes())
@@ -745,7 +791,7 @@ func TestController_attachOperation_rejectsMissingUpgrade(t *testing.T) {
 }
 
 func TestController_createOperation(t *testing.T) {
-	instance := &secrets.Instance{Id: "i1", Secret: secrets.Secret{Id: "sid", Version: 1}, Status: secrets.Status{OperationNumber: 1}}
+	instance := &secrets.Instance{Id: "i1", Secret: secrets.Secret{Id: "sid", Version: 1}, Revision: 1}
 
 	tests := []struct {
 		name   string
@@ -776,7 +822,7 @@ func TestController_createOperation(t *testing.T) {
 				}
 				return instance, nil
 			})
-			expectNoParents(t, mockBackend)
+			expectSecretGets(t, mockBackend, 1)
 			mocks.Expect(&mockBackend.Mock, mockBackend.Runner, func(secretId string) backend.Runner {
 				if secretId != "sid" {
 					t.Errorf("Runner secretId = %q, want the instance's secret", secretId)
@@ -789,7 +835,7 @@ func TestController_createOperation(t *testing.T) {
 				instanceId string,
 				params executor.OperationParameters,
 				_ backend.Proposer,
-				_ command.Stdio,
+				_ command.Files,
 			) (*secrets.Instance, backend.Handle, error) {
 				if name != tt.opName || instanceId != "i1" || params.Reason != tt.reason {
 					t.Errorf("Run name=%s instanceId=%q reason=%q", name, instanceId, params.Reason)
@@ -871,30 +917,105 @@ func TestController_createOperation_requiresSecretIdForCreate(t *testing.T) {
 	}
 }
 
-func TestController_listOperations(t *testing.T) {
-	mockBackend := &mocks.MockBackend{}
-	defer mockBackend.Mock.Validate(t)
-	mockCatalog := &mocks.MockCatalog{}
-	defer mockCatalog.Mock.Validate(t)
-	mockOperations := &mocks.MockOperations{}
-	defer mockOperations.Mock.Validate(t)
-	expectCatalog(mockBackend, mockCatalog)
-	mocks.Expect(&mockCatalog.Mock, mockCatalog.Operations, func() backend.Operations { return mockOperations })
-	mocks.Expect(&mockOperations.Mock, mockOperations.List, func(ctx context.Context, secretId, instanceId *string, from int, to int) ([]*secrets.Operation, error) {
-		if secretId == nil || *secretId != "sid" || instanceId == nil || *instanceId != "i1" {
-			t.Errorf("List secretId=%v instanceId=%v", secretId, instanceId)
-		}
-		return []*secrets.Operation{}, nil
+func TestController_finishedOperationExpires(t *testing.T) {
+	policy, principal := policyForCurrentUser(t, nil)
+	c := NewController(&mocks.MockBackend{}, policy, NewLimiter(0, 0), time.Hour, 5*time.Millisecond)
+	mux := handlerWithConn(c, unixTestConn(t))
+
+	entry := readyOp(c, principal)
+	beginOp(t, c, entry, immediateHandle{inst: &secrets.Instance{Id: "i1"}})
+
+	getStatus := func() int {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "http://test/operations/"+entry.id(), nil))
+		return rec.Code
+	}
+	eventually(t, time.Second, func() bool { return getStatus() == http.StatusNotFound })
+	if _, err := c.operations.get(entry.id()); err == nil {
+		t.Fatal("expired entry still registered")
+	}
+}
+
+func TestController_pendingOperationExpires(t *testing.T) {
+	policy, principal := policyForCurrentUser(t, nil)
+	c := NewController(&mocks.MockBackend{}, policy, NewLimiter(0, 0), 5*time.Millisecond, time.Hour)
+
+	entry := newPendingOp(c, principal)
+	eventually(t, time.Second, func() bool {
+		_, err := c.operations.get(entry.id())
+		return err != nil
 	})
+	if err := entry.start(); err == nil {
+		t.Fatal("expired entry could be started")
+	}
+}
 
-	_, mux, _ := newTestController(t, mockBackend)
+func TestController_startedOperationDoesNotExpire(t *testing.T) {
+	policy, principal := policyForCurrentUser(t, nil)
+	c := NewController(&mocks.MockBackend{}, policy, NewLimiter(0, 0), 5*time.Millisecond, time.Hour)
 
+	entry := readyOp(c, principal)
+	handle := &trackingHandle{inst: &secrets.Instance{Id: "i1"}, done: make(chan struct{})}
+	beginOp(t, c, entry, handle)
+	time.Sleep(20 * time.Millisecond)
+	if _, err := c.operations.get(entry.id()); err != nil {
+		t.Fatal("started entry expired")
+	}
+	handle.complete()
+}
+
+func TestController_createOperation_rejectsMissingContentType(t *testing.T) {
+	_, mux, _ := newTestController(t, &mocks.MockBackend{})
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "http://test/operations?secretId=sid&instanceId=i1&from=0&to=10", nil)
+	req := httptest.NewRequest(http.MethodPost, "http://test/operations", strings.NewReader(`{"secretId":"sid","name":"create","reason":"r"}`))
 	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("status = %d, want 415\nbody: %s", rec.Code, rec.Body.Bytes())
+	}
+}
 
-	if rec.Code != http.StatusOK {
-		t.Errorf("status = %d, want 200", rec.Code)
+func TestController_attachOperation_rejectsMissingContentType(t *testing.T) {
+	c, mux, principal := newTestController(t, &mocks.MockBackend{})
+	entry := newPendingOp(c, principal)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "http://test/operations/"+entry.id()+"/attach", strings.NewReader(`{"fds":[0],"mode":"r"}`))
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", AttachUpgradeProtocol)
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("status = %d, want 415\nbody: %s", rec.Code, rec.Body.Bytes())
+	}
+}
+
+func TestController_getOperation_rejectsBadUntilDone(t *testing.T) {
+	c, mux, principal := newTestController(t, &mocks.MockBackend{})
+	entry := newPendingOp(c, principal)
+	for _, query := range []string{"untilDone=yes", "untilDone=-1s"} {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "http://test/operations/"+entry.id()+"?"+query, nil))
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("%s status = %d, want 400\nbody: %s", query, rec.Code, rec.Body.Bytes())
+		}
+	}
+}
+
+func TestController_startOperation_afterDeleteNotFound(t *testing.T) {
+	c, mux, principal := newTestController(t, &mocks.MockBackend{})
+	entry := readyOp(c, principal)
+	if err := c.operations.cancel(entry); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.operations.get(entry.id()); err == nil {
+		t.Fatal("cancelled entry still registered")
+	}
+
+	rec := postStart(t, mux, entry.id())
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404\nbody: %s", rec.Code, rec.Body.Bytes())
+	}
+	// A stale pointer cannot transition the closed entry either.
+	if err := entry.start(); err == nil {
+		t.Fatal("closed entry could be started")
 	}
 }
 
@@ -923,21 +1044,14 @@ func TestController_getActive(t *testing.T) {
 	}
 }
 
-func TestController_startOperation_attachNotReady(t *testing.T) {
-	mockBackend := &mocks.MockBackend{}
-	defer mockBackend.Mock.Validate(t)
-	expectNoParents(t, mockBackend)
-
-	c, mux, principal := newTestController(t, mockBackend)
-	op := newPendingOperation(principal, "sid", "", secrets.Create, executor.OperationParameters{})
-	c.addPending(op)
-	if _, err := c.claimAttach(op.id, principal, attachStreamStdin); err != nil {
+func TestController_startOperation_allowsPartialAttach(t *testing.T) {
+	c, _, principal := newTestController(t, &mocks.MockBackend{})
+	entry := newPendingOp(c, principal)
+	if _, err := entry.claimAttach(principal, []int{0}, command.Read); err != nil {
 		t.Fatal(err)
 	}
-
-	rec := postStart(t, mux, op.id)
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("status = %d, want 409\nbody: %s", rec.Code, rec.Body.Bytes())
+	if err := entry.start(); err != nil {
+		t.Fatalf("start with only fd 0 attached: %v", err)
 	}
 }
 
@@ -963,7 +1077,10 @@ func TestPendingOperation_stdinEOFDoesNotCancel(t *testing.T) {
 	handle := &trackingHandle{inst: &secrets.Instance{Id: "i1"}, done: make(chan struct{})}
 	beginOp(t, c, op, handle)
 
-	c.attachFinished(op, attachStreamStdin, nil)
+	c.operations.attachEnded(op, op.byFd[0])
+	if _, err := c.operations.get(op.id()); err != nil {
+		t.Fatal("stdin EOF closed a started op")
+	}
 	if handle.wasCanceled() {
 		t.Fatal("stdin EOF canceled the op")
 	}
@@ -976,7 +1093,7 @@ func TestPendingOperation_stdoutDisconnectCancels(t *testing.T) {
 	handle := &trackingHandle{inst: &secrets.Instance{Id: "i1"}, done: make(chan struct{})}
 	beginOp(t, c, op, handle)
 
-	c.attachFinished(op, attachStreamStdout, nil)
+	c.operations.attachEnded(op, op.byFd[1])
 	<-handle.done
 	if !handle.wasCanceled() {
 		t.Fatal("stdout disconnect did not cancel the op")
@@ -987,7 +1104,7 @@ func TestPendingOperation_twoPendingCoexist(t *testing.T) {
 	c, _, principal := newTestController(t, &mocks.MockBackend{})
 	first := readyOp(c, principal)
 	second := readyOp(c, principal)
-	if first == second || first.id == second.id {
+	if first == second || first.id() == second.id() {
 		t.Fatal("pending operations are not distinct")
 	}
 }
@@ -997,7 +1114,7 @@ func TestController_attachThenStart_stdinReachesRun(t *testing.T) {
 	defer mockBackend.Mock.Validate(t)
 	mockRunner := &mocks.MockRunner{}
 	defer mockRunner.Mock.Validate(t)
-	instance := &secrets.Instance{Id: "new-id", Secret: secrets.Secret{Id: "sid"}, Status: secrets.Status{OperationNumber: 1}}
+	instance := &secrets.Instance{Id: "new-id", Secret: secrets.Secret{Id: "sid"}, Revision: 1}
 	stdinRead := make(chan struct{})
 	handle := &trackingHandle{inst: instance, done: make(chan struct{})}
 	var capturedStdin []byte
@@ -1009,10 +1126,10 @@ func TestController_attachThenStart_stdinReachesRun(t *testing.T) {
 		_ string,
 		_ executor.OperationParameters,
 		_ backend.Proposer,
-		stdio command.Stdio,
+		stdio command.Files,
 	) (*secrets.Instance, backend.Handle, error) {
 		go func() {
-			capturedStdin, _ = io.ReadAll(stdio.Stdin)
+			capturedStdin, _ = io.ReadAll(stdio.Fds[0])
 			close(stdinRead)
 			handle.complete()
 		}()
@@ -1037,12 +1154,15 @@ func TestController_attachThenStart_stdinReachesRun(t *testing.T) {
 		t.Fatalf("decode create: %v", err)
 	}
 
-	stdoutConn := upgradeAttach(t, server.URL, created.OperationID, "stdout", "")
+	stdoutConn := upgradeAttach(t, server.URL, created.OperationID, 1)
 	t.Cleanup(func() { _ = stdoutConn.Close() })
-	stderrConn := upgradeAttach(t, server.URL, created.OperationID, "stderr", "")
+	stderrConn := upgradeAttach(t, server.URL, created.OperationID, 2)
 	t.Cleanup(func() { _ = stderrConn.Close() })
-	stdinConn := upgradeAttach(t, server.URL, created.OperationID, "stdin", "")
+	stdinConn := upgradeAttach(t, server.URL, created.OperationID, 0)
 	t.Cleanup(func() { _ = stdinConn.Close() })
+	if _, err := stdinConn.Write([]byte("pre-")); err != nil {
+		t.Fatalf("write stdin head: %v", err)
+	}
 
 	go io.Copy(io.Discard, stdoutConn)
 	go io.Copy(io.Discard, stderrConn)
@@ -1065,21 +1185,29 @@ func TestController_attachThenStart_stdinReachesRun(t *testing.T) {
 	}
 
 	<-stdinRead
-	if string(capturedStdin) != "payload" {
-		t.Errorf("stdin = %q, want payload", capturedStdin)
+	if string(capturedStdin) != "pre-payload" {
+		t.Errorf("stdin = %q, want pre-payload", capturedStdin)
 	}
 }
 
-func upgradeAttach(t *testing.T, serverURL, operationId, stream, body string) net.Conn {
+func upgradeAttach(t *testing.T, serverURL, operationId string, fd int) net.Conn {
 	t.Helper()
 	host := strings.TrimPrefix(serverURL, "http://")
 	conn, err := net.Dial("tcp", host)
 	if err != nil {
 		t.Fatal(err)
 	}
+	mode := command.Write
+	if fd == 0 {
+		mode = command.Read
+	}
+	body, err := json.Marshal(AttachRequest{Fds: []int{fd}, Mode: mode})
+	if err != nil {
+		t.Fatal(err)
+	}
 	req := fmt.Sprintf(
-		"POST /operations/%s/attach/%s HTTP/1.1\r\nHost: %s\r\nConnection: Upgrade\r\nUpgrade: %s\r\nContent-Length: %d\r\n\r\n%s",
-		operationId, stream, host, AttachUpgradeProtocol, len(body), body,
+		"POST /operations/%s/attach HTTP/1.1\r\nHost: %s\r\nConnection: Upgrade\r\nUpgrade: %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s",
+		operationId, host, AttachUpgradeProtocol, len(body), body,
 	)
 	if _, err := conn.Write([]byte(req)); err != nil {
 		t.Fatal(err)
@@ -1090,7 +1218,177 @@ func upgradeAttach(t *testing.T, serverURL, operationId, stream, body string) ne
 		t.Fatal(err)
 	}
 	if resp.StatusCode != http.StatusSwitchingProtocols {
-		t.Fatalf("attach %s status = %d, want 101", stream, resp.StatusCode)
+		t.Fatalf("attach fd %d status = %d, want 101", fd, resp.StatusCode)
 	}
 	return conn
+}
+
+func TestClaimAttach_sharedOutputIsOneFile(t *testing.T) {
+	c, _, principal := newTestController(t, &mocks.MockBackend{})
+	entry := newPendingOp(c, principal)
+	if _, err := entry.claimAttach(principal, []int{1, 2}, command.Write); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := entry.claimAttach(principal, []int{0}, command.Read); err != nil {
+		t.Fatal(err)
+	}
+	in := entry.byFd[0]
+	out := entry.byFd[1]
+	errOut := entry.byFd[2]
+	if out.process != errOut.process {
+		t.Fatal("stdout and stderr do not share a file")
+	}
+	if in.process == out.process {
+		t.Fatal("stdin was joined onto the output file")
+	}
+
+	if _, err := out.process.Write([]byte("both")); err != nil {
+		t.Fatal(err)
+	}
+	_ = out.process.Close()
+	got, err := io.ReadAll(out.peer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "both" {
+		t.Fatalf("output = %q", got)
+	}
+}
+
+func TestClaimAttach_extraDescriptorKeepsItsNumber(t *testing.T) {
+	c, _, principal := newTestController(t, &mocks.MockBackend{})
+	entry := newPendingOp(c, principal)
+	attachAllClaims(c, entry.id(), principal)
+	att, err := entry.claimAttach(principal, []int{5}, command.Read)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := entry.claimAttach(principal, []int{5}, command.Read); err == nil {
+		t.Fatal("fd 5 claimed twice")
+	}
+
+	files := entry.files()
+	if len(files.Fds) != 6 {
+		t.Fatalf("files.Fds = %d entries, want 6", len(files.Fds))
+	}
+	if files.Fds[5] != att.process {
+		t.Fatal("fd 5 does not carry the extra attachment")
+	}
+	if files.Fds[3] != nil || files.Fds[4] != nil {
+		t.Fatal("descriptor gap was not left empty")
+	}
+	if files.Tty != command.NoTty {
+		t.Fatalf("files.Tty = %d, want NoTty", files.Tty)
+	}
+}
+
+func TestClaimAttach_cttyOnExtraDescriptor(t *testing.T) {
+	c, _, principal := newTestController(t, &mocks.MockBackend{})
+	entry := newPendingOp(c, principal)
+	attachAllClaims(c, entry.id(), principal)
+	att, err := entry.claimAttach(principal, []int{5}, command.Ctty)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(att.close)
+	if _, err := entry.claimAttach(principal, []int{6}, command.Ctty); err == nil {
+		t.Fatal("controlling terminal claimed twice")
+	}
+
+	files := entry.files()
+	if files.Tty != 5 {
+		t.Fatalf("files.Tty = %d, want 5", files.Tty)
+	}
+	if files.Fds[5] != att.process {
+		t.Fatal("fd 5 does not carry the controlling terminal")
+	}
+}
+
+func TestClaimAttach_terminalIsOneFile(t *testing.T) {
+	c, _, principal := newTestController(t, &mocks.MockBackend{})
+	entry := newPendingOp(c, principal)
+	att, err := entry.claimAttach(principal, []int{0, 1, 2}, command.Ctty)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(att.close)
+	in := entry.byFd[0]
+	out := entry.byFd[1]
+	errOut := entry.byFd[2]
+	if in.process != out.process || out.process != errOut.process {
+		t.Fatal("terminal descriptors do not share a file")
+	}
+	if !command.Terminal(in.process) {
+		t.Fatal("process file is not a terminal")
+	}
+	if files := entry.files(); files.Tty != 0 {
+		t.Fatalf("files.Tty = %d, want 0", files.Tty)
+	}
+}
+
+func TestController_deleteOperation_cancelsStarted(t *testing.T) {
+	c, mux, principal := newTestController(t, &mocks.MockBackend{})
+	op := readyOp(c, principal)
+	handle := &trackingHandle{inst: &secrets.Instance{Id: "i1"}, done: make(chan struct{})}
+	beginOp(t, c, op, handle)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodDelete, "http://test/operations/"+op.id(), nil)
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204\nbody: %s", rec.Code, rec.Body.Bytes())
+	}
+	<-handle.done
+	if !handle.wasCanceled() {
+		t.Fatal("started operation was not cancelled")
+	}
+}
+
+func TestController_getOperation_wait(t *testing.T) {
+	c, mux, principal := newTestController(t, &mocks.MockBackend{})
+	op := readyOp(c, principal)
+	handle := &trackingHandle{inst: &secrets.Instance{Id: "i1", Operation: secrets.Operation{}}, done: make(chan struct{})}
+	beginOp(t, c, op, handle)
+
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "http://test/operations/"+op.id()+"?untilDone=1s", nil)
+		mux.ServeHTTP(rec, req)
+		done <- rec
+	}()
+
+	select {
+	case rec := <-done:
+		t.Fatalf("wait returned before the operation finished: %d %s", rec.Code, rec.Body.Bytes())
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	handle.complete()
+	rec := <-done
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200\nbody: %s", rec.Code, rec.Body.Bytes())
+	}
+}
+
+func TestController_getOperation_untilDoneExpires(t *testing.T) {
+	c, mux, principal := newTestController(t, &mocks.MockBackend{})
+	op := readyOp(c, principal)
+	handle := &trackingHandle{inst: &secrets.Instance{Id: "i1", Operation: secrets.Operation{}}, done: make(chan struct{})}
+	beginOp(t, c, op, handle)
+	defer handle.complete()
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "http://test/operations/"+op.id()+"?untilDone=20ms", nil)
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200\nbody: %s", rec.Code, rec.Body.Bytes())
+	}
+	var status OperationStatusResponse
+	if err := json.NewDecoder(rec.Body).Decode(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status.State != string(operationStarted) {
+		t.Fatalf("state = %s, want started", status.State)
+	}
 }

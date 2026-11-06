@@ -32,7 +32,7 @@ Concise record of settled constraints and open tensions. Supersedes [`plan-proce
   (principal from transport, never request body) may attach. Pending operations
   expire; a stream drop before start deletes the operation.
 - Instances and operations are **root collections** (`/instances`, `/operations`) because ids are globally unique: a nested `secretId` would be ignored by the lookup, or worse, trusted for operation selection without being checked. Creates carry the parent id in the body (`secretId` / `instanceId`); catalog reads filter by query. `POST /operations` derives the secret from the instance for non-create ops. See [`http-api.md`](http-api.md).
-- Server in-memory type: **`pendingOperation`** — the domain `secrets.Operation` plus pipes, attach claims, token, expiry. It is written onto the instance's status snapshot only at start, and retained in the registry for a grace period after completion so the creator can collect the outcome.
+- Server in-memory type: **`operationEntry`** — the domain `secrets.Operation` plus the attaches and `expiresAt`. It is a small state machine (`pending → started → completed|failed`; pending, completed, and failed `→ closed`) with its own lock. The controller's `operationMap` adds it on creation and removes it when it closes. It is written onto the instance's status snapshot only at start. When the operation finishes, the map keeps it for the finished lease so the creator can still collect the outcome; then the timer drops the record.
 
 ## Store `Run` — caller feedback & cancellation
 
@@ -266,7 +266,7 @@ Written before Phase 1 implementation. Wire details: [`http-api.md`](http-api.md
 | Top-level type | **`Backend`**: `Catalog()` + `Runner(secretId string)` |
 | Target | **No `Target` struct.** `Runner` is bound to `secretId`; `Run` takes **`instanceId string`** (empty = create). |
 | Op name | **`secrets.OperationName`** |
-| History | **`Catalog.Operations().List(...)`** only; runner does not list |
+| History | **None.** Current status is the instance snapshot. `Catalog.Operations()` is gone (federation Phase 0.5). |
 | `Run` return | **`(*Instance, Handle, error)`** — accept snapshot + **join/cancel** handle (background already running) |
 
 **Copy-pasteable signatures:**
@@ -282,7 +282,6 @@ type Backend interface {
 type Catalog interface {
     Secrets() Secrets
     Instances() Instances
-    Operations() Operations
 }
 
 type Secrets interface {
@@ -294,10 +293,6 @@ type Instances interface {
     List(ctx context.Context, secretId *string, from, to int) (secrets.Instances, error)
     Get(ctx context.Context, instanceId string) (*secrets.Instance, error)
     GetActive(ctx context.Context, secretId string) (*secrets.Instance, error)
-}
-
-type Operations interface {
-    List(ctx context.Context, secretId, instanceId *string, from, to int) ([]*secrets.Operation, error)
 }
 
 type Runner interface {

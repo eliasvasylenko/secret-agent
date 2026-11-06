@@ -9,16 +9,14 @@ import (
 	"github.com/eliasvasylenko/secret-agent/internal/marshal"
 )
 
-// A provisioned instance of a secret
+// A provisioned instance of a secret. Status is a snapshot: the established
+// state, and the last operation that started.
 type Instance struct {
-	// The ID of the secret instance
-	Id string `json:"id,omitempty"`
-
-	// The plan for managing this secret (includes Version for the instance's plan line)
-	Secret Secret `json:"secret"`
-
-	// The current status of the instance, indicated by the last operation performed
-	Status Status `json:"status"`
+	Id        string    `json:"id,omitempty"`
+	Secret    Secret    `json:"secret"`
+	Revision  int       `json:"revision"`
+	State     State     `json:"state"`
+	Operation Operation `json:"operation"`
 }
 
 type Instances map[string]*Instance
@@ -52,8 +50,11 @@ func (i Instances) MarshalJSON() ([]byte, error) {
 	for _, instance := range i {
 		instances = append(instances, instance)
 	}
-	slices.SortFunc(instances, func(a *Instance, b *Instance) int {
-		return cmp.Compare(b.Status.OperationNumber, a.Status.OperationNumber)
+	slices.SortFunc(instances, func(a, b *Instance) int {
+		if c := b.Operation.CreatedAt.Compare(a.Operation.CreatedAt); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.Id, b.Id)
 	})
 	return marshal.JSON(instances)
 }

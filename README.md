@@ -6,7 +6,7 @@ A small agent that orchestrates and audits the lifecycle of *secrets*. You defin
 
 Many secrets are inherently stateful. We want to say declaratively that “this machine should have credential X, wired into services Y and Z” but for the *current* value and *when* it is rotated live outside the declarative model. Tools like sops-nix and agenix keep sensitive data out of the Nix store by encrypting them and decrypting at activation, but lifecycle stays tied to `nixos-rebuild`.
 
-Instead secret-agent declares only the secret **plans** (i.e. the scripts that do the real work) in your Nix config, while **instance** state (which instances exist, which is active, full history) lives in secret-agent’s SQLite store. So you can:
+Instead secret-agent declares only the secret **plans** (i.e. the scripts that do the real work) in your Nix config, while **instance** state (which instances exist, which is active, and the last operation on each) lives in secret-agent’s SQLite store. So you can:
 
 - **Rotate secrets** without rebuilding or redeploying Nix.
 - **Roll back Nix** without affecting which secret instance is active or re-running provisioning.

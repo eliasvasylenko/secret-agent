@@ -44,14 +44,30 @@ func newTestBackend(t *testing.T, s secrets.Secrets) *Backend {
 	return backend
 }
 
-func discardStdio() command.Stdio {
-	return command.Stdio{Stdout: io.Discard, Stderr: io.Discard}
+func discardFiles() command.Files {
+	return command.Files{Tty: command.NoTty}
 }
 
-func createInstance(t *testing.T, backend *Backend, secretId string, params executor.OperationParameters) *secrets.Instance {
+func stdinFile(t *testing.T, s string) *os.File {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = r.Close() })
+	if _, err := w.WriteString(s); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+func mustCreateInstance(t *testing.T, backend *Backend, secretId string, params executor.OperationParameters) *secrets.Instance {
 	t.Helper()
 	ctx := context.Background()
-	got, err := ops.Create(ctx, backend.Runner(secretId), params, noopProposer{}, discardStdio())
+	got, err := ops.Create(ctx, backend.Runner(secretId), params, noopProposer{}, discardFiles())
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -62,12 +78,12 @@ func runOperation(
 	t *testing.T,
 	repo *Backend,
 	secretId, instanceId string,
-	op func(context.Context, backend.Runner, string, executor.OperationParameters, backend.Proposer, command.Stdio) (*secrets.Instance, error),
+	op func(context.Context, backend.Runner, string, executor.OperationParameters, backend.Proposer, command.Files) (*secrets.Instance, error),
 	params executor.OperationParameters,
 ) *secrets.Instance {
 	t.Helper()
 	ctx := context.Background()
-	got, err := op(ctx, repo.Runner(secretId), instanceId, params, noopProposer{}, discardStdio())
+	got, err := op(ctx, repo.Runner(secretId), instanceId, params, noopProposer{}, discardFiles())
 	if err != nil {
 		t.Fatalf("operation: %v", err)
 	}
@@ -134,7 +150,7 @@ func TestRunner_Create_unknownSecret(t *testing.T) {
 	repo := newTestBackend(t, nil)
 	ctx := context.Background()
 
-	_, err := ops.Create(ctx, repo.Runner("nonexistent"), executor.OperationParameters{Reason: "r", StartedBy: "u"}, noopProposer{}, discardStdio())
+	_, err := ops.Create(ctx, repo.Runner("nonexistent"), executor.OperationParameters{Reason: "r", StartedBy: "u"}, noopProposer{}, discardFiles())
 	if err == nil {
 		t.Fatal("Create = nil, want error")
 	}
@@ -145,7 +161,7 @@ func TestRunner_WaitIdempotent(t *testing.T) {
 	ctx := context.Background()
 	runner := repo.Runner("s1")
 
-	_, handle, err := runner.Run(ctx, secrets.Create, "", executor.OperationParameters{Reason: "r", StartedBy: "u"}, noopProposer{}, discardStdio())
+	_, handle, err := runner.Run(ctx, secrets.Create, "", executor.OperationParameters{Reason: "r", StartedBy: "u"}, noopProposer{}, discardFiles())
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -161,7 +177,7 @@ func TestRunner_WaitIdempotent(t *testing.T) {
 	if first.Id != second.Id {
 		t.Fatalf("wait returned different instances: %q vs %q", first.Id, second.Id)
 	}
-	if first.Status.CompletedAt == nil {
+	if first.Operation.CompletedAt == nil {
 		t.Fatal("expected completedAt after wait")
 	}
 }
@@ -175,15 +191,14 @@ func TestRunner_Handle_CancelStopsExecute(t *testing.T) {
 	ctx := context.Background()
 	runner := repo.Runner("s1")
 
-	stdinR, stdinW := io.Pipe()
+	stdinR, stdinW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { _ = stdinR.Close() })
 	t.Cleanup(func() { _ = stdinW.Close() })
 
-	_, handle, err := runner.Run(ctx, secrets.Create, "", executor.OperationParameters{Reason: "r", StartedBy: "u"}, noopProposer{}, command.Stdio{
-		Stdin:  stdinR,
-		Stdout: io.Discard,
-		Stderr: io.Discard,
-	})
+	_, handle, err := runner.Run(ctx, secrets.Create, "", executor.OperationParameters{Reason: "r", StartedBy: "u"}, noopProposer{}, command.Files{Fds: []*os.File{stdinR}, Tty: command.NoTty})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -198,8 +213,11 @@ func TestRunner_Handle_CancelStopsExecute(t *testing.T) {
 	if err == nil {
 		t.Fatal("Wait after Cancel = nil, want error")
 	}
-	if final == nil || final.Status.FailedAt == nil {
+	if final == nil || final.Operation.FailedAt == nil {
 		t.Fatal("expected failedAt after Cancel")
+	}
+	if final.State.Name != secrets.Proposed {
+		t.Errorf("state = %s, want %s", final.State.Name, secrets.Proposed)
 	}
 }
 
@@ -212,15 +230,14 @@ func TestRunner_WaitAbandonThenRejoin(t *testing.T) {
 	ctx := context.Background()
 	runner := repo.Runner("s1")
 
-	stdinR, stdinW := io.Pipe()
+	stdinR, stdinW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { _ = stdinR.Close() })
 	t.Cleanup(func() { _ = stdinW.Close() })
 
-	_, handle, err := runner.Run(ctx, secrets.Create, "", executor.OperationParameters{Reason: "r", StartedBy: "u"}, noopProposer{}, command.Stdio{
-		Stdin:  stdinR,
-		Stdout: io.Discard,
-		Stderr: io.Discard,
-	})
+	_, handle, err := runner.Run(ctx, secrets.Create, "", executor.OperationParameters{Reason: "r", StartedBy: "u"}, noopProposer{}, command.Files{Fds: []*os.File{stdinR}, Tty: command.NoTty})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -236,7 +253,7 @@ func TestRunner_WaitAbandonThenRejoin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rejoin Wait: %v", err)
 	}
-	if final.Status.CompletedAt == nil {
+	if final.Operation.CompletedAt == nil {
 		t.Fatal("expected completedAt after rejoin wait")
 	}
 }
@@ -251,11 +268,7 @@ func TestRunner_Create_stdinReachesSubprocess(t *testing.T) {
 	repo := newTestBackend(t, secrets.Secrets{"s1": s})
 	ctx := context.Background()
 
-	_, err := ops.Create(ctx, repo.Runner("s1"), executor.OperationParameters{Reason: "r", StartedBy: "user"}, noopProposer{}, command.Stdio{
-		Stdin:  strings.NewReader("stdin-payload"),
-		Stdout: io.Discard,
-		Stderr: io.Discard,
-	})
+	_, err := ops.Create(ctx, repo.Runner("s1"), executor.OperationParameters{Reason: "r", StartedBy: "user"}, noopProposer{}, command.Files{Fds: []*os.File{stdinFile(t, "stdin-payload")}, Tty: command.NoTty})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -275,7 +288,7 @@ func TestInstances_Create_List_Get(t *testing.T) {
 	secretId := "s1"
 	instances := repo.Catalog().Instances()
 
-	created := createInstance(t, repo, secretId, executor.OperationParameters{Reason: "create", StartedBy: "user"})
+	created := mustCreateInstance(t, repo, secretId, executor.OperationParameters{Reason: "create", StartedBy: "user"})
 	if created.Id == "" {
 		t.Error("Create returned instance with empty Id")
 	}
@@ -371,7 +384,7 @@ func TestInstances_GetActive(t *testing.T) {
 		t.Errorf("GetActive = %v, want nil", active)
 	}
 
-	created := createInstance(t, repo, secretId, executor.OperationParameters{Reason: "create", StartedBy: "user"})
+	created := mustCreateInstance(t, repo, secretId, executor.OperationParameters{Reason: "create", StartedBy: "user"})
 	runOperation(t, repo, secretId, created.Id, ops.Activate, executor.OperationParameters{Reason: "activate", StartedBy: "user"})
 
 	active, err = instances.GetActive(ctx, secretId)
@@ -383,22 +396,33 @@ func TestInstances_GetActive(t *testing.T) {
 	}
 }
 
-func TestOperations_List(t *testing.T) {
+func TestRunner_Snapshot(t *testing.T) {
 	repo := newTestBackend(t, nil)
 	ctx := context.Background()
-	secretId := "s1"
 
-	created := createInstance(t, repo, secretId, executor.OperationParameters{Reason: "create", StartedBy: "user"})
+	created := mustCreateInstance(t, repo, "s1", executor.OperationParameters{Reason: "create", StartedBy: "user"})
+	if created.Operation.Id != "" {
+		t.Errorf("Operation.Id = %q, want empty", created.Operation.Id)
+	}
+	if created.State.Name != secrets.Created || created.Operation.Name != secrets.Create {
+		t.Errorf("state %s operation %s, want create", created.State.Name, created.Operation.Name)
+	}
+	if created.Operation.CreatedBy != "user" || created.Operation.StartedBy != "user" {
+		t.Errorf("createdBy %q startedBy %q", created.Operation.CreatedBy, created.Operation.StartedBy)
+	}
+	if created.Revision != 2 {
+		t.Errorf("Revision = %d, want 2 (start then complete)", created.Revision)
+	}
+	if created.State.EnteredAt.IsZero() || created.Operation.CompletedAt == nil || !created.State.EnteredAt.Equal(*created.Operation.CompletedAt) {
+		t.Errorf("state at %v completed %v", created.State.EnteredAt, created.Operation.CompletedAt)
+	}
 
-	opsList, err := repo.Catalog().Operations().List(ctx, &secretId, &created.Id, 0, 10)
+	got, err := repo.Catalog().Instances().Get(ctx, created.Id)
 	if err != nil {
-		t.Fatalf("Operations.List: %v", err)
+		t.Fatalf("Get: %v", err)
 	}
-	if len(opsList) != 1 {
-		t.Fatalf("Operations.List len = %d, want 1", len(opsList))
-	}
-	if opsList[0].Name != secrets.Create {
-		t.Errorf("Operations.List[0].Name = %s", opsList[0].Name)
+	if got.Revision != created.Revision || got.State.Name != secrets.Created {
+		t.Errorf("reloaded = %+v", got)
 	}
 }
 
@@ -408,9 +432,9 @@ func TestRunner_Activate_Deactivate(t *testing.T) {
 	secretId := "s1"
 	instances := repo.Catalog().Instances()
 
-	created := createInstance(t, repo, secretId, executor.OperationParameters{Reason: "create", StartedBy: "user"})
-	if created.Status.Name != secrets.Create {
-		t.Errorf("Create returned instance with status %s, want %s", created.Status.Name, secrets.Create)
+	created := mustCreateInstance(t, repo, secretId, executor.OperationParameters{Reason: "create", StartedBy: "user"})
+	if created.State.Name != secrets.Created {
+		t.Errorf("Create returned instance in state %s, want %s", created.State.Name, secrets.Created)
 	}
 
 	activated := runOperation(t, repo, secretId, created.Id, ops.Activate, executor.OperationParameters{Reason: "activate", StartedBy: "user"})
@@ -418,8 +442,8 @@ func TestRunner_Activate_Deactivate(t *testing.T) {
 	if active == nil || active.Id != created.Id {
 		t.Errorf("after Activate, GetActive = %v", active)
 	}
-	if activated.Status.Name != secrets.Activate {
-		t.Errorf("Activate returned instance with status %s, want %s", activated.Status.Name, secrets.Activate)
+	if activated.State.Name != secrets.Activated {
+		t.Errorf("Activate returned instance in state %s, want %s", activated.State.Name, secrets.Activated)
 	}
 
 	deactivated := runOperation(t, repo, secretId, created.Id, ops.Deactivate, executor.OperationParameters{Reason: "deactivate", StartedBy: "user"})
@@ -427,34 +451,38 @@ func TestRunner_Activate_Deactivate(t *testing.T) {
 	if active != nil {
 		t.Errorf("after Deactivate, GetActive = %v, want nil", active)
 	}
-	if deactivated.Status.Name != secrets.Deactivate {
-		t.Errorf("Deactivate returned instance with status %s, want %s", deactivated.Status.Name, secrets.Deactivate)
+	if deactivated.State.Name != secrets.Deactivated {
+		t.Errorf("Deactivate returned instance in state %s, want %s", deactivated.State.Name, secrets.Deactivated)
 	}
 }
 
-func TestRunner_ExpectedOperationNumber(t *testing.T) {
+func TestRunner_ExpectedRevision(t *testing.T) {
 	repo := newTestBackend(t, nil)
 	ctx := context.Background()
 	secretId := "s1"
 
-	created := createInstance(t, repo, secretId, executor.OperationParameters{Reason: "create", StartedBy: "user"})
-	runOperation(t, repo, secretId, created.Id, ops.Activate, executor.OperationParameters{Reason: "activate", StartedBy: "user"})
+	created := mustCreateInstance(t, repo, secretId, executor.OperationParameters{Reason: "create", StartedBy: "user"})
+	activated := runOperation(t, repo, secretId, created.Id, ops.Activate, executor.OperationParameters{Reason: "activate", StartedBy: "user"})
 
-	expected := 2
-	runOperation(t, repo, secretId, created.Id, ops.Deactivate, executor.OperationParameters{Reason: "deact", StartedBy: "user", ExpectedOperationNumber: &expected})
+	runOperation(t, repo, secretId, created.Id, ops.Deactivate, executor.OperationParameters{Reason: "deact", StartedBy: "user", ExpectedRevision: &activated.Revision})
 
 	wrongExpected := 1
-	_, err := ops.Activate(ctx, repo.Runner(secretId), created.Id, executor.OperationParameters{Reason: "act", StartedBy: "user", ExpectedOperationNumber: &wrongExpected}, noopProposer{}, discardStdio())
+	_, err := ops.Activate(ctx, repo.Runner(secretId), created.Id, executor.OperationParameters{Reason: "act", StartedBy: "user", ExpectedRevision: &wrongExpected}, noopProposer{}, discardFiles())
 	if err == nil {
-		t.Fatal("Activate with mismatched ExpectedOperationNumber want error")
+		t.Fatal("Activate with mismatched ExpectedRevision want error")
 	}
-	if err.Error() != "cannot activate when previous operation 3 does not match expected 1" {
+	deactivated, getErr := repo.Catalog().Instances().Get(ctx, created.Id)
+	if getErr != nil {
+		t.Fatal(getErr)
+	}
+	wantErr := fmt.Sprintf("cannot activate when revision %d does not match expected 1", deactivated.Revision)
+	if err.Error() != wantErr {
 		t.Errorf("unexpected error: %v", err)
 	}
 
-	_, handle, err := repo.Runner(secretId).Run(ctx, secrets.Activate, created.Id, executor.OperationParameters{Reason: "act", StartedBy: "user", ExpectedOperationNumber: &wrongExpected, Forced: true}, noopProposer{}, discardStdio())
+	_, handle, err := repo.Runner(secretId).Run(ctx, secrets.Activate, created.Id, executor.OperationParameters{Reason: "act", StartedBy: "user", ExpectedRevision: &wrongExpected, Forced: true}, noopProposer{}, discardFiles())
 	if err != nil {
-		t.Fatalf("Activate with Forced should ignore ExpectedOperationNumber mismatch: %v", err)
+		t.Fatalf("Activate with Forced should ignore ExpectedRevision mismatch: %v", err)
 	}
 	completed, err := handle.Wait(ctx)
 	if err != nil {
@@ -465,15 +493,58 @@ func TestRunner_ExpectedOperationNumber(t *testing.T) {
 	}
 }
 
+func TestRunner_FailureLeavesState(t *testing.T) {
+	s := &secrets.Secret{
+		Id:       "s1",
+		Activate: command.New(`exit 1`, command.NewEnvironment(), ""),
+	}
+	repo := newTestBackend(t, secrets.Secrets{"s1": s})
+	ctx := context.Background()
+
+	created := mustCreateInstance(t, repo, "s1", executor.OperationParameters{Reason: "create", StartedBy: "user"})
+	_, err := ops.Activate(ctx, repo.Runner("s1"), created.Id, executor.OperationParameters{Reason: "act", StartedBy: "user"}, noopProposer{}, discardFiles())
+	if err == nil {
+		t.Fatal("Activate = nil, want script error")
+	}
+
+	got, getErr := repo.Catalog().Instances().Get(ctx, created.Id)
+	if getErr != nil {
+		t.Fatal(getErr)
+	}
+	if got.State.Name != secrets.Created {
+		t.Errorf("state = %s, want %s", got.State.Name, secrets.Created)
+	}
+	if got.Operation.Name != secrets.Activate || got.Operation.FailedAt == nil {
+		t.Errorf("operation = %+v, want failed activate", got.Operation)
+	}
+	if got.Revision != created.Revision+2 {
+		t.Errorf("Revision = %d, want %d", got.Revision, created.Revision+2)
+	}
+	active, _ := repo.Catalog().Instances().GetActive(ctx, "s1")
+	if active != nil {
+		t.Errorf("GetActive = %v, want nil after failed activate", active)
+	}
+
+	_, err = ops.Deactivate(ctx, repo.Runner("s1"), created.Id, executor.OperationParameters{Reason: "deact", StartedBy: "user"}, noopProposer{}, discardFiles())
+	if err == nil || !strings.Contains(err.Error(), "cannot deactivate") {
+		t.Fatalf("Deactivate = %v, want refusal", err)
+	}
+
+	_, err = ops.Activate(ctx, repo.Runner("s1"), created.Id, executor.OperationParameters{Reason: "retry", StartedBy: "user"}, noopProposer{}, discardFiles())
+	if err == nil || strings.Contains(err.Error(), "cannot activate") {
+		t.Fatalf("retry Activate = %v, want the script error", err)
+	}
+}
+
 func TestRunner_Create_validateReason(t *testing.T) {
 	repo := newTestBackend(t, nil)
 	ctx := context.Background()
 	secretId := "s1"
 
-	createInstance(t, repo, secretId, executor.OperationParameters{Reason: "ok", StartedBy: "user"})
+	mustCreateInstance(t, repo, secretId, executor.OperationParameters{Reason: "ok", StartedBy: "user"})
 
 	longReason := string(make([]byte, 257))
-	_, err := ops.Create(ctx, repo.Runner(secretId), executor.OperationParameters{Reason: longReason, StartedBy: "user"}, noopProposer{}, discardStdio())
+	_, err := ops.Create(ctx, repo.Runner(secretId), executor.OperationParameters{Reason: longReason, StartedBy: "user"}, noopProposer{}, discardFiles())
 	if err == nil {
 		t.Fatal("Create with too-long reason = nil, want error")
 	}
@@ -504,7 +575,7 @@ func TestRunner_planPinnedAfterVersionBump(t *testing.T) {
 	repo := newTestBackend(t, secrets.Secrets{"s1": v1})
 	secretId := "s1"
 
-	created := createInstance(t, repo, secretId, executor.OperationParameters{Reason: "create", StartedBy: "user"})
+	created := mustCreateInstance(t, repo, secretId, executor.OperationParameters{Reason: "create", StartedBy: "user"})
 	runOperation(t, repo, secretId, created.Id, ops.Activate, executor.OperationParameters{Reason: "activate", StartedBy: "user"})
 
 	repo.repo.secrets["s1"] = v2
