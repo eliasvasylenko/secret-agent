@@ -57,6 +57,21 @@ func TestMarshalJSON(t *testing.T) {
 	}
 }
 
+func TestMarshalJSON_shellWithoutEnvironment(t *testing.T) {
+	in := Command{Script: "id", Shell: "bash"}
+	data, err := json.Marshal(&in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out Command
+	if err := json.Unmarshal(data, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !cmp.Equal(out, in) {
+		t.Errorf("round-trip mismatch:\n%s", cmp.Diff(in, out))
+	}
+}
+
 func TestUnmarshalJSON(t *testing.T) {
 	tests := []struct {
 		name     string

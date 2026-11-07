@@ -53,7 +53,9 @@ func (c *Command) UnmarshalJSON(p []byte) error {
 }
 
 func (c *Command) MarshalJSON() ([]byte, error) {
-	if len(c.Environment) == 0 {
+	// A bare script stays a JSON string. Shell or command options must use the
+	// object form, or they are dropped when the plan is stored.
+	if len(c.Environment) == 0 && c.Shell == "" && c.CommandOptions.zero() {
 		return marshal.JSON(c.Script)
 	}
 	type command Command
