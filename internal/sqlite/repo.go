@@ -156,7 +156,8 @@ func (r *Repository) listInstances(ctx context.Context, secretId *string, from, 
 		query += " WHERE i.secretId = ?"
 		args = append(args, *secretId)
 	}
-	query += " LIMIT ? OFFSET ?"
+	// Page in the same order MarshalJSON emits: highest operation number first.
+	query += " ORDER BY o.id DESC LIMIT ? OFFSET ?"
 	args = append(args, to-from, from)
 
 	rows, err := r.db.QueryContext(ctx, query, args...)

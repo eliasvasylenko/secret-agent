@@ -410,6 +410,9 @@ func TestController_listInstances(t *testing.T) {
 		if secretId == nil || *secretId != "sid" {
 			t.Errorf("List secretId = %v", secretId)
 		}
+		if from != 0 || to != 10 {
+			t.Errorf("List from=%d to=%d, want 0 10", from, to)
+		}
 		return secrets.Instances{}, nil
 	})
 
@@ -437,6 +440,9 @@ func TestController_listInstances_allSecrets(t *testing.T) {
 		if secretId != nil {
 			t.Errorf("List secretId = %v, want nil", *secretId)
 		}
+		if from != 0 || to != 10 {
+			t.Errorf("List from=%d to=%d, want 0 10", from, to)
+		}
 		return secrets.Instances{}, nil
 	})
 
@@ -444,6 +450,33 @@ func TestController_listInstances_allSecrets(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "http://test/instances", nil)
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200", rec.Code)
+	}
+}
+
+func TestController_listInstances_explicitRange(t *testing.T) {
+	mockBackend := &mocks.MockBackend{}
+	defer mockBackend.Mock.Validate(t)
+	mockCatalog := &mocks.MockCatalog{}
+	defer mockCatalog.Mock.Validate(t)
+	mockInstances := &mocks.MockInstances{}
+	defer mockInstances.Mock.Validate(t)
+	expectCatalog(mockBackend, mockCatalog)
+	mocks.Expect(&mockCatalog.Mock, mockCatalog.Instances, func() backend.Instances { return mockInstances })
+	mocks.Expect(&mockInstances.Mock, mockInstances.List, func(ctx context.Context, secretId *string, from int, to int) (secrets.Instances, error) {
+		if from != 2 || to != 5 {
+			t.Errorf("List from=%d to=%d, want 2 5", from, to)
+		}
+		return secrets.Instances{}, nil
+	})
+
+	_, mux, _ := newTestController(t, mockBackend)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "http://test/instances?from=2&to=5", nil)
 	mux.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {

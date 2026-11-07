@@ -299,11 +299,11 @@ func (s *Controller) startAttachedRun(
 }
 
 func parseRange(r *http.Request) (int64, int64, error) {
-	from, err := parseQueryInt(r, "from", 32)
+	from, err := parseQueryInt(r, "from", 0)
 	if err != nil {
 		return from, 0, err
 	}
-	to, err := parseQueryInt(r, "to", 32)
+	to, err := parseQueryInt(r, "to", 10)
 	return from, to, err
 }
 
