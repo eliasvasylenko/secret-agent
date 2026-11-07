@@ -24,8 +24,11 @@ func ControllingTerminal(f *os.File) bool {
 	return err == nil && sid == self
 }
 
-// LocalMode is r, w, or tty. O_RDWR is not a stream, so that is an error.
-// ctty comes from Files.Tty, not from here.
+// LocalMode is r, w, or tty. ctty comes from Files.Tty, not from here.
+// A regular file opened read-write is refused: its writes share an offset
+// with its reads, and a pipe would drop them. A fifo opened read-write is
+// read. The shell uses that so the open does not block, and so a read waits
+// for a writer instead of seeing EOF.
 func LocalMode(f *os.File) (FileMode, error) {
 	if Terminal(f) {
 		return Tty, nil
@@ -39,7 +42,13 @@ func LocalMode(f *os.File) (FileMode, error) {
 		return Write, nil
 	case unix.O_RDONLY:
 		return Read, nil
-	default:
-		return "", fmt.Errorf("file is not a stream")
 	}
+	info, err := f.Stat()
+	if err != nil {
+		return "", err
+	}
+	if info.Mode()&os.ModeNamedPipe != 0 {
+		return Read, nil
+	}
+	return "", fmt.Errorf("read-write file cannot be attached")
 }

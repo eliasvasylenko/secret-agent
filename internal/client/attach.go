@@ -71,7 +71,7 @@ var openAttach = func(c *SecretClient, ctx context.Context, operationId string, 
 }
 
 // fileGroups groups a dup into one attach and leaves a second open as its
-// own. Nil slots are skipped. A file that is not a stream is an error.
+// own. Nil slots are skipped. A read-write regular file is an error.
 // Files.Tty turns a tty group into ctty.
 func fileGroups(files command.Files) ([]fileGroup, error) {
 	var entries []fdFile

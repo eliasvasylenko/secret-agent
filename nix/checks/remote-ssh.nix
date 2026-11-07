@@ -130,7 +130,7 @@ pkgs.testers.runNixOSTest {
       )
       shared = instance_json(output)
       assert "remote-hello" in output, f"stdout missing from: {output}"
-      assert shared["status"]["startedBy"] == "alice@ssh", f"startedBy: {shared}"
+      assert shared["operation"]["startedBy"] == "alice@ssh", f"startedBy: {shared}"
 
     with subtest("agent fragment is a second sshd source"):
       server.succeed("${installBobFragment}")
@@ -138,11 +138,11 @@ pkgs.testers.runNixOSTest {
         "secret-agent -a ssh://secret-agent@server-bob create remote </dev/null"
       )
       bob = instance_json(output)
-      assert bob["status"]["startedBy"] == "bob@ssh", f"startedBy: {bob}"
+      assert bob["operation"]["startedBy"] == "bob@ssh", f"startedBy: {bob}"
 
     with subtest("local unix is still peercred"):
       output = server.succeed("secret-agent create remote </dev/null")
       local = instance_json(output)
-      assert local["status"]["startedBy"] == "root/0@system", f"startedBy: {local}"
+      assert local["operation"]["startedBy"] == "root/0@system", f"startedBy: {local}"
   '';
 }

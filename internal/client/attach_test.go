@@ -286,8 +286,8 @@ func TestFileGroups_readWriteFileIsNotAStream(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = f.Close() })
 	_, err = fileGroups(command.Files{Fds: []*os.File{f}, Tty: command.NoTty})
-	if err == nil {
-		t.Fatal("expected error for O_RDWR file")
+	if err == nil || !strings.Contains(err.Error(), "read-write file cannot be attached") {
+		t.Fatalf("fileGroups error = %v", err)
 	}
 }
 
