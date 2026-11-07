@@ -480,7 +480,8 @@ in
       serviceConfig = {
         Type = "simple";
         Restart = "no";
-        ExecStart = "${cfg.package}/bin/secret-agent serve -S ${secretsFile} -P ${permissionsFile} -D ./dbfile";
+        StateDirectory = "secret-agent";
+        ExecStart = "${cfg.package}/bin/secret-agent serve -S ${secretsFile} -P ${permissionsFile} -D /var/lib/secret-agent/dbfile";
         NonBlocking = true;
       };
       requires = [ "secret-agent.socket" ];
