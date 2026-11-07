@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"reflect"
 	"strings"
 )
 
@@ -171,25 +170,17 @@ func (a AnyBinding[T]) UnmarshalJSON(data []byte) error {
 	return a.binding.UnmarshalJSON(data)
 }
 
-func RegisterAuthenticatorPrototype[T Credential](name string, authenticatorPrototype *Authenticator[T]) {
-	t := reflect.TypeOf(*authenticatorPrototype)
-	if t.Kind() == reflect.Pointer {
-		t = t.Elem()
-	}
-	if t.Kind() != reflect.Struct {
-		panic(fmt.Sprintf("authenticator prototype for %s must be a struct", name))
-	}
-
-	authenticatorRegistry[name] = func() Authenticator[Credential] {
-		fresh := reflect.New(t).Interface().(Authenticator[T])
-		return AnyAuthenticator[T]{authenticator: fresh}
+// Register adds a kind. new returns a blank authenticator; unmarshal fills it.
+func Register[T Credential](kind string, new func() Authenticator[T]) {
+	authenticatorRegistry[kind] = func() Authenticator[Credential] {
+		return AnyAuthenticator[T]{authenticator: new()}
 	}
 }
 
-func getAuthenticatorPrototype(kind string) (Authenticator[Credential], error) {
+func newAuthenticator(kind string) (Authenticator[Credential], error) {
 	factory, ok := authenticatorRegistry[kind]
 	if !ok {
-		return nil, fmt.Errorf("authenticator prototype not found for %s", kind)
+		return nil, fmt.Errorf("authenticator kind not found for %s", kind)
 	}
 	return factory(), nil
 }
@@ -207,17 +198,17 @@ func unmarshalAuthenticator(data []byte, available Authenticators) (string, Auth
 		return "", nil, err
 	}
 
-	prototype, err := getAuthenticatorPrototype(envelope.Kind)
+	authenticator, err := newAuthenticator(envelope.Kind)
 	if err != nil {
 		return "", nil, err
 	}
 
-	err = prototype.unmarshal(data, available)
+	err = authenticator.unmarshal(data, available)
 	if err != nil {
 		return "", nil, err
 	}
 
-	return envelope.Name, prototype, nil
+	return envelope.Name, authenticator, nil
 }
 
 func unmarshalBinding(data []byte, authenticators *Authenticators) (Binding[Credential], error) {

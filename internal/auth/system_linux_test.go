@@ -483,7 +483,7 @@ func TestPolicy_load(t *testing.T) {
 
 	t.Run("unknown authenticator kind", func(t *testing.T) {
 		mustReject(t, `{"authenticators":[{"name":"a","kind":"nope"}],"roles":[]}`,
-			"authenticator prototype not found for nope")
+			"authenticator kind not found for nope")
 	})
 
 	t.Run("unknown authenticator name", func(t *testing.T) {

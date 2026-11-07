@@ -18,8 +18,7 @@ var systemAuthenticator Authenticator[Credential] = AnyAuthenticator[linuxCreden
 const linuxKind = "linux"
 
 func init() {
-	var prototype Authenticator[linuxCredential] = linuxAuthenticator{}
-	RegisterAuthenticatorPrototype(linuxKind, &prototype)
+	Register(linuxKind, func() Authenticator[linuxCredential] { return linuxAuthenticator{} })
 }
 
 // linuxCredential is the socket credential.

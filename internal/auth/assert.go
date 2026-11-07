@@ -12,8 +12,7 @@ import (
 const assertKind = "assert"
 
 func init() {
-	var prototype Authenticator[assertCredential] = &assertAuthenticator{}
-	RegisterAuthenticatorPrototype(assertKind, &prototype)
+	Register(assertKind, func() Authenticator[assertCredential] { return &assertAuthenticator{} })
 }
 
 // assertCredential is the name written by a peer that matched the asserter binding.
@@ -36,7 +35,7 @@ func (a assertAuthenticator) Authenticate(request *http.Request, connection net.
 	if a.asserter == nil {
 		return assertCredential{}, fmt.Errorf("assert authenticator asserter is required")
 	}
-	system, err := getAuthenticatorPrototype(linuxKind)
+	system, err := newAuthenticator(linuxKind)
 	if err != nil {
 		return assertCredential{}, err
 	}
