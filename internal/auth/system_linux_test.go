@@ -362,6 +362,71 @@ func TestIdentify_assert(t *testing.T) {
 	})
 }
 
+func TestAuthenticatorReferenceFollowsMatchOrder(t *testing.T) {
+	// Authenticate tries the file from the top and stops at the first claim.
+	// Unmarshal walks that list from the bottom, so an asserter can name an
+	// authenticator that is still ahead of it. Naming an earlier one is
+	// rejected: that authenticator would already have been offered the
+	// connection, and this one would not run when the reference mattered.
+
+	self, err := user.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("names an authenticator later in the file", func(t *testing.T) {
+		policy := loadPolicy(t, fmt.Sprintf(`{
+			"authenticators": [
+				{"name":"proxy","kind":"assert","asserter":{"auth":"gate","name":"caddy"}},
+				{"name":"gate","kind":"assert","asserter":{"user":%q}}
+			],
+			"roles": [{"name":"gated","bindings":[{"auth":"gate","name":"alice"}]}]
+		}`, self.Username))
+		// proxy is tried first. Its asserter is gate's name binding, which
+		// does not match the socket credential, so proxy declines. gate is
+		// later in the file, matches this peer, and claims.
+		req := &http.Request{Header: http.Header{DefaultAssertHeader: []string{"alice"}}}
+		got, err := policy.Identify(req, unixPeer(t))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Principal.GetName() != "alice@gate" {
+			t.Errorf("principal: got %q, want alice@gate", got.Principal.GetName())
+		}
+		if !sameRoleNames(got.Roles, []RoleName{"gated"}) {
+			t.Errorf("roles: got %v, want [gated]", got.Roles)
+		}
+	})
+
+	t.Run("claims before the authenticator it named", func(t *testing.T) {
+		policy := loadPolicy(t, fmt.Sprintf(`{
+			"authenticators": [
+				{"name":"proxy","kind":"assert","asserter":{"auth":"system","user":%q}},
+				{"name":"gate","kind":"assert","header":"X-Gate","asserter":{"user":%q}}
+			],
+			"roles": [{"name":"gated","bindings":[{"auth":"gate","name":"alice"}]}]
+		}`, self.Username, self.Username))
+		// system is always last. proxy names it and matches this peer, so
+		// the search stops there. gate is never asked, even though its
+		// header is present.
+		req := &http.Request{Header: http.Header{"X-Gate": []string{"alice"}}}
+		_, err := policy.Identify(req, unixPeer(t))
+		if fmt.Sprint(err) != fmt.Sprintf("assert header %q required", DefaultAssertHeader) {
+			t.Fatalf("Identify = %v", err)
+		}
+	})
+
+	t.Run("may not name an authenticator earlier in the file", func(t *testing.T) {
+		mustReject(t, `{
+			"authenticators": [
+				{"name":"gate","kind":"assert","asserter":{"user":"caddy"}},
+				{"name":"proxy","kind":"assert","asserter":{"auth":"gate","name":"caddy"}}
+			],
+			"roles": []
+		}`, "authenticator not found for gate")
+	})
+}
+
 func TestPolicy_load(t *testing.T) {
 	t.Run("system bindings", func(t *testing.T) {
 		policy := loadPolicy(t, `{
