@@ -320,20 +320,23 @@ func TestInstances_Create_List_Get(t *testing.T) {
 	}
 }
 
-func TestInstances_ListOrdersByOperationNumber(t *testing.T) {
+func TestInstances_ListOrdersByCreatedAtThenId(t *testing.T) {
 	repo := newTestBackend(t, nil)
 	ctx := context.Background()
 	secretId := "s1"
 	instances := repo.Catalog().Instances()
 
 	created := []*secrets.Instance{
-		createInstance(t, repo, secretId, executor.OperationParameters{Reason: "a", StartedBy: "user"}),
-		createInstance(t, repo, secretId, executor.OperationParameters{Reason: "b", StartedBy: "user"}),
-		createInstance(t, repo, secretId, executor.OperationParameters{Reason: "c", StartedBy: "user"}),
+		mustCreateInstance(t, repo, secretId, executor.OperationParameters{Reason: "a", StartedBy: "user"}),
+		mustCreateInstance(t, repo, secretId, executor.OperationParameters{Reason: "b", StartedBy: "user"}),
+		mustCreateInstance(t, repo, secretId, executor.OperationParameters{Reason: "c", StartedBy: "user"}),
 	}
-	slices.SortFunc(created, func(a, b *secrets.Instance) int {
-		return b.Status.OperationNumber - a.Status.OperationNumber
-	})
+	base := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	for i, instance := range created {
+		if _, err := repo.repo.db.Exec(`UPDATE instance SET opCreatedAt = ? WHERE id = ?`, base.Add(time.Duration(i)*time.Minute), instance.Id); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	page := func(from, to int) string {
 		t.Helper()
@@ -349,14 +352,29 @@ func TestInstances_ListOrdersByOperationNumber(t *testing.T) {
 		}
 		return ""
 	}
-	if got := page(0, 1); got != created[0].Id {
-		t.Errorf("first page = %s, want highest operation number %s", got, created[0].Id)
+	// created[2] is the newest.
+	if got := page(0, 1); got != created[2].Id {
+		t.Errorf("first page = %s, want newest %s", got, created[2].Id)
 	}
 	if got := page(1, 2); got != created[1].Id {
 		t.Errorf("second page = %s, want %s", got, created[1].Id)
 	}
-	if got := page(2, 3); got != created[2].Id {
-		t.Errorf("third page = %s, want lowest operation number %s", got, created[2].Id)
+	if got := page(2, 3); got != created[0].Id {
+		t.Errorf("third page = %s, want oldest %s", got, created[0].Id)
+	}
+
+	for _, instance := range created {
+		if _, err := repo.repo.db.Exec(`UPDATE instance SET opCreatedAt = ? WHERE id = ?`, base, instance.Id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ids := []string{created[0].Id, created[1].Id, created[2].Id}
+	slices.Sort(ids)
+	if got := page(0, 1); got != ids[0] {
+		t.Errorf("tie page = %s, want smaller id %s", got, ids[0])
+	}
+	if got := page(1, 2); got != ids[1] {
+		t.Errorf("tie page = %s, want %s", got, ids[1])
 	}
 }
 
