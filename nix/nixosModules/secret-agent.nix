@@ -175,8 +175,9 @@ let
     };
     authenticators = lib.mkOption {
       description = ''
-        How a connection is named, in first-match order. system is always
-        present and last, and is the socket credential.
+        How a connection is named. An assert authenticator takes the header
+        name when the socket user or group matches. system is the socket
+        credential and is used when no authenticator claims the request.
       '';
       type = lib.types.listOf authenticatorType;
       default = [ ];

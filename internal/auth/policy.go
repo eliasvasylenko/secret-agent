@@ -27,11 +27,11 @@ func (p *Policy) UnmarshalJSON(data []byte) error {
 	}
 
 	authenticators := NewAuthenticators()
-	err = authenticators.Add(systemAuthenticatorName, systemAuthenticator)
+	err = authenticators.unmarshal(envelope.Authenticators)
 	if err != nil {
 		return err
 	}
-	err = authenticators.unmarshal(envelope.Authenticators, authenticators)
+	err = authenticators.Add(systemAuthenticatorName, systemAuthenticator)
 	if err != nil {
 		return err
 	}
@@ -40,7 +40,7 @@ func (p *Policy) UnmarshalJSON(data []byte) error {
 	for _, raw := range envelope.Roles {
 		bindings := make(Bindings, 0, len(raw.Bindings))
 		for _, item := range raw.Bindings {
-			binding, err := unmarshalBinding(item, authenticators)
+			binding, err := resolveReference(item, authenticators)
 			if err != nil {
 				return err
 			}

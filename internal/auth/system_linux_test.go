@@ -99,7 +99,10 @@ func TestLinuxBinding(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			roles, err := tc.roles.BoundRoles(Principal{credential: linuxCredential{user: alice, groups: tc.groups}})
+			roles, err := tc.roles.BoundRoles(Principal{
+				authenticator: systemAuthenticatorName,
+				credential:    linuxCredential{user: alice, groups: tc.groups},
+			})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -206,14 +209,20 @@ func TestIdentify_assert(t *testing.T) {
 		}
 	})
 
-	t.Run("asserter requires its header", func(t *testing.T) {
+	t.Run("absent header leaves the socket principal", func(t *testing.T) {
 		policy := loadPolicy(t, fmt.Sprintf(`{
 			"authenticators": [{"name":"caddy","kind":"assert","asserter":{"user":%q}}],
 			"roles": [{"name":"reader","bindings":[{"auth":"caddy","name":"john"}]}]
 		}`, self.Username))
-		_, err := policy.Identify(&http.Request{}, unixPeer(t))
-		if fmt.Sprint(err) != fmt.Sprintf("assert header %q required", DefaultAssertHeader) {
-			t.Fatalf("Identify = %v", err)
+		got, err := policy.Identify(&http.Request{}, unixPeer(t))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Principal.GetName() != socketName {
+			t.Errorf("principal: got %q, want %q", got.Principal.GetName(), socketName)
+		}
+		if len(got.Roles) != 0 {
+			t.Errorf("roles: got %v, want none", got.Roles)
 		}
 	})
 
@@ -289,7 +298,7 @@ func TestIdentify_assert(t *testing.T) {
 		}
 	})
 
-	t.Run("first matching asserter requires its header", func(t *testing.T) {
+	t.Run("absent header lets a later asserter claim", func(t *testing.T) {
 		policy := loadPolicy(t, fmt.Sprintf(`{
 			"authenticators": [
 				{"name":"first","kind":"assert","header":"X-First","asserter":{"user":%q}},
@@ -298,9 +307,15 @@ func TestIdentify_assert(t *testing.T) {
 			"roles": [{"name":"reader","bindings":[{"auth":"second","name":"john"}]}]
 		}`, self.Username, self.Username))
 		req := &http.Request{Header: http.Header{DefaultAssertHeader: []string{"john"}}}
-		_, err := policy.Identify(req, unixPeer(t))
-		if fmt.Sprint(err) != `assert header "X-First" required` {
-			t.Fatalf("Identify = %v", err)
+		got, err := policy.Identify(req, unixPeer(t))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Principal.GetName() != "john@second" {
+			t.Errorf("principal: got %q", got.Principal.GetName())
+		}
+		if !sameRoleNames(got.Roles, []RoleName{"reader"}) {
+			t.Errorf("roles: got %v, want [reader]", got.Roles)
 		}
 	})
 
@@ -332,7 +347,7 @@ func TestIdentify_assert(t *testing.T) {
 		}`, self.Username))
 		req := &http.Request{Header: http.Header{DefaultAssertHeader: []string{"alice", "bob"}}}
 		_, err := policy.Identify(req, unixPeer(t))
-		if fmt.Sprint(err) != fmt.Sprintf("assert header %q required", DefaultAssertHeader) {
+		if fmt.Sprint(err) != fmt.Sprintf("assert header %q invalid", DefaultAssertHeader) {
 			t.Fatalf("Identify = %v", err)
 		}
 	})
@@ -344,7 +359,7 @@ func TestIdentify_assert(t *testing.T) {
 		}`, self.Username))
 		req := &http.Request{Header: http.Header{DefaultAssertHeader: []string{"  "}}}
 		_, err := policy.Identify(req, unixPeer(t))
-		if fmt.Sprint(err) != fmt.Sprintf("assert header %q required", DefaultAssertHeader) {
+		if fmt.Sprint(err) != fmt.Sprintf("assert header %q invalid", DefaultAssertHeader) {
 			t.Fatalf("Identify = %v", err)
 		}
 	})
@@ -356,74 +371,49 @@ func TestIdentify_assert(t *testing.T) {
 		}`, self.Username))
 		req := &http.Request{Header: http.Header{DefaultAssertHeader: []string{"jo\nhn"}}}
 		_, err := policy.Identify(req, unixPeer(t))
-		if fmt.Sprint(err) != fmt.Sprintf("assert header %q required", DefaultAssertHeader) {
+		if fmt.Sprint(err) != fmt.Sprintf("assert header %q invalid", DefaultAssertHeader) {
 			t.Fatalf("Identify = %v", err)
 		}
 	})
 }
 
-func TestAuthenticatorReferenceFollowsMatchOrder(t *testing.T) {
-	// Authenticate tries the file from the top and stops at the first claim.
-	// Unmarshal walks that list from the bottom, so an asserter can name an
-	// authenticator that is still ahead of it. Naming an earlier one is
-	// rejected: that authenticator would already have been offered the
-	// connection, and this one would not run when the reference mattered.
-
+func TestAuthenticate_firstClaimWins(t *testing.T) {
 	self, err := user.Current()
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	t.Run("names an authenticator later in the file", func(t *testing.T) {
+	t.Run("asserter is a linux binding", func(t *testing.T) {
+		mustReject(t, `{
+			"authenticators": [
+				{"name":"proxy","kind":"assert","asserter":{"auth":"gate","name":"caddy"}}
+			],
+			"roles": []
+		}`, "linux binding must set a user (uid and/or user) or a group (gid and/or group)")
+	})
+
+	t.Run("first matching authenticator wins", func(t *testing.T) {
 		policy := loadPolicy(t, fmt.Sprintf(`{
 			"authenticators": [
-				{"name":"proxy","kind":"assert","asserter":{"auth":"gate","name":"caddy"}},
-				{"name":"gate","kind":"assert","asserter":{"user":%q}}
+				{"name":"first","kind":"assert","asserter":{"user":%q}},
+				{"name":"second","kind":"assert","asserter":{"user":%q}}
 			],
-			"roles": [{"name":"gated","bindings":[{"auth":"gate","name":"alice"}]}]
-		}`, self.Username))
-		// proxy is tried first. Its asserter is gate's name binding, which
-		// does not match the socket credential, so proxy declines. gate is
-		// later in the file, matches this peer, and claims.
-		req := &http.Request{Header: http.Header{DefaultAssertHeader: []string{"alice"}}}
+			"roles": [
+				{"name":"from-first","bindings":[{"auth":"first","name":"john"}]},
+				{"name":"from-second","bindings":[{"auth":"second","name":"john"}]}
+			]
+		}`, self.Username, self.Username))
+		req := &http.Request{Header: http.Header{DefaultAssertHeader: []string{"john"}}}
 		got, err := policy.Identify(req, unixPeer(t))
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got.Principal.GetName() != "alice@gate" {
-			t.Errorf("principal: got %q, want alice@gate", got.Principal.GetName())
+		if got.Principal.GetName() != "john@first" {
+			t.Errorf("principal: got %q, want john@first", got.Principal.GetName())
 		}
-		if !sameRoleNames(got.Roles, []RoleName{"gated"}) {
-			t.Errorf("roles: got %v, want [gated]", got.Roles)
+		if !sameRoleNames(got.Roles, []RoleName{"from-first"}) {
+			t.Errorf("roles: got %v, want [from-first]", got.Roles)
 		}
-	})
-
-	t.Run("claims before the authenticator it named", func(t *testing.T) {
-		policy := loadPolicy(t, fmt.Sprintf(`{
-			"authenticators": [
-				{"name":"proxy","kind":"assert","asserter":{"auth":"system","user":%q}},
-				{"name":"gate","kind":"assert","header":"X-Gate","asserter":{"user":%q}}
-			],
-			"roles": [{"name":"gated","bindings":[{"auth":"gate","name":"alice"}]}]
-		}`, self.Username, self.Username))
-		// system is always last. proxy names it and matches this peer, so
-		// the search stops there. gate is never asked, even though its
-		// header is present.
-		req := &http.Request{Header: http.Header{"X-Gate": []string{"alice"}}}
-		_, err := policy.Identify(req, unixPeer(t))
-		if fmt.Sprint(err) != fmt.Sprintf("assert header %q required", DefaultAssertHeader) {
-			t.Fatalf("Identify = %v", err)
-		}
-	})
-
-	t.Run("may not name an authenticator earlier in the file", func(t *testing.T) {
-		mustReject(t, `{
-			"authenticators": [
-				{"name":"gate","kind":"assert","asserter":{"user":"caddy"}},
-				{"name":"proxy","kind":"assert","asserter":{"auth":"gate","name":"caddy"}}
-			],
-			"roles": []
-		}`, "authenticator not found for gate")
 	})
 }
 
@@ -468,7 +458,7 @@ func TestPolicy_load(t *testing.T) {
 	})
 
 	t.Run("assert asserter required", func(t *testing.T) {
-		_, _, err := unmarshalAuthenticator([]byte(`{"name":"caddy","kind":"assert"}`), Authenticators{})
+		_, _, err := unmarshalAuthenticator([]byte(`{"name":"caddy","kind":"assert"}`))
 		if fmt.Sprint(err) != "assert authenticator asserter is required" {
 			t.Fatalf("unmarshal = %v", err)
 		}
@@ -556,7 +546,11 @@ func loadPolicy(t *testing.T, raw string) Policy {
 }
 
 func role(name RoleName, bindings ...Binding[Credential]) *Role {
-	return &Role{Name: name, Bindings: bindings}
+	refs := make(Bindings, len(bindings))
+	for i, binding := range bindings {
+		refs[i] = reference{name: systemAuthenticatorName, binding: binding}
+	}
+	return &Role{Name: name, Bindings: refs}
 }
 
 func roleNamed(roles Roles, name RoleName) *Role {

@@ -42,7 +42,7 @@ func (linuxAuthenticator) NewBinding() Binding[linuxCredential] {
 	return &linuxBinding{}
 }
 
-func (linuxAuthenticator) unmarshal(data []byte, existing Authenticators) error {
+func (linuxAuthenticator) unmarshal(data []byte) error {
 	return json.Unmarshal(data, &struct{}{})
 }
 

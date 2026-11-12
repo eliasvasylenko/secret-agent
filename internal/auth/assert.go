@@ -24,30 +24,24 @@ func (c assertCredential) Name() string {
 	return c.name
 }
 
-// assertAuthenticator claims the connection when the peer matches asserter,
-// then requires that authenticator's header. The asserter is any binding.
+// assertAuthenticator claims the connection when the socket peer matches its
+// asserter and its header is present. An unmatched peer or absent header does
+// not match. A present header that is not a single clean name is a failure.
 type assertAuthenticator struct {
 	header   string
-	asserter Binding[Credential]
+	asserter linuxBinding
 }
 
 func (a assertAuthenticator) Authenticate(request *http.Request, connection net.Conn) (assertCredential, error) {
-	if a.asserter == nil {
-		return assertCredential{}, fmt.Errorf("assert authenticator asserter is required")
-	}
-	system, err := newAuthenticator(linuxKind)
+	peer, err := authenticatePeer(connection)
 	if err != nil {
 		return assertCredential{}, err
 	}
-	peer, err := system.Authenticate(request, connection)
+	matched, err := a.asserter.Bind(peer)
 	if err != nil {
 		return assertCredential{}, err
 	}
-	matches, err := a.asserter.Bind(peer)
-	if err != nil {
-		return assertCredential{}, err
-	}
-	if !matches {
+	if !matched {
 		return assertCredential{}, errNotClaimed
 	}
 	header := a.header
@@ -65,7 +59,7 @@ func (assertAuthenticator) NewBinding() Binding[assertCredential] {
 	return &assertBinding{}
 }
 
-func (a *assertAuthenticator) unmarshal(data []byte, existing Authenticators) error {
+func (a *assertAuthenticator) unmarshal(data []byte) error {
 	var raw struct {
 		Header   string          `json:"header"`
 		Asserter json.RawMessage `json:"asserter"`
@@ -77,7 +71,7 @@ func (a *assertAuthenticator) unmarshal(data []byte, existing Authenticators) er
 	if len(raw.Asserter) == 0 || string(raw.Asserter) == "null" {
 		return fmt.Errorf("assert authenticator asserter is required")
 	}
-	a.asserter, err = unmarshalBinding(raw.Asserter, &existing)
+	err = json.Unmarshal(raw.Asserter, &a.asserter)
 	if err != nil {
 		return err
 	}
@@ -112,15 +106,18 @@ func (b assertBinding) Bind(credential assertCredential) (bool, error) {
 
 func headerValue(request *http.Request, header string) (string, error) {
 	if request == nil {
-		return "", fmt.Errorf("assert header %q required", header)
+		return "", errNotClaimed
 	}
 	values := request.Header.Values(header)
+	if len(values) == 0 {
+		return "", errNotClaimed
+	}
 	if len(values) != 1 {
-		return "", fmt.Errorf("assert header %q required", header)
+		return "", fmt.Errorf("assert header %q invalid", header)
 	}
 	name := strings.TrimSpace(values[0])
 	if name == "" || strings.IndexFunc(name, unicode.IsControl) >= 0 {
-		return "", fmt.Errorf("assert header %q required", header)
+		return "", fmt.Errorf("assert header %q invalid", header)
 	}
 	return name, nil
 }

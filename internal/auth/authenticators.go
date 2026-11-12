@@ -28,34 +28,23 @@ func NewAuthenticators() *Authenticators {
 	}
 }
 
-func (a *Authenticators) unmarshal(data []byte, existing *Authenticators) error {
+func (a *Authenticators) unmarshal(data []byte) error {
+	if len(data) == 0 {
+		return nil
+	}
 	var list []json.RawMessage
-	if len(data) > 0 {
-		err := json.Unmarshal(data, &list)
+	err := json.Unmarshal(data, &list)
+	if err != nil {
+		return err
+	}
+	for _, item := range list {
+		name, authenticator, err := unmarshalAuthenticator(item)
 		if err != nil {
 			return err
 		}
-	}
-	existingOrder := existing.order
-	existingAuthenticators := existing.authenticators
-	*a = Authenticators{
-		order:          make([]string, len(list)+len(existingOrder)),
-		authenticators: make(map[string]Authenticator[Credential]),
-	}
-	for i, name := range existingOrder {
-		(*a).order[len(list)+i] = name
-		(*a).authenticators[name] = existingAuthenticators[name]
-	}
-	for i := len(list) - 1; i >= 0; i-- {
-		name, authenticator, err := unmarshalAuthenticator(list[i], *a)
-		if err != nil {
+		if err := a.Add(name, authenticator); err != nil {
 			return err
 		}
-		if _, ok := (*a).authenticators[name]; ok {
-			return fmt.Errorf("duplicate authenticator %q", name)
-		}
-		(*a).order[i] = name
-		(*a).authenticators[name] = authenticator
 	}
 	return nil
 }
@@ -67,7 +56,7 @@ func (a *Authenticators) Add(name string, authenticator Authenticator[Credential
 	if _, ok := (*a).authenticators[name]; ok {
 		return fmt.Errorf("duplicate authenticator %q", name)
 	}
-	a.order = append([]string{name}, a.order...)
+	a.order = append(a.order, name)
 	a.authenticators[name] = authenticator
 	return nil
 }
@@ -77,6 +66,9 @@ func (a *Authenticators) Get(name string) (Authenticator[Credential], bool) {
 	return authenticator, ok
 }
 
+// Authenticate tries authenticators in order. The first that claims the
+// connection wins. One that does not match is skipped. A failure while
+// matching stops the walk.
 func (a *Authenticators) Authenticate(request *http.Request, connection net.Conn) (Principal, error) {
 	for _, name := range a.order {
 		authenticator, ok := a.authenticators[name]
@@ -127,10 +119,10 @@ type Authenticator[T Credential] interface {
 
 	NewBinding() Binding[T]
 
-	unmarshal([]byte, Authenticators) error
+	unmarshal([]byte) error
 }
 
-type Bindings []Binding[Credential]
+type Bindings []reference
 
 type Binding[T Credential] interface {
 	Bind(credential T) (bool, error)
@@ -154,8 +146,8 @@ func (a AnyAuthenticator[T]) NewBinding() Binding[Credential] {
 	return AnyBinding[T]{binding: a.authenticator.NewBinding()}
 }
 
-func (a AnyAuthenticator[T]) unmarshal(data []byte, authenticators Authenticators) error {
-	return a.authenticator.unmarshal(data, authenticators)
+func (a AnyAuthenticator[T]) unmarshal(data []byte) error {
+	return a.authenticator.unmarshal(data)
 }
 
 func (a AnyBinding[T]) Bind(credential Credential) (bool, error) {
@@ -185,7 +177,7 @@ func newAuthenticator(kind string) (Authenticator[Credential], error) {
 	return factory(), nil
 }
 
-func unmarshalAuthenticator(data []byte, available Authenticators) (string, Authenticator[Credential], error) {
+func unmarshalAuthenticator(data []byte) (string, Authenticator[Credential], error) {
 	var envelope struct {
 		Name string `json:"name"`
 		Kind string `json:"kind"`
@@ -203,7 +195,7 @@ func unmarshalAuthenticator(data []byte, available Authenticators) (string, Auth
 		return "", nil, err
 	}
 
-	err = authenticator.unmarshal(data, available)
+	err = authenticator.unmarshal(data)
 	if err != nil {
 		return "", nil, err
 	}
@@ -211,13 +203,29 @@ func unmarshalAuthenticator(data []byte, available Authenticators) (string, Auth
 	return envelope.Name, authenticator, nil
 }
 
-func unmarshalBinding(data []byte, authenticators *Authenticators) (Binding[Credential], error) {
+// reference is one lookup while loading: the authenticator, and the binding
+// it built. A role applies the binding only when the principal came from
+// that authenticator.
+type reference struct {
+	name          string
+	authenticator Authenticator[Credential]
+	binding       Binding[Credential]
+}
+
+func (r reference) matches(principal Principal) (bool, error) {
+	if principal.authenticator != r.name {
+		return false, nil
+	}
+	return r.binding.Bind(principal.credential)
+}
+
+func resolveReference(data []byte, authenticators *Authenticators) (reference, error) {
 	var envelope struct {
 		Authenticator string `json:"auth"`
 	}
 	err := json.Unmarshal(data, &envelope)
 	if err != nil {
-		return nil, err
+		return reference{}, err
 	}
 	if envelope.Authenticator == "" {
 		envelope.Authenticator = systemAuthenticatorName
@@ -225,11 +233,13 @@ func unmarshalBinding(data []byte, authenticators *Authenticators) (Binding[Cred
 
 	authenticator, ok := authenticators.Get(envelope.Authenticator)
 	if !ok {
-		return nil, fmt.Errorf("authenticator not found for %s", envelope.Authenticator)
+		return reference{}, fmt.Errorf("authenticator not found for %s", envelope.Authenticator)
 	}
 
 	binding := authenticator.NewBinding()
 	err = binding.UnmarshalJSON(data)
-
-	return binding, err
+	if err != nil {
+		return reference{}, err
+	}
+	return reference{name: envelope.Authenticator, authenticator: authenticator, binding: binding}, nil
 }
