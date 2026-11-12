@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -303,6 +304,46 @@ func TestInstances_Create_List_Get(t *testing.T) {
 	}
 	if got.Id != created.Id {
 		t.Errorf("Get Id = %q", got.Id)
+	}
+}
+
+func TestInstances_ListOrdersByOperationNumber(t *testing.T) {
+	repo := newTestBackend(t, nil)
+	ctx := context.Background()
+	secretId := "s1"
+	instances := repo.Catalog().Instances()
+
+	created := []*secrets.Instance{
+		createInstance(t, repo, secretId, executor.OperationParameters{Reason: "a", StartedBy: "user"}),
+		createInstance(t, repo, secretId, executor.OperationParameters{Reason: "b", StartedBy: "user"}),
+		createInstance(t, repo, secretId, executor.OperationParameters{Reason: "c", StartedBy: "user"}),
+	}
+	slices.SortFunc(created, func(a, b *secrets.Instance) int {
+		return b.Status.OperationNumber - a.Status.OperationNumber
+	})
+
+	page := func(from, to int) string {
+		t.Helper()
+		list, err := instances.List(ctx, &secretId, from, to)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(list) != 1 {
+			t.Fatalf("List(%d, %d) returned %d instances, want 1", from, to, len(list))
+		}
+		for id := range list {
+			return id
+		}
+		return ""
+	}
+	if got := page(0, 1); got != created[0].Id {
+		t.Errorf("first page = %s, want highest operation number %s", got, created[0].Id)
+	}
+	if got := page(1, 2); got != created[1].Id {
+		t.Errorf("second page = %s, want %s", got, created[1].Id)
+	}
+	if got := page(2, 3); got != created[2].Id {
+		t.Errorf("third page = %s, want lowest operation number %s", got, created[2].Id)
 	}
 }
 

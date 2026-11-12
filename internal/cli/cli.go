@@ -205,6 +205,6 @@ type Serve struct {
 
 type DialStdio struct {
 	Socket string `short:"s" help:"Unix socket path (default: Nix systemd socket). With restrict,command=, set here, not in the client's ssh:// URL."`
-	User   string `short:"u" help:"Inject the forward-auth user (shared-account hop); omit for peercred identity"`
-	Header string `short:"H" help:"Header set with -u (default X-Secret-Agent-User); must match ForwardAuth.Header"`
+	User   string `short:"u" help:"Name to put in the assert header; omit for the socket credential"`
+	Header string `short:"H" help:"Header set with -u (default X-Secret-Agent-User); must match that assert authenticator's header"`
 }

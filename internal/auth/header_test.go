@@ -13,7 +13,7 @@ import (
 	"github.com/eliasvasylenko/secret-agent/internal/dialstdio"
 )
 
-func TestInjectForwardedUser(t *testing.T) {
+func TestInjectAssertedUser(t *testing.T) {
 	socket := filepath.Join(t.TempDir(), "agent.sock")
 	ln, err := net.Listen("unix", socket)
 	if err != nil {
@@ -40,7 +40,7 @@ func TestInjectForwardedUser(t *testing.T) {
 		}
 		_, _ = io.ReadAll(req.Body)
 		_, _ = io.WriteString(c, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
-		gotCh <- result{header: req.Header.Get(DefaultForwardAuthHeader)}
+		gotCh <- result{header: req.Header.Get(DefaultAssertHeader)}
 	}()
 
 	req := "GET /secrets HTTP/1.1\r\nHost: unix\r\n\r\n"
@@ -48,7 +48,7 @@ func TestInjectForwardedUser(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rest, err := InjectForwardedUser(conn, bytes.NewReader([]byte(req)), "john", "")
+	rest, err := InjectAssertedUser(conn, bytes.NewReader([]byte(req)), "john", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +69,7 @@ func TestInjectForwardedUser(t *testing.T) {
 	}
 }
 
-func TestInjectForwardedUser_replacesExisting(t *testing.T) {
+func TestInjectAssertedUser_replacesExisting(t *testing.T) {
 	socket := filepath.Join(t.TempDir(), "agent.sock")
 	ln, err := net.Listen("unix", socket)
 	if err != nil {
@@ -88,7 +88,7 @@ func TestInjectForwardedUser_replacesExisting(t *testing.T) {
 		if err != nil {
 			return
 		}
-		gotCh <- req.Header.Get(DefaultForwardAuthHeader)
+		gotCh <- req.Header.Get(DefaultAssertHeader)
 		_, _ = io.WriteString(c, "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
 	}()
 
@@ -97,7 +97,7 @@ func TestInjectForwardedUser_replacesExisting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rest, err := InjectForwardedUser(conn, bytes.NewReader([]byte(req)), "john", "")
+	rest, err := InjectAssertedUser(conn, bytes.NewReader([]byte(req)), "john", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +108,7 @@ func TestInjectForwardedUser_replacesExisting(t *testing.T) {
 	}
 }
 
-func TestInjectForwardedUser_customHeader(t *testing.T) {
+func TestInjectAssertedUser_customHeader(t *testing.T) {
 	socket := filepath.Join(t.TempDir(), "agent.sock")
 	ln, err := net.Listen("unix", socket)
 	if err != nil {
@@ -136,7 +136,7 @@ func TestInjectForwardedUser_customHeader(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rest, err := InjectForwardedUser(conn, bytes.NewReader([]byte(req)), "john", "X-Remote-User")
+	rest, err := InjectAssertedUser(conn, bytes.NewReader([]byte(req)), "john", "X-Remote-User")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,12 +146,12 @@ func TestInjectForwardedUser_customHeader(t *testing.T) {
 	if got.Get("X-Remote-User") != "john" {
 		t.Fatalf("X-Remote-User = %q", got.Get("X-Remote-User"))
 	}
-	if got.Get(DefaultForwardAuthHeader) != "" {
-		t.Fatalf("default header = %q", got.Get(DefaultForwardAuthHeader))
+	if got.Get(DefaultAssertHeader) != "" {
+		t.Fatalf("default header = %q", got.Get(DefaultAssertHeader))
 	}
 }
 
-func TestInjectForwardedUser_forwardsUnreadBytes(t *testing.T) {
+func TestInjectAssertedUser_forwardsUnreadBytes(t *testing.T) {
 	socket := filepath.Join(t.TempDir(), "agent.sock")
 	ln, err := net.Listen("unix", socket)
 	if err != nil {
@@ -172,8 +172,8 @@ func TestInjectForwardedUser_forwardsUnreadBytes(t *testing.T) {
 			gotCh <- "read request: " + err.Error()
 			return
 		}
-		if req.Header.Get(DefaultForwardAuthHeader) != "john" {
-			gotCh <- "header = " + req.Header.Get(DefaultForwardAuthHeader)
+		if req.Header.Get(DefaultAssertHeader) != "john" {
+			gotCh <- "header = " + req.Header.Get(DefaultAssertHeader)
 			return
 		}
 		extra := make([]byte, 4)
@@ -190,7 +190,7 @@ func TestInjectForwardedUser_forwardsUnreadBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rest, err := InjectForwardedUser(conn, bytes.NewReader([]byte(req)), "john", "")
+	rest, err := InjectAssertedUser(conn, bytes.NewReader([]byte(req)), "john", "")
 	if err != nil {
 		t.Fatal(err)
 	}

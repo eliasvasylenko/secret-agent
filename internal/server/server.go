@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/eliasvasylenko/secret-agent/internal/auth"
 	"github.com/eliasvasylenko/secret-agent/internal/backend"
 )
 
@@ -25,11 +26,11 @@ type ServerConfig struct {
 	OutputTTL time.Duration
 }
 
-func New(config ServerConfig, secretStore backend.Backend, permissions *Permissions) *Server {
+func New(config ServerConfig, secretStore backend.Backend, policy *auth.Policy) *Server {
 	limiter := NewLimiter(config.RequestLimit, config.RequestWindow)
 	return &Server{
 		config:     config,
-		controller: NewController(secretStore, limiter, permissions),
+		controller: NewController(secretStore, policy, limiter),
 	}
 }
 

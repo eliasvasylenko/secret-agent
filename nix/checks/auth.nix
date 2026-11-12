@@ -1,5 +1,5 @@
 # Integration test for linux auth. The server derives identity from Unix socket
-# peer credentials and applies role mappings from the bindings config.
+# peer credentials and matches role binds.
 # We verify:
 # - user bindings
 # - group bindings from peer cred gid
@@ -47,18 +47,20 @@ pkgs.testers.runNixOSTest {
       services.secret-agent = {
         enable = true;
         roles = {
-          admin.permissions = { all = "any"; };
-          reader.permissions = { secrets = "any"; instances = "read"; };
-        };
-        bindings = {
-          users = {
-            root = "admin";
-            "1001" = "admin";
+          admin = {
+            permissions = { all = "any"; };
+            bindings = [
+              { uid = 0; }
+              { uid = 1001; }
+            ];
           };
-          # Group bindings: primary (peercred) and user's groups (GroupIds) are both matched
-          groups = {
-            "1001" = "reader";   # testgroup – primary for grouptest
-            "1002" = "reader";   # testgroup2 – supplementary for testuser
+          reader = {
+            permissions = { secrets = "any"; instances = "read"; };
+            # Primary (peercred) and supplementary groups are both matched.
+            bindings = [
+              { gid = 1001; } # testgroup
+              { gid = 1002; } # testgroup2
+            ];
           };
         };
         secrets = {

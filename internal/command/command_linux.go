@@ -13,6 +13,10 @@ type CommandOptions struct {
 	Credential *syscall.Credential `json:"credential,omitempty"`
 }
 
+func (o CommandOptions) zero() bool {
+	return o.Credential == nil
+}
+
 func (o CommandOptions) Apply(subProcess *exec.Cmd) {
 	subProcess.SysProcAttr = &syscall.SysProcAttr{}
 	if o.Credential != nil {

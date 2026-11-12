@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -155,7 +156,8 @@ func (r *Repository) listInstances(ctx context.Context, secretId *string, from, 
 		query += " WHERE i.secretId = ?"
 		args = append(args, *secretId)
 	}
-	query += " LIMIT ? OFFSET ?"
+	// Page in the same order MarshalJSON emits: highest operation number first.
+	query += " ORDER BY o.id DESC LIMIT ? OFFSET ?"
 	args = append(args, to-from, from)
 
 	rows, err := r.db.QueryContext(ctx, query, args...)
@@ -469,15 +471,21 @@ func beginTx(db *sql.DB) (*sql.Tx, func() error, func(), error) {
 	tx, err := db.Begin()
 	committed := false
 	commit := func() error {
+		err := tx.Commit()
+		if err != nil {
+			return err
+		}
 		committed = true
-		return tx.Commit()
+		return nil
 	}
 	rollback := func() {
 		if committed {
 			return
 		}
 		committed = true
-		if err := tx.Rollback(); err != nil {
+		// Commit may already have finished the transaction. Rollback then
+		// returns ErrTxDone, which is not a failure to undo the work.
+		if err := tx.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
 			log.Default().Printf("rollback error %s", err.Error())
 		}
 	}

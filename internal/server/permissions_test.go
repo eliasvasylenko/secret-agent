@@ -13,13 +13,22 @@ import (
 	"github.com/eliasvasylenko/secret-agent/internal/auth"
 )
 
+func roleLoaded(p *auth.Policy, name auth.RoleName) bool {
+	for _, role := range p.Roles {
+		if role.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
 func TestLoadPermissions(t *testing.T) {
 	invalidPath := filepath.Join(t.TempDir(), "permissions.json")
 	if err := os.WriteFile(invalidPath, []byte("not json"), 0600); err != nil {
 		t.Fatal(err)
 	}
 
-	validBody := `{"roles":{"admin":{"permissions":{"all":"any"}},"reader":{"permissions":{"secrets":"read","instances":"read"}}},"bindings":{}}`
+	validBody := `{"roles":[{"name":"admin","bindings":[{"auth":"system","uid":0}],"permissions":{"all":"any"}},{"name":"reader","permissions":{"secrets":"read","instances":"read"}}]}`
 	validPath := filepath.Join(t.TempDir(), "permissions.json")
 	if err := os.WriteFile(validPath, []byte(validBody), 0600); err != nil {
 		t.Fatal(err)
@@ -29,7 +38,7 @@ func TestLoadPermissions(t *testing.T) {
 		name       string
 		path       string
 		checkErr   func(t *testing.T, err error)
-		checkPerms func(t *testing.T, p *Permissions)
+		checkPerms func(t *testing.T, p *auth.Policy)
 	}{
 		{
 			name: "missing file",
@@ -52,17 +61,20 @@ func TestLoadPermissions(t *testing.T) {
 		{
 			name: "valid file",
 			path: validPath,
-			checkPerms: func(t *testing.T, p *Permissions) {
+			checkPerms: func(t *testing.T, p *auth.Policy) {
 				if p == nil {
-					t.Fatal("LoadPermissions returned nil *Permissions")
+					t.Fatal("LoadPermissions returned nil *auth.Policy")
+				}
+				if _, ok := p.Authenticators.Get("system"); !ok {
+					t.Error("system authenticator missing")
 				}
 				if len(p.Roles) != 2 {
 					t.Errorf("len(Roles) = %d, want 2", len(p.Roles))
 				}
-				if _, ok := p.Roles["admin"]; !ok {
+				if !roleLoaded(p, "admin") {
 					t.Error("missing role admin")
 				}
-				if _, ok := p.Roles["reader"]; !ok {
+				if !roleLoaded(p, "reader") {
 					t.Error("missing role reader")
 				}
 			},
@@ -76,9 +88,7 @@ func TestLoadPermissions(t *testing.T) {
 				if err == nil {
 					t.Fatal("LoadPermissions = nil, want error")
 				}
-				if tt.checkErr != nil {
-					tt.checkErr(t, err)
-				}
+				tt.checkErr(t, err)
 			} else if err != nil {
 				t.Fatalf("LoadPermissions = %v", err)
 			}
@@ -95,13 +105,16 @@ func TestPermissions_Middleware_returns401WhenIdentifyFails(t *testing.T) {
 	defer client.Close()
 	defer server.Close()
 
-	p := &Permissions{Roles: auth.Roles{"admin": {Name: "admin", Permissions: auth.Permissions{auth.All: auth.Any}}}}
+	var policy auth.Policy
+	if err := json.Unmarshal([]byte(`{"roles":[{"name":"admin","permissions":{"all":"any"}}]}`), &policy); err != nil {
+		t.Fatal(err)
+	}
 	nextCalled := false
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		nextCalled = true
 		w.WriteHeader(http.StatusOK)
 	})
-	handler := p.Middleware(auth.Permissions{auth.Secrets: auth.Read}, next)
+	handler := AuthMiddleware(&policy, auth.Permissions{auth.Secrets: auth.Read}, next)
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req = req.WithContext(context.WithValue(req.Context(), connectionKey{}, server))

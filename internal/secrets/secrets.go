@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/eliasvasylenko/secret-agent/internal/auth"
 	"github.com/eliasvasylenko/secret-agent/internal/command"
 	"github.com/eliasvasylenko/secret-agent/internal/marshal"
 )
@@ -36,7 +37,14 @@ type Secret struct {
 
 	// Test an instance of the secret
 	Test *command.Command `json:"test,omitempty"`
+
+	// Parents are roles allowed to propose work on this secret.
+	// Omitted means this secret accepts no parent. Direct calls are unchanged.
+	Parents []Parent `json:"parents,omitempty"`
 }
+
+// Parent is a role allowed to propose work on a secret.
+type Parent = auth.RoleName
 
 func New(secretList []*Secret) (Secrets, error) {
 	secrets := map[string]*Secret{}
@@ -51,6 +59,18 @@ func New(secretList []*Secret) (Secrets, error) {
 			return nil, fmt.Errorf("Secret id '%s' must be unique", secret.Id)
 		}
 		secrets[secret.Id] = secret
+	}
+	for _, secret := range secrets {
+		seen := map[Parent]struct{}{}
+		for _, parent := range secret.Parents {
+			if parent == "" {
+				return nil, fmt.Errorf("Secret '%s' parent must not be empty", secret.Id)
+			}
+			if _, ok := seen[parent]; ok {
+				return nil, fmt.Errorf("Secret '%s' parent '%s' is duplicated", secret.Id, parent)
+			}
+			seen[parent] = struct{}{}
+		}
 	}
 	return secrets, nil
 }

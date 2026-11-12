@@ -30,7 +30,7 @@ func TestMain(m *testing.M) {
 				fmt.Fprintln(os.Stderr, err)
 				os.Exit(1)
 			}
-			in, err = auth.InjectForwardedUser(conn, os.Stdin, user, "")
+			in, err = auth.InjectAssertedUser(conn, os.Stdin, user, "")
 			if err != nil {
 				fmt.Fprintln(os.Stderr, err)
 				os.Exit(1)
@@ -90,8 +90,8 @@ func TestClient_sshCatalog_sharedAccountHeader(t *testing.T) {
 	defer ln.Close()
 
 	go http.Serve(ln, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get(auth.DefaultForwardAuthHeader) != "john" {
-			t.Errorf("header = %q", r.Header.Get(auth.DefaultForwardAuthHeader))
+		if r.Header.Get(auth.DefaultAssertHeader) != "john" {
+			t.Errorf("header = %q", r.Header.Get(auth.DefaultAssertHeader))
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(server.ItemsResponse[secrets.Secrets]{

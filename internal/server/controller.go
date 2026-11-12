@@ -20,26 +20,18 @@ type Controller struct {
 	middleware  func(perms auth.Permissions, next http.HandlerFunc) http.Handler
 }
 
-func NewController(secretStore backend.Backend, limiter limiter, permissions permissions) *Controller {
+func NewController(secretStore backend.Backend, policy *auth.Policy, limiter *Limiter) *Controller {
 	limiterKey := func(r *http.Request) string {
-		return identityFromContext(r.Context()).Principal
+		return identityFromContext(r.Context()).Principal.GetName()
 	}
 	middleware := func(perms auth.Permissions, next http.HandlerFunc) http.Handler {
-		return permissions.Middleware(perms, limiter.Middleware(limiterKey, next))
+		return AuthMiddleware(policy, perms, limiter.Middleware(limiterKey, next))
 	}
 	return &Controller{
 		secretStore: secretStore,
 		slots:       make(map[attachSlotKey]*attachSlot),
 		middleware:  middleware,
 	}
-}
-
-type limiter interface {
-	Middleware(keyFunc func(r *http.Request) string, next http.Handler) http.Handler
-}
-
-type permissions interface {
-	Middleware(perms auth.Permissions, next http.Handler) http.Handler
 }
 
 type noopProposer struct{}
@@ -168,7 +160,7 @@ func (s *Controller) createInstance(w http.ResponseWriter, r *http.Request) {
 		Env:       request.Env,
 		Forced:    request.Forced,
 		Reason:    request.Reason,
-		StartedBy: identity.Principal,
+		StartedBy: identity.Principal.GetName(),
 	})
 }
 
@@ -266,7 +258,7 @@ func (s *Controller) createOperation(w http.ResponseWriter, r *http.Request) {
 		Env:       request.Env,
 		Forced:    request.Forced,
 		Reason:    request.Reason,
-		StartedBy: identity.Principal,
+		StartedBy: identity.Principal.GetName(),
 	})
 }
 
@@ -287,7 +279,7 @@ func (s *Controller) startAttachedRun(
 	parameters executor.OperationParameters,
 ) {
 	identity := identityFromContext(r.Context())
-	slot, err := s.takeSlot(secretId, identity.Principal)
+	slot, err := s.takeSlot(secretId, identity.Principal.GetName())
 	if err != nil {
 		writeError(w, err)
 		return
@@ -307,11 +299,11 @@ func (s *Controller) startAttachedRun(
 }
 
 func parseRange(r *http.Request) (int64, int64, error) {
-	from, err := parseQueryInt(r, "from", 32)
+	from, err := parseQueryInt(r, "from", 0)
 	if err != nil {
 		return from, 0, err
 	}
-	to, err := parseQueryInt(r, "to", 32)
+	to, err := parseQueryInt(r, "to", 10)
 	return from, to, err
 }
 

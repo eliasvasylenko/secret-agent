@@ -3,12 +3,33 @@
 package command
 
 import (
+	"encoding/json"
 	"os/exec"
 	"syscall"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
 )
+
+func TestMarshalJSON_credentialWithoutEnvironment(t *testing.T) {
+	in := Command{
+		Script: "id",
+		CommandOptions: CommandOptions{
+			Credential: &syscall.Credential{Uid: 1001, Gid: 1001, Groups: []uint32{1001, 1002}},
+		},
+	}
+	data, err := json.Marshal(&in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out Command
+	if err := json.Unmarshal(data, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !cmp.Equal(out, in) {
+		t.Errorf("round-trip mismatch:\n%s", cmp.Diff(in, out))
+	}
+}
 
 func TestCommandOptions_Apply(t *testing.T) {
 	tests := []struct {
