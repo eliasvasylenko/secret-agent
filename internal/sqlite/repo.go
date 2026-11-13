@@ -487,6 +487,11 @@ func completeOperation(ctx context.Context, db *sql.DB, secretId string, instanc
 			return err
 		}
 	}
+	if operation.Name == secrets.Destroy {
+		if _, err := tx.ExecContext(dbCtx, `UPDATE secret SET activeInstanceId = NULL WHERE id = ? AND activeInstanceId = ?`, secretId, instance.Id); err != nil {
+			return err
+		}
+	}
 	target, ok := secrets.TargetState(operation.Name)
 	if !ok {
 		return fmt.Errorf("operation %s has no target state", operation.Name)
@@ -526,6 +531,9 @@ func refuseUpdate(
 	}
 	if (operationName == secrets.Test || operationName == secrets.Deactivate) && (activeInstanceId == nil || *activeInstanceId != instanceId) {
 		return &backend.InstanceNotActiveError{Operation: operationName}
+	}
+	if operationName == secrets.Destroy && activeInstanceId != nil && *activeInstanceId == instanceId {
+		return &backend.InstanceAlreadyActiveError{Operation: operationName, ActiveId: *activeInstanceId}
 	}
 	return nil
 }
