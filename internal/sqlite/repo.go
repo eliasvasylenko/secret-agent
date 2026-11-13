@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,8 +10,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"database/sql"
 
 	"github.com/eliasvasylenko/secret-agent/internal/backend"
 	"github.com/eliasvasylenko/secret-agent/internal/command"
@@ -23,10 +22,11 @@ import (
 
 // Repository persists secrets and the current status of their instances.
 type Repository struct {
-	db           *sql.DB
-	secrets      secrets.Secrets
-	maxReasonLen int
-	secretStates sync.Map
+	db               *sql.DB
+	secrets          secrets.Secrets
+	maxReasonLen     int
+	operationTimeout time.Duration
+	secretStates     sync.Map
 }
 
 type secretState struct {
@@ -36,7 +36,7 @@ type secretState struct {
 	maxReasonLen int
 }
 
-func NewRepository(ctx context.Context, dbFile string, secrets secrets.Secrets, debug bool, maxReasonLen int) (*Repository, error) {
+func NewRepository(ctx context.Context, dbFile string, secrets secrets.Secrets, debug bool, maxReasonLen int, operationTimeout time.Duration) (*Repository, error) {
 	dsn := dbFile
 	if strings.Contains(dsn, "?") {
 		dsn += "&_fk=1"
@@ -89,9 +89,10 @@ func NewRepository(ctx context.Context, dbFile string, secrets secrets.Secrets, 
 		return nil, err
 	}
 	return &Repository{
-		db:           db,
-		secrets:      secrets,
-		maxReasonLen: maxReasonLen,
+		db:               db,
+		secrets:          secrets,
+		maxReasonLen:     maxReasonLen,
+		operationTimeout: operationTimeout,
 	}, nil
 }
 
@@ -158,6 +159,9 @@ func (r *Repository) listInstances(ctx context.Context, secretId *string, from, 
 	query += " ORDER BY i.opCreatedAt DESC, i.id ASC LIMIT ? OFFSET ?"
 	args = append(args, to-from, from)
 
+	if err := r.failExpired(ctx); err != nil {
+		return nil, err
+	}
 	rows, err := r.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
@@ -167,25 +171,27 @@ func (r *Repository) listInstances(ctx context.Context, secretId *string, from, 
 }
 
 func (r *Repository) getInstance(ctx context.Context, instanceId string) (*secrets.Instance, error) {
-	row := r.db.QueryRowContext(ctx, `
+	if err := r.failExpired(ctx); err != nil {
+		return nil, err
+	}
+	instance, err := scanInstance(r.db.QueryRowContext(ctx, `
 		SELECT`+instanceSnapshotColumns+`
 		FROM instance i
 		INNER JOIN revision r
 			ON r.secretId = i.secretId AND r.version = i.version
 		WHERE i.id = ?
-	`, instanceId)
-	instance, err := scanInstance(row)
+	`, instanceId))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, &backend.InstanceNotFoundError{InstanceId: instanceId}
 	}
-	if err != nil {
-		return nil, err
-	}
-	return instance, nil
+	return instance, err
 }
 
 func (r *Repository) getActiveInstance(ctx context.Context, secretId string) (*secrets.Instance, error) {
-	rows, err := r.db.QueryContext(ctx, `
+	if err := r.failExpired(ctx); err != nil {
+		return nil, err
+	}
+	instance, err := scanInstance(r.db.QueryRowContext(ctx, `
 		SELECT`+instanceSnapshotColumns+`
 		FROM secret s
 		INNER JOIN instance i
@@ -193,19 +199,11 @@ func (r *Repository) getActiveInstance(ctx context.Context, secretId string) (*s
 		INNER JOIN revision r
 			ON r.secretId = i.secretId AND r.version = i.version
 		WHERE s.id = ?
-	`, secretId)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	if !rows.Next() {
+	`, secretId))
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
-	instance, err := scanInstance(rows)
-	if err != nil {
-		return nil, err
-	}
-	return instance, nil
+	return instance, err
 }
 
 func (st *secretState) startCreateOperation(ctx context.Context, parameters executor.OperationParameters) (*secrets.Instance, secrets.Operation, error) {
@@ -247,6 +245,9 @@ func (st *secretState) startCreateOperation(ctx context.Context, parameters exec
 
 func (st *secretState) startUpdateOperation(ctx context.Context, instanceId string, operationName secrets.OperationName, parameters executor.OperationParameters) (*secrets.Instance, secrets.Operation, error) {
 	if err := reasonTooLong(parameters, st.maxReasonLen); err != nil {
+		return nil, secrets.Operation{}, err
+	}
+	if err := st.repo.failExpired(ctx); err != nil {
 		return nil, secrets.Operation{}, err
 	}
 
@@ -329,7 +330,15 @@ func (st *secretState) startUpdateOperation(ctx context.Context, instanceId stri
 }
 
 func (st *secretState) launch(instance *secrets.Instance, operation secrets.Operation, parameters executor.OperationParameters, proposer backend.Proposer, stdio command.Files) *opHandle {
-	execCtx, execCancel := context.WithCancel(context.Background())
+	var (
+		execCtx    context.Context
+		execCancel context.CancelFunc
+	)
+	if st.repo.operationTimeout > 0 {
+		execCtx, execCancel = context.WithTimeout(context.Background(), st.repo.operationTimeout)
+	} else {
+		execCtx, execCancel = context.WithCancel(context.Background())
+	}
 	h := &opHandle{
 		done:       make(chan struct{}),
 		execCancel: execCancel,
@@ -354,6 +363,28 @@ func (st *secretState) launch(instance *secrets.Instance, operation secrets.Oper
 	}()
 
 	return h
+}
+
+func (r *Repository) failExpired(ctx context.Context) error {
+	if r.operationTimeout <= 0 {
+		return nil
+	}
+	now := time.Now()
+	result, err := r.db.ExecContext(ctx, `
+		UPDATE instance SET revision = revision + 1, opFailedAt = ?
+		WHERE opCompletedAt IS NULL AND opFailedAt IS NULL AND opStartedAt <= ?
+	`, now, now.Add(-r.operationTimeout))
+	if err != nil {
+		return err
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n > 0 {
+		log.Default().Printf("timing out %d in-flight operation(s) after %s", n, r.operationTimeout)
+	}
+	return nil
 }
 
 type opHandle struct {

@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -36,7 +37,7 @@ func newTestBackend(t *testing.T, s secrets.Secrets) *Backend {
 	}
 	ctx := context.Background()
 	dbFile := filepath.Join(t.TempDir(), "backend.db")
-	backend, err := Open(ctx, dbFile, s, false, 256)
+	backend, err := Open(ctx, dbFile, s, false, 256, 0)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -93,7 +94,7 @@ func runOperation(
 func TestOpen(t *testing.T) {
 	ctx := context.Background()
 	dbFile := filepath.Join(t.TempDir(), "backend.db")
-	backend, err := Open(ctx, dbFile, secrets.Secrets{"s1": noOpSecret}, false, 256)
+	backend, err := Open(ctx, dbFile, secrets.Secrets{"s1": noOpSecret}, false, 256, 0)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -737,5 +738,131 @@ func TestRunner_planPinnedAfterVersionBump(t *testing.T) {
 	}
 	if got.Secret.Version != 1 {
 		t.Errorf("Get().Secret.Version = %d, want 1", got.Secret.Version)
+	}
+}
+
+func orphanInFlight(t *testing.T, b *Backend, instanceId string, startedAt time.Time) {
+	t.Helper()
+	_, err := b.repo.db.Exec(`UPDATE instance SET opCompletedAt = NULL, opFailedAt = NULL, opStartedAt = ? WHERE id = ?`, startedAt, instanceId)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCatalog_Get_timesOutOrphanedOperation(t *testing.T) {
+	dbFile := filepath.Join(t.TempDir(), "backend.db")
+	ctx := context.Background()
+	first, err := Open(ctx, dbFile, secrets.Secrets{"s1": noOpSecret}, false, 256, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := mustCreateInstance(t, first, "s1", executor.OperationParameters{Reason: "create", StartedBy: "user"})
+	orphanInFlight(t, first, created.Id, time.Now().Add(-time.Hour))
+	first.Close()
+
+	repo, err := Open(ctx, dbFile, secrets.Secrets{"s1": noOpSecret}, false, 256, time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(repo.Close)
+
+	var failedAt sql.NullTime
+	if err := repo.repo.db.QueryRow(`SELECT opFailedAt FROM instance WHERE id = ?`, created.Id).Scan(&failedAt); err != nil {
+		t.Fatal(err)
+	}
+	if failedAt.Valid {
+		t.Fatal("Open marked the orphan failed")
+	}
+
+	got, err := repo.Catalog().Instances().Get(ctx, created.Id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Operation.FailedAt == nil || got.Operation.CompletedAt != nil {
+		t.Fatalf("after Get, operation = %+v, want failed", got.Operation)
+	}
+	if got.State.Name != secrets.Created {
+		t.Errorf("state = %s, want %s", got.State.Name, secrets.Created)
+	}
+}
+
+func TestCatalog_List_timesOutOrphanedOperation(t *testing.T) {
+	repo := newTestBackend(t, nil)
+	repo.repo.operationTimeout = time.Millisecond
+	ctx := context.Background()
+	created := mustCreateInstance(t, repo, "s1", executor.OperationParameters{Reason: "create", StartedBy: "user"})
+	orphanInFlight(t, repo, created.Id, time.Now().Add(-time.Hour))
+
+	got, err := repo.Catalog().Instances().List(ctx, nil, 0, 10)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	instance := got[created.Id]
+	if instance == nil || instance.Operation.FailedAt == nil {
+		t.Fatalf("List = %+v, want failed orphan", got)
+	}
+}
+
+func TestCatalog_GetActive_timesOutOrphanedOperation(t *testing.T) {
+	repo := newTestBackend(t, nil)
+	repo.repo.operationTimeout = time.Millisecond
+	ctx := context.Background()
+	created := mustCreateInstance(t, repo, "s1", executor.OperationParameters{Reason: "create", StartedBy: "user"})
+	runOperation(t, repo, "s1", created.Id, ops.Activate, executor.OperationParameters{Reason: "act", StartedBy: "user"})
+	orphanInFlight(t, repo, created.Id, time.Now().Add(-time.Hour))
+
+	got, err := repo.Catalog().Instances().GetActive(ctx, "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || got.Id != created.Id || got.Operation.FailedAt == nil {
+		t.Fatalf("GetActive = %+v, want failed active instance", got)
+	}
+}
+
+func TestRunner_Run_timesOutOrphanBeforeAccept(t *testing.T) {
+	repo := newTestBackend(t, nil)
+	repo.repo.operationTimeout = time.Millisecond
+	ctx := context.Background()
+	created := mustCreateInstance(t, repo, "s1", executor.OperationParameters{Reason: "create", StartedBy: "user"})
+	orphanInFlight(t, repo, created.Id, time.Now().Add(-time.Hour))
+
+	_, err := ops.Activate(ctx, repo.Runner("s1"), created.Id, executor.OperationParameters{Reason: "act", StartedBy: "user"}, noopProposer{}, discardFiles())
+	var incomplete *backend.IncompleteOperationError
+	if err == nil || !errors.As(err, &incomplete) {
+		t.Fatalf("Activate = %v, want IncompleteOperationError after timing out create", err)
+	}
+}
+
+func TestRunner_Execute_contextTimeout(t *testing.T) {
+	s := &secrets.Secret{
+		Id:     "s1",
+		Create: command.New(`read -r _`, command.NewEnvironment(), ""),
+	}
+	ctx := context.Background()
+	dbFile := filepath.Join(t.TempDir(), "backend.db")
+	repo, err := Open(ctx, dbFile, secrets.Secrets{"s1": s}, false, 256, 50*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(repo.Close)
+
+	stdinR, stdinW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = stdinR.Close() })
+	t.Cleanup(func() { _ = stdinW.Close() })
+
+	_, handle, err := repo.Runner("s1").Run(ctx, secrets.Create, "", executor.OperationParameters{Reason: "r", StartedBy: "u"}, noopProposer{}, command.Files{Fds: []*os.File{stdinR}, Tty: command.NoTty})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	final, waitErr := handle.Wait(ctx)
+	if waitErr == nil {
+		t.Fatal("Wait = nil, want context timeout")
+	}
+	if final == nil || final.Operation.FailedAt == nil {
+		t.Fatal("timed-out execute missing failedAt")
 	}
 }

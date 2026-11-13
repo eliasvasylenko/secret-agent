@@ -19,25 +19,26 @@ import (
 )
 
 type CLI struct {
-	SecretsFile     string          `short:"S" env:"SECRETS_FILE" help:"Path to secrets configuration file"`
-	PermissionsFile string          `short:"P" env:"PERMISSIONS_FILE" help:"Path to permissions (roles/bindings) configuration file"`
-	DbFile          string          `short:"D" env:"DB_FILE" help:"Path to sqlite database file"`
-	Address         string          `short:"a" env:"CLIENT_ADDRESS" help:"Unix socket path, unix:// URL, http(s):// URL, or ssh://[user@]host[:port][/socket]. URL /socket is dial-stdio -s only when sshd runs the client-requested command; with restrict,command=, -s/-u/-H come from that command."`
-	MaxReasonLength int             `short:"R" env:"MAX_REASON_LENGTH" default:"4096" help:"Max length of audit reason strings"`
-	Debug           bool            `short:"d" env:"DEBUG" help:"Enable debug logging"`
-	Pretty          bool            `short:"p" env:"PRETTY" help:"Pretty-print JSON output"`
-	Secrets         Secrets         `cmd:"" help:"List secrets"`
-	Secret          Secret          `cmd:"" help:"Show a secret"`
-	Instances       Instances       `cmd:"" help:"List instances of a secret"`
-	Instance        Instance        `cmd:"" help:"Show an instance of a secret"`
-	Active          Secret          `cmd:"" help:"Show the active instance of a secret"`
-	Create          SecretCommand   `cmd:"" help:"Create an instance of a secret"`
-	Destroy         InstanceCommand `cmd:"" help:"Destroy an instance of a secret"`
-	Activate        InstanceCommand `cmd:"" help:"Activate an instance of a secret"`
-	Deactivate      InstanceCommand `cmd:"" help:"Deactivate an instance of a secret"`
-	Test            InstanceCommand `cmd:"" help:"Test an instance of a secret"`
-	Serve           Serve           `cmd:"" help:"Serve the secret agent API"`
-	DialStdio       DialStdio       `cmd:"" name:"dial-stdio" help:"Proxy stdio to the agent Unix socket. Should not be invoked manually."`
+	SecretsFile      string          `short:"S" env:"SECRETS_FILE" help:"Path to secrets configuration file"`
+	PermissionsFile  string          `short:"P" env:"PERMISSIONS_FILE" help:"Path to permissions (roles/bindings) configuration file"`
+	DbFile           string          `short:"D" env:"DB_FILE" help:"Path to sqlite database file"`
+	Address          string          `short:"a" env:"CLIENT_ADDRESS" help:"Unix socket path, unix:// URL, http(s):// URL, or ssh://[user@]host[:port][/socket]. URL /socket is dial-stdio -s only when sshd runs the client-requested command; with restrict,command=, -s/-u/-H come from that command."`
+	MaxReasonLength  int             `short:"R" env:"MAX_REASON_LENGTH" default:"4096" help:"Max length of audit reason strings"`
+	OperationTimeout time.Duration   `env:"OPERATION_TIMEOUT" default:"10m" help:"How long a started operation may run before a catalog read marks it failed"`
+	Debug            bool            `short:"d" env:"DEBUG" help:"Enable debug logging"`
+	Pretty           bool            `short:"p" env:"PRETTY" help:"Pretty-print JSON output"`
+	Secrets          Secrets         `cmd:"" help:"List secrets"`
+	Secret           Secret          `cmd:"" help:"Show a secret"`
+	Instances        Instances       `cmd:"" help:"List instances of a secret"`
+	Instance         Instance        `cmd:"" help:"Show an instance of a secret"`
+	Active           Secret          `cmd:"" help:"Show the active instance of a secret"`
+	Create           SecretCommand   `cmd:"" help:"Create an instance of a secret"`
+	Destroy          InstanceCommand `cmd:"" help:"Destroy an instance of a secret"`
+	Activate         InstanceCommand `cmd:"" help:"Activate an instance of a secret"`
+	Deactivate       InstanceCommand `cmd:"" help:"Deactivate an instance of a secret"`
+	Test             InstanceCommand `cmd:"" help:"Test an instance of a secret"`
+	Serve            Serve           `cmd:"" help:"Serve the secret agent API"`
+	DialStdio        DialStdio       `cmd:"" name:"dial-stdio" help:"Proxy stdio to the agent Unix socket. Should not be invoked manually."`
 
 	ctx   kongContext
 	agent backend.Backend
@@ -61,7 +62,7 @@ func NewCLI(ctx context.Context) *CLI {
 	}
 
 	var err error
-	c.agent, err = NewBackend(ctx, c.Address, c.SecretsFile, c.DbFile, c.Debug, c.MaxReasonLength)
+	c.agent, err = NewBackend(ctx, c.Address, c.SecretsFile, c.DbFile, c.Debug, c.MaxReasonLength, c.OperationTimeout)
 	c.ctx.FatalIfErrorf(err)
 	return &c
 }
