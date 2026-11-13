@@ -25,10 +25,9 @@ func ControllingTerminal(f *os.File) bool {
 }
 
 // LocalMode is r, w, or tty. ctty comes from Files.Tty, not from here.
-// A regular file opened read-write is refused: its writes share an offset
-// with its reads, and a pipe would drop them. A fifo opened read-write is
-// read. The shell uses that so the open does not block, and so a read waits
-// for a writer instead of seeing EOF.
+// A read-write open is refused: a pipe is one direction, and a regular
+// file's reads and writes share an offset. Open the file read-only or
+// write-only, or use a terminal.
 func LocalMode(f *os.File) (FileMode, error) {
 	if Terminal(f) {
 		return Tty, nil
@@ -42,13 +41,7 @@ func LocalMode(f *os.File) (FileMode, error) {
 		return Write, nil
 	case unix.O_RDONLY:
 		return Read, nil
+	default:
+		return "", fmt.Errorf("read-write file cannot be attached")
 	}
-	info, err := f.Stat()
-	if err != nil {
-		return "", err
-	}
-	if info.Mode()&os.ModeNamedPipe != 0 {
-		return Read, nil
-	}
-	return "", fmt.Errorf("read-write file cannot be attached")
 }

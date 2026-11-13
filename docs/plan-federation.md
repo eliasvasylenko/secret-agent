@@ -247,7 +247,7 @@ A first cut that predates the decisions above. Keep / change:
 | `admit()` in `server/controller.go`: parent without permission → `200 {"wireApproval":{"secretId"}}` before `takeSlot` | **Delete.** `wireApproval` goes; creation records creator/roles, and the gate moves to `start`, where the starter is checked. |
 | `requirePermission` / `HasRole` / parent-role refusal for permitted non-parents | Keep; applied at `start`, not create. |
 | `Proposer.Propose(ctx, secretID, name, params, pipe io.ReadWriteCloser)` | Change to `Propose(ctx, Proposal)`. The content fields go away (John gets them from B). |
-| `attachSlot` + `/secrets/{secretId}/attach/{stream}` | Promote to the pending-operation registry (Phase 0): slot fields (pipes, claimed, watch) move onto the operation record; attach routes key by operation ID. |
+| `attachSlot` + `/secrets/{secretId}/attach/{stream}` | **Done.** `operationEntry` keyed by operation id; attach is `POST /operations/{id}/attach`. |
 | `client/runner.go`: one `postStart`, on wire approval dial pipe → `Propose` → error "did not start" | Rebuild on the unified workflow (Phase 2): create → attach → `Propose` if awaiting → start → pumps/join. |
 | `client/dial.go` `dialPipe`: raw TCP to B's host; unix refused | This is **introduce** from John's CLI, not A's splice. Move behind `Proposal.Dial` default. Unix refusal stays (peercreds would be the CLI's own process — correct for same-host John, wrong for A). |
 | `sqlite` keeps the proposer on `opHandle` | Keep; used in Phase 3. |
@@ -269,7 +269,7 @@ slot binding.
    guard). `POST /instances` and the `SecretOperationRequest`/`InstanceOperationRequest`
    pair go away.
 2. Pending-operation registry on `Controller` succeeds `slots`: creator, target, params,
-   token (when awaiting approval), attach pipes/claims (today's `attachSlot` fields),
+   token (when awaiting approval), attach pipes/claims (`operationEntry` fields),
    expiry, state. Attach routes move to `POST /operations/{operationId}/attach/{stream}`,
    creator only.
 3. `POST /operations/{operationId}/start`: creator starts their own (permission checked

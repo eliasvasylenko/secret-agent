@@ -24,7 +24,7 @@ func TestLocalMode_readWriteRegularFileIsRefused(t *testing.T) {
 	}
 }
 
-func TestLocalMode_readWriteFifoIsRead(t *testing.T) {
+func TestLocalMode_readWriteFifoIsRefused(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "fifo")
 	if err := unix.Mkfifo(path, 0o600); err != nil {
 		t.Fatal(err)
@@ -34,12 +34,9 @@ func TestLocalMode_readWriteFifoIsRead(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = f.Close() })
-	mode, err := LocalMode(f)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if mode != Read {
-		t.Fatalf("LocalMode = %q, want read", mode)
+	_, err = LocalMode(f)
+	if err == nil || err.Error() != "read-write file cannot be attached" {
+		t.Fatalf("LocalMode error = %v", err)
 	}
 }
 

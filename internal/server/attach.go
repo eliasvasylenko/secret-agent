@@ -39,6 +39,7 @@ func newAttachment(fds []int, mode command.FileMode) (*attachment, error) {
 	case command.Write:
 		a.peer, a.process, err = os.Pipe()
 	default:
+		// New modes (seekable file, duplex fifo) plug in here.
 		return nil, fmt.Errorf("unknown attach mode %q", mode)
 	}
 	if err != nil {

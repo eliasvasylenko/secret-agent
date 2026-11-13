@@ -106,12 +106,17 @@ pkgs.testers.runNixOSTest {
       assert received == "helloworld", f"chunked stdin: got '{received}'"
 
     with subtest("interleaved stdin and stdout"):
-      machine.succeed("rm -f /tmp/interleaved-out")
+      machine.succeed("rm -f /tmp/interleaved-out /tmp/interleaved-holder")
       machine.succeed("mkfifo /tmp/interleaved-in")
-      # Opening a fifo O_RDONLY via "< fifo" blocks until a writer exists; use
-      # O_RDWR (exec N<> fifo) so the shell can start secret-agent before payload.
+      # O_RDONLY blocks until a writer exists, and with no writer a read is
+      # EOF. Hold a writer here. secret-agent refuses O_RDWR, so the agent
+      # gets a read-only fd.
       machine.succeed(
-        "bash -c 'exec 3<> /tmp/interleaved-in; secret-agent create interleaved 0<&3 > /tmp/interleaved-out 2>/dev/null & exec 3>&-'"
+        "bash -c 'exec 3<> /tmp/interleaved-in; echo ready > /tmp/interleaved-holder; exec sleep infinity' >/dev/null 2>&1 &"
+      )
+      machine.wait_until_succeeds("test -f /tmp/interleaved-holder")
+      machine.succeed(
+        "secret-agent create interleaved < /tmp/interleaved-in > /tmp/interleaved-out 2>/dev/null &"
       )
       machine.wait_until_succeeds("grep -q before-read /tmp/interleaved-out")
       machine.fail("grep -q after-read /tmp/interleaved-out")

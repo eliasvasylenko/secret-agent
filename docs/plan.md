@@ -24,7 +24,7 @@ Goal: written decisions before large refactors.
 - `Handle`: `Wait` joins; `Cancel` stops op; two ctx lifecycles
 - HTTP routes: attach before start; flat `/instances` and `/operations`
 - Wire DTOs: `OperationRequest`, `SecretOperationRequest`, `InstanceOperationRequest`
-- `attachSlot` state machine documented
+- `operationEntry` state machine documented
 
 </details>
 
@@ -56,7 +56,8 @@ In-process path: persist → background execute → `Handle`; no global op regis
 
 ## Phase 4 — HTTP server attach slot + routes ✅
 
-Attach-before-start per `(secretId, principal)`; POST consumes pending slot; flat routes.
+Originally attach-before-start per `(secretId, principal)`. Replaced by pending
+`operationEntry` keyed by operation id; attach and start are later calls on that id.
 
 **Verification:** `go test ./internal/server/...`
 

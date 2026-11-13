@@ -23,7 +23,9 @@ func (f Files) file(fd int) *os.File {
 }
 
 // FileMode is r, w, tty, or ctty. tty is a terminal. ctty is the
-// controlling terminal. The client chooses this.
+// controlling terminal. The client chooses this. Unknown modes are
+// rejected; a later kind (seekable file, duplex fifo) is a new value
+// and a new attachment, not a change to these four.
 type FileMode string
 
 const (

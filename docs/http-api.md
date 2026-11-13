@@ -21,10 +21,14 @@ A file drop **before start** deletes the pending operation; **a process-writable
 file disconnecting while running** cancels it. **Input EOF while running** closes
 process input only. An attach is one open file: its JSON body's `fds` lists
 every process descriptor that refers to it, the way a local `dup` does, and
-`mode` is what the process does with it: `r`, `w`, `tty`, or `ctty`.
+`mode` is what the process does with it: today `r`, `w`, `tty`, or `ctty`.
 `{"fds":[1,2],"mode":"w"}` is `2>&1`. `{"fds":[0,1,2],"mode":"ctty"}` is a
 shared controlling terminal. The client chooses the mode from the file it is
-forwarding. Separate files are separate attaches. `expiresAt` is how long the operation stays readable: 10 minutes
+forwarding. Separate files are separate attaches. Bytes after the `101` are
+that mode's stream; a later mode may speak a file protocol on the same
+upgrade instead of raw copies.
+
+`expiresAt` is how long the operation stays readable: 10 minutes
 (`--pending-operation-ttl`) from creation while it is pending, reset to 2 minutes
 (`--finished-operation-ttl`) when it completes or fails. A running operation is
 kept until it finishes. After `expiresAt`, `GET` returns 404.
