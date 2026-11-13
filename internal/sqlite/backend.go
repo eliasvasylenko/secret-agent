@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"time"
 
 	"github.com/eliasvasylenko/secret-agent/internal/backend"
 	"github.com/eliasvasylenko/secret-agent/internal/command"
@@ -15,8 +16,8 @@ type Backend struct {
 }
 
 // Open opens a sqlite database and returns a Backend.
-func Open(ctx context.Context, dbFile string, secrets secrets.Secrets, debug bool, maxReasonLen int) (*Backend, error) {
-	repo, err := NewRepository(ctx, dbFile, secrets, debug, maxReasonLen)
+func Open(ctx context.Context, dbFile string, secrets secrets.Secrets, debug bool, maxReasonLen int, operationTimeout time.Duration) (*Backend, error) {
+	repo, err := NewRepository(ctx, dbFile, secrets, debug, maxReasonLen, operationTimeout)
 	if err != nil {
 		return nil, err
 	}

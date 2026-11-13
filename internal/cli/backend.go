@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"time"
 
 	"github.com/eliasvasylenko/secret-agent/internal/backend"
 	"github.com/eliasvasylenko/secret-agent/internal/client"
@@ -9,7 +10,7 @@ import (
 	"github.com/eliasvasylenko/secret-agent/internal/sqlite"
 )
 
-func NewBackend(ctx context.Context, address string, secretsFile string, dbFile string, debug bool, maxReasonLen int) (backend.Backend, error) {
+func NewBackend(ctx context.Context, address string, secretsFile string, dbFile string, debug bool, maxReasonLen int, operationTimeout time.Duration) (backend.Backend, error) {
 	if address != "" {
 		return client.New(address)
 	}
@@ -17,5 +18,5 @@ func NewBackend(ctx context.Context, address string, secretsFile string, dbFile 
 	if err != nil {
 		return nil, err
 	}
-	return sqlite.Open(ctx, dbFile, secretsConfig.Secrets, debug, maxReasonLen)
+	return sqlite.Open(ctx, dbFile, secretsConfig.Secrets, debug, maxReasonLen, operationTimeout)
 }
