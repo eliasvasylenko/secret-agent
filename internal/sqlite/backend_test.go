@@ -510,6 +510,81 @@ func TestRunner_Activate_alreadyActive(t *testing.T) {
 	}
 }
 
+func TestRunner_Destroy_refusesWhileActive(t *testing.T) {
+	repo := newTestBackend(t, nil)
+	ctx := context.Background()
+	secretId := "s1"
+	instances := repo.Catalog().Instances()
+
+	created := mustCreateInstance(t, repo, secretId, executor.OperationParameters{Reason: "create", StartedBy: "user"})
+	destroyed := runOperation(t, repo, secretId, created.Id, ops.Destroy, executor.OperationParameters{Reason: "destroy-created", StartedBy: "user"})
+	if destroyed.State.Name != secrets.Destroyed {
+		t.Errorf("destroy never-active state = %s, want %s", destroyed.State.Name, secrets.Destroyed)
+	}
+
+	active := mustCreateInstance(t, repo, secretId, executor.OperationParameters{Reason: "create2", StartedBy: "user"})
+	other := mustCreateInstance(t, repo, secretId, executor.OperationParameters{Reason: "create3", StartedBy: "user"})
+	runOperation(t, repo, secretId, active.Id, ops.Activate, executor.OperationParameters{Reason: "act", StartedBy: "user"})
+
+	_, err := ops.Destroy(ctx, repo.Runner(secretId), active.Id, executor.OperationParameters{Reason: "nope", StartedBy: "user"}, noopProposer{}, discardFiles())
+	var already *backend.InstanceAlreadyActiveError
+	if err == nil || !errors.As(err, &already) || already.ActiveId != active.Id {
+		t.Fatalf("Destroy active = %v, want InstanceAlreadyActiveError for %s", err, active.Id)
+	}
+	got, getErr := instances.GetActive(ctx, secretId)
+	if getErr != nil {
+		t.Fatal(getErr)
+	}
+	if got == nil || got.Id != active.Id || got.State.Name != secrets.Activated {
+		t.Fatalf("GetActive after refused destroy = %+v, want activated %s", got, active.Id)
+	}
+
+	runOperation(t, repo, secretId, other.Id, ops.Destroy, executor.OperationParameters{Reason: "destroy-other", StartedBy: "user"})
+	got, getErr = instances.GetActive(ctx, secretId)
+	if getErr != nil {
+		t.Fatal(getErr)
+	}
+	if got == nil || got.Id != active.Id {
+		t.Fatalf("GetActive after destroying sibling = %+v, want %s", got, active.Id)
+	}
+
+	runOperation(t, repo, secretId, active.Id, ops.Deactivate, executor.OperationParameters{Reason: "deact", StartedBy: "user"})
+	runOperation(t, repo, secretId, active.Id, ops.Destroy, executor.OperationParameters{Reason: "destroy-deactivated", StartedBy: "user"})
+	got, getErr = instances.GetActive(ctx, secretId)
+	if getErr != nil {
+		t.Fatal(getErr)
+	}
+	if got != nil {
+		t.Fatalf("GetActive after destroy of deactivated = %+v, want nil", got)
+	}
+}
+
+func TestRunner_Destroy_forcedClearsActive(t *testing.T) {
+	repo := newTestBackend(t, nil)
+	ctx := context.Background()
+	created := mustCreateInstance(t, repo, "s1", executor.OperationParameters{Reason: "create", StartedBy: "user"})
+	runOperation(t, repo, "s1", created.Id, ops.Activate, executor.OperationParameters{Reason: "act", StartedBy: "user"})
+
+	_, handle, err := repo.Runner("s1").Run(ctx, secrets.Destroy, created.Id, executor.OperationParameters{Reason: "force", StartedBy: "user", Forced: true}, noopProposer{}, discardFiles())
+	if err != nil {
+		t.Fatalf("forced Destroy: %v", err)
+	}
+	got, err := handle.Wait(ctx)
+	if err != nil {
+		t.Fatalf("wait: %v", err)
+	}
+	if got.State.Name != secrets.Destroyed {
+		t.Errorf("state = %s, want %s", got.State.Name, secrets.Destroyed)
+	}
+	active, err := repo.Catalog().Instances().GetActive(ctx, "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if active != nil {
+		t.Fatalf("GetActive after forced destroy = %+v, want nil", active)
+	}
+}
+
 func TestRunner_ExpectedRevision(t *testing.T) {
 	repo := newTestBackend(t, nil)
 	ctx := context.Background()
