@@ -547,6 +547,48 @@ func TestController_getSecret(t *testing.T) {
 	}
 }
 
+func TestController_getSecret_notFound(t *testing.T) {
+	mockBackend := &mocks.MockBackend{}
+	defer mockBackend.Mock.Validate(t)
+	mockCatalog := &mocks.MockCatalog{}
+	defer mockCatalog.Mock.Validate(t)
+	mockSecrets := &mocks.MockSecrets{}
+	defer mockSecrets.Mock.Validate(t)
+	expectCatalog(mockBackend, mockCatalog)
+	mocks.Expect(&mockCatalog.Mock, mockCatalog.Secrets, func() backend.Secrets { return mockSecrets })
+	mocks.Expect(&mockSecrets.Mock, mockSecrets.Get, func(context.Context, string) (*secrets.Secret, error) {
+		return nil, &backend.SecretNotFoundError{SecretId: "missing"}
+	})
+
+	_, mux, _ := newTestController(t, mockBackend)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "http://test/secrets/missing", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404\nbody: %s", rec.Code, rec.Body.Bytes())
+	}
+}
+
+func TestController_getSecret_unexpected(t *testing.T) {
+	mockBackend := &mocks.MockBackend{}
+	defer mockBackend.Mock.Validate(t)
+	mockCatalog := &mocks.MockCatalog{}
+	defer mockCatalog.Mock.Validate(t)
+	mockSecrets := &mocks.MockSecrets{}
+	defer mockSecrets.Mock.Validate(t)
+	expectCatalog(mockBackend, mockCatalog)
+	mocks.Expect(&mockCatalog.Mock, mockCatalog.Secrets, func() backend.Secrets { return mockSecrets })
+	mocks.Expect(&mockSecrets.Mock, mockSecrets.Get, func(context.Context, string) (*secrets.Secret, error) {
+		return nil, fmt.Errorf("disk full")
+	})
+
+	_, mux, _ := newTestController(t, mockBackend)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "http://test/secrets/my-secret", nil))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500\nbody: %s", rec.Code, rec.Body.Bytes())
+	}
+}
+
 func TestController_listInstances(t *testing.T) {
 	mockBackend := &mocks.MockBackend{}
 	defer mockBackend.Mock.Validate(t)
@@ -658,6 +700,27 @@ func TestController_getInstance(t *testing.T) {
 	}
 }
 
+func TestController_getInstance_notFound(t *testing.T) {
+	mockBackend := &mocks.MockBackend{}
+	defer mockBackend.Mock.Validate(t)
+	mockCatalog := &mocks.MockCatalog{}
+	defer mockCatalog.Mock.Validate(t)
+	mockInstances := &mocks.MockInstances{}
+	defer mockInstances.Mock.Validate(t)
+	expectCatalog(mockBackend, mockCatalog)
+	mocks.Expect(&mockCatalog.Mock, mockCatalog.Instances, func() backend.Instances { return mockInstances })
+	mocks.Expect(&mockInstances.Mock, mockInstances.Get, func(context.Context, string) (*secrets.Instance, error) {
+		return nil, &backend.InstanceNotFoundError{InstanceId: "missing"}
+	})
+
+	_, mux, _ := newTestController(t, mockBackend)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "http://test/instances/missing", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404\nbody: %s", rec.Code, rec.Body.Bytes())
+	}
+}
+
 func TestController_startOperation_allowsNoAttach(t *testing.T) {
 	mockBackend := &mocks.MockBackend{}
 	defer mockBackend.Mock.Validate(t)
@@ -686,6 +749,45 @@ func TestController_startOperation_allowsNoAttach(t *testing.T) {
 	rec := postStart(t, mux, operationId)
 	if rec.Code != http.StatusOK {
 		t.Errorf("status = %d, want 200\nbody: %s", rec.Code, rec.Body.Bytes())
+	}
+}
+
+func TestController_startOperation_domainErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		code int
+	}{
+		{"conflict", &backend.InstanceAlreadyActiveError{Operation: secrets.Activate, ActiveId: "i1"}, http.StatusConflict},
+		{"invalid", &backend.ReasonTooLongError{Length: 10, Max: 8}, http.StatusBadRequest},
+		{"unclassified", fmt.Errorf("disk full"), http.StatusInternalServerError},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockBackend := &mocks.MockBackend{}
+			defer mockBackend.Mock.Validate(t)
+			mockRunner := &mocks.MockRunner{}
+			defer mockRunner.Mock.Validate(t)
+			expectSecretGets(t, mockBackend, 2)
+			mocks.Expect(&mockBackend.Mock, mockBackend.Runner, func(string) backend.Runner { return mockRunner })
+			mocks.Expect(&mockRunner.Mock, mockRunner.Run, func(
+				context.Context,
+				secrets.OperationName,
+				string,
+				executor.OperationParameters,
+				backend.Proposer,
+				command.Files,
+			) (*secrets.Instance, backend.Handle, error) {
+				return nil, nil, tt.err
+			})
+
+			_, mux, _ := newTestController(t, mockBackend)
+			operationId, _ := postCreate(t, mux, `{"secretId":"sid","name":"create","env":{},"forced":false,"reason":"create-reason"}`)
+			rec := postStart(t, mux, operationId)
+			if rec.Code != tt.code {
+				t.Fatalf("status = %d, want %d\nbody: %s", rec.Code, tt.code, rec.Body.Bytes())
+			}
+		})
 	}
 }
 
@@ -867,7 +969,7 @@ func TestController_createOperation_unknownInstance(t *testing.T) {
 	expectCatalog(mockBackend, mockCatalog)
 	mocks.Expect(&mockCatalog.Mock, mockCatalog.Instances, func() backend.Instances { return mockInstances })
 	mocks.Expect(&mockInstances.Mock, mockInstances.Get, func(context.Context, string) (*secrets.Instance, error) {
-		return nil, fmt.Errorf("no such instance")
+		return nil, &backend.InstanceNotFoundError{InstanceId: "missing"}
 	})
 
 	_, mux, _ := newTestController(t, mockBackend)
@@ -880,6 +982,32 @@ func TestController_createOperation_unknownInstance(t *testing.T) {
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404\nbody: %s", rec.Code, rec.Body.Bytes())
+	}
+}
+
+func TestController_createOperation_instanceLookupFailure(t *testing.T) {
+	mockBackend := &mocks.MockBackend{}
+	defer mockBackend.Mock.Validate(t)
+	mockCatalog := &mocks.MockCatalog{}
+	defer mockCatalog.Mock.Validate(t)
+	mockInstances := &mocks.MockInstances{}
+	defer mockInstances.Mock.Validate(t)
+	expectCatalog(mockBackend, mockCatalog)
+	mocks.Expect(&mockCatalog.Mock, mockCatalog.Instances, func() backend.Instances { return mockInstances })
+	mocks.Expect(&mockInstances.Mock, mockInstances.Get, func(context.Context, string) (*secrets.Instance, error) {
+		return nil, fmt.Errorf("disk full")
+	})
+
+	_, mux, _ := newTestController(t, mockBackend)
+
+	body := `{"instanceId":"missing","name":"activate","env":{},"forced":false,"reason":"r"}`
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "http://test/operations", bytes.NewReader([]byte(body)))
+	req.Header.Set("Content-Type", "application/json")
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500\nbody: %s", rec.Code, rec.Body.Bytes())
 	}
 }
 

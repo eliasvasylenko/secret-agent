@@ -100,8 +100,8 @@ snapshot, using an execute context independent of the request context.
 | 204 | Pending operation deleted |
 | 426 | Attach without Upgrade header |
 | 404 | Unknown operation, secret or instance |
-| 400 | Missing `secretId` on create, `instanceId` on a create, missing `instanceId` on other operations, mismatched `secretId` |
-| 409 | Stream already claimed; operation already started or already finished |
+| 400 | Missing `secretId` on create, `instanceId` on a create, missing `instanceId` on other operations, mismatched `secretId`; invalid operation parameters |
+| 409 | Stream already claimed; operation already started or already finished; refused state transition |
 | 415 | Attach or create without `Content-Type: application/json` |
 | 403 | Attach/start/GET principal ≠ operation creator; starter lacks permission |
 

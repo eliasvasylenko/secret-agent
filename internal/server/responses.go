@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/eliasvasylenko/secret-agent/internal/backend"
 	"github.com/eliasvasylenko/secret-agent/internal/secrets"
 )
 
@@ -78,12 +79,32 @@ func writeError(w http.ResponseWriter, err error) error {
 			w.Header().Set(key, value)
 		}
 	} else {
-		response = NewErrorResponse(
-			http.StatusInternalServerError,
-			err,
-		)
+		response = NewErrorResponse(statusFor(err), err)
 	}
 	return writeResult(w, response, response.HttpError.Code)
+}
+
+func statusFor(err error) int {
+	var (
+		secretNotFound   *backend.SecretNotFoundError
+		instanceNotFound *backend.InstanceNotFoundError
+		revisionMismatch *backend.RevisionMismatchError
+		incomplete       *backend.IncompleteOperationError
+		alreadyActive    *backend.InstanceAlreadyActiveError
+		notActive        *backend.InstanceNotActiveError
+		reasonTooLong    *backend.ReasonTooLongError
+	)
+	switch {
+	case errors.As(err, &secretNotFound), errors.As(err, &instanceNotFound):
+		return http.StatusNotFound
+	case errors.As(err, &revisionMismatch), errors.As(err, &incomplete),
+		errors.As(err, &alreadyActive), errors.As(err, &notActive):
+		return http.StatusConflict
+	case errors.As(err, &reasonTooLong):
+		return http.StatusBadRequest
+	default:
+		return http.StatusInternalServerError
+	}
 }
 
 // readBody decodes a JSON request body. The request must say it is JSON.

@@ -134,6 +134,10 @@ func TestSecretRepository_Get(t *testing.T) {
 				if err == nil {
 					t.Fatal("Get = nil, want error")
 				}
+				var notFound *backend.SecretNotFoundError
+				if !errors.As(err, &notFound) {
+					t.Fatalf("Get = %v, want SecretNotFoundError", err)
+				}
 				return
 			}
 			if err != nil {
@@ -153,6 +157,10 @@ func TestRunner_Create_unknownSecret(t *testing.T) {
 	_, err := ops.Create(ctx, repo.Runner("nonexistent"), executor.OperationParameters{Reason: "r", StartedBy: "u"}, noopProposer{}, discardFiles())
 	if err == nil {
 		t.Fatal("Create = nil, want error")
+	}
+	var notFound *backend.SecretNotFoundError
+	if !errors.As(err, &notFound) {
+		t.Fatalf("Create = %v, want SecretNotFoundError", err)
 	}
 }
 
@@ -386,6 +394,10 @@ func TestInstances_Get_notFound(t *testing.T) {
 	if err == nil {
 		t.Fatal("Get = nil, want error")
 	}
+	var notFound *backend.InstanceNotFoundError
+	if !errors.As(err, &notFound) {
+		t.Fatalf("Get = %v, want InstanceNotFoundError", err)
+	}
 }
 
 func TestInstances_GetActive(t *testing.T) {
@@ -474,6 +486,30 @@ func TestRunner_Activate_Deactivate(t *testing.T) {
 	}
 }
 
+func TestRunner_Deactivate_notActive(t *testing.T) {
+	repo := newTestBackend(t, nil)
+	ctx := context.Background()
+	created := mustCreateInstance(t, repo, "s1", executor.OperationParameters{Reason: "create", StartedBy: "user"})
+	_, err := ops.Deactivate(ctx, repo.Runner("s1"), created.Id, executor.OperationParameters{Reason: "deact", StartedBy: "user"}, noopProposer{}, discardFiles())
+	var notActive *backend.InstanceNotActiveError
+	if err == nil || !errors.As(err, &notActive) {
+		t.Fatalf("Deactivate = %v, want InstanceNotActiveError", err)
+	}
+}
+
+func TestRunner_Activate_alreadyActive(t *testing.T) {
+	repo := newTestBackend(t, nil)
+	ctx := context.Background()
+	first := mustCreateInstance(t, repo, "s1", executor.OperationParameters{Reason: "create", StartedBy: "user"})
+	second := mustCreateInstance(t, repo, "s1", executor.OperationParameters{Reason: "create2", StartedBy: "user"})
+	runOperation(t, repo, "s1", first.Id, ops.Activate, executor.OperationParameters{Reason: "act", StartedBy: "user"})
+	_, err := ops.Activate(ctx, repo.Runner("s1"), second.Id, executor.OperationParameters{Reason: "act2", StartedBy: "user"}, noopProposer{}, discardFiles())
+	var already *backend.InstanceAlreadyActiveError
+	if err == nil || !errors.As(err, &already) || already.ActiveId != first.Id {
+		t.Fatalf("Activate = %v, want InstanceAlreadyActiveError for %s", err, first.Id)
+	}
+}
+
 func TestRunner_ExpectedRevision(t *testing.T) {
 	repo := newTestBackend(t, nil)
 	ctx := context.Background()
@@ -496,6 +532,10 @@ func TestRunner_ExpectedRevision(t *testing.T) {
 	wantErr := fmt.Sprintf("cannot activate when revision %d does not match expected 1", deactivated.Revision)
 	if err.Error() != wantErr {
 		t.Errorf("unexpected error: %v", err)
+	}
+	var mismatch *backend.RevisionMismatchError
+	if !errors.As(err, &mismatch) {
+		t.Errorf("Activate = %v, want RevisionMismatchError", err)
 	}
 
 	_, handle, err := repo.Runner(secretId).Run(ctx, secrets.Activate, created.Id, executor.OperationParameters{Reason: "act", StartedBy: "user", ExpectedRevision: &wrongExpected, Forced: true}, noopProposer{}, discardFiles())
@@ -544,8 +584,9 @@ func TestRunner_FailureLeavesState(t *testing.T) {
 	}
 
 	_, err = ops.Deactivate(ctx, repo.Runner("s1"), created.Id, executor.OperationParameters{Reason: "deact", StartedBy: "user"}, noopProposer{}, discardFiles())
-	if err == nil || !strings.Contains(err.Error(), "cannot deactivate") {
-		t.Fatalf("Deactivate = %v, want refusal", err)
+	var incomplete *backend.IncompleteOperationError
+	if err == nil || !errors.As(err, &incomplete) || !strings.Contains(err.Error(), "cannot deactivate") {
+		t.Fatalf("Deactivate = %v, want IncompleteOperationError", err)
 	}
 
 	_, err = ops.Activate(ctx, repo.Runner("s1"), created.Id, executor.OperationParameters{Reason: "retry", StartedBy: "user"}, noopProposer{}, discardFiles())
@@ -565,6 +606,10 @@ func TestRunner_Create_validateReason(t *testing.T) {
 	_, err := ops.Create(ctx, repo.Runner(secretId), executor.OperationParameters{Reason: longReason, StartedBy: "user"}, noopProposer{}, discardFiles())
 	if err == nil {
 		t.Fatal("Create with too-long reason = nil, want error")
+	}
+	var tooLong *backend.ReasonTooLongError
+	if !errors.As(err, &tooLong) {
+		t.Fatalf("Create = %v, want ReasonTooLongError", err)
 	}
 }
 

@@ -120,7 +120,7 @@ func (r *Repository) listSecrets(_ context.Context) (secrets.Secrets, error) {
 func (r *Repository) getSecret(_ context.Context, secretId string) (*secrets.Secret, error) {
 	secret, ok := r.secrets[secretId]
 	if !ok {
-		return nil, fmt.Errorf("Secret plan does not exist %s", secretId)
+		return nil, &backend.SecretNotFoundError{SecretId: secretId}
 	}
 	return secret, nil
 }
@@ -175,6 +175,9 @@ func (r *Repository) getInstance(ctx context.Context, instanceId string) (*secre
 		WHERE i.id = ?
 	`, instanceId)
 	instance, err := scanInstance(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, &backend.InstanceNotFoundError{InstanceId: instanceId}
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -206,11 +209,11 @@ func (r *Repository) getActiveInstance(ctx context.Context, secretId string) (*s
 }
 
 func (st *secretState) startCreateOperation(ctx context.Context, parameters executor.OperationParameters) (*secrets.Instance, secrets.Operation, error) {
-	if err := parameters.Validate(st.maxReasonLen); err != nil {
+	if err := reasonTooLong(parameters, st.maxReasonLen); err != nil {
 		return nil, secrets.Operation{}, err
 	}
 	if st.secret == nil {
-		return nil, secrets.Operation{}, fmt.Errorf("Secret plan does not exist %s", st.secretId)
+		return nil, secrets.Operation{}, &backend.SecretNotFoundError{SecretId: st.secretId}
 	}
 
 	tx, commit, rollback, err := beginTx(st.repo.db)
@@ -243,7 +246,7 @@ func (st *secretState) startCreateOperation(ctx context.Context, parameters exec
 }
 
 func (st *secretState) startUpdateOperation(ctx context.Context, instanceId string, operationName secrets.OperationName, parameters executor.OperationParameters) (*secrets.Instance, secrets.Operation, error) {
-	if err := parameters.Validate(st.maxReasonLen); err != nil {
+	if err := reasonTooLong(parameters, st.maxReasonLen); err != nil {
 		return nil, secrets.Operation{}, err
 	}
 
@@ -284,6 +287,9 @@ func (st *secretState) startUpdateOperation(ctx context.Context, instanceId stri
 		&previousName,
 		&previousCompletedAt,
 	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, secrets.Operation{}, &backend.InstanceNotFoundError{InstanceId: instanceId}
+	}
 	if err != nil {
 		return nil, secrets.Operation{}, err
 	}
@@ -293,22 +299,11 @@ func (st *secretState) startUpdateOperation(ctx context.Context, instanceId stri
 		return nil, secrets.Operation{}, err
 	}
 
-	var msg string
-	if parameters.ExpectedRevision != nil && revision != *parameters.ExpectedRevision {
-		msg = fmt.Sprintf("%s when revision %d does not match expected %d", operationName, revision, *parameters.ExpectedRevision)
-	} else if !previousCompletedAt.Valid && operationName != secrets.OperationName(previousName) {
-		msg = fmt.Sprintf("%s when previous %s has not succeeded", operationName, previousName)
-	} else if operationName == secrets.Activate && activeInstanceId != nil {
-		msg = fmt.Sprintf("%s when instance %s is active", operationName, *activeInstanceId)
-	} else if (operationName == secrets.Test || operationName == secrets.Deactivate) && (activeInstanceId == nil || *activeInstanceId != instanceId) {
-		msg = fmt.Sprintf("%s when instance is not active", operationName)
-	}
-
-	if msg != "" {
+	if err := refuseUpdate(operationName, parameters, revision, previousName, previousCompletedAt, activeInstanceId, instanceId); err != nil {
 		if parameters.Forced {
-			log.Default().Printf("forcing %s", msg)
+			log.Default().Printf("forcing %s", err)
 		} else {
-			return nil, secrets.Operation{}, fmt.Errorf("cannot %s", msg)
+			return nil, secrets.Operation{}, err
 		}
 	}
 
@@ -502,6 +497,37 @@ func completeOperation(ctx context.Context, db *sql.DB, secretId string, instanc
 		return err
 	}
 	return commit()
+}
+
+func reasonTooLong(parameters executor.OperationParameters, max int) error {
+	if err := parameters.Validate(max); err != nil {
+		return &backend.ReasonTooLongError{Length: len(parameters.Reason), Max: max}
+	}
+	return nil
+}
+
+func refuseUpdate(
+	operationName secrets.OperationName,
+	parameters executor.OperationParameters,
+	revision int,
+	previousName string,
+	previousCompletedAt sql.NullTime,
+	activeInstanceId *string,
+	instanceId string,
+) error {
+	if parameters.ExpectedRevision != nil && revision != *parameters.ExpectedRevision {
+		return &backend.RevisionMismatchError{Operation: operationName, Revision: revision, Expected: *parameters.ExpectedRevision}
+	}
+	if !previousCompletedAt.Valid && operationName != secrets.OperationName(previousName) {
+		return &backend.IncompleteOperationError{Operation: operationName, Previous: secrets.OperationName(previousName)}
+	}
+	if operationName == secrets.Activate && activeInstanceId != nil {
+		return &backend.InstanceAlreadyActiveError{Operation: operationName, ActiveId: *activeInstanceId}
+	}
+	if (operationName == secrets.Test || operationName == secrets.Deactivate) && (activeInstanceId == nil || *activeInstanceId != instanceId) {
+		return &backend.InstanceNotActiveError{Operation: operationName}
+	}
+	return nil
 }
 
 func scanInstances(rows *sql.Rows) (secrets.Instances, error) {
