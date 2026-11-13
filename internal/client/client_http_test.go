@@ -80,7 +80,7 @@ func TestUpgradeAttach_http(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	conn, err := c.upgrade(t.Context(), "/secrets/sid/attach/stdin")
+	conn, err := c.upgrade(t.Context(), "/operations/op1/attach", nil)
 	if err != nil {
 		t.Fatalf("upgrade: %v", err)
 	}
@@ -89,7 +89,7 @@ func TestUpgradeAttach_http(t *testing.T) {
 
 func TestUpgradeAttach_https(t *testing.T) {
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/secrets/sid/attach/stdout" {
+		if r.URL.Path != "/operations/op1/attach" {
 			t.Errorf("path = %s", r.URL.Path)
 		}
 		if r.Header.Get("Upgrade") != server.AttachUpgradeProtocol {
@@ -122,7 +122,7 @@ func TestUpgradeAttach_https(t *testing.T) {
 	defer srv.Close()
 
 	c := testClient(t, srv.URL, testTLS(srv))
-	conn, err := c.upgrade(t.Context(), "/secrets/sid/attach/stdout")
+	conn, err := c.upgrade(t.Context(), "/operations/op1/attach", nil)
 	if err != nil {
 		t.Fatalf("upgrade: %v", err)
 	}
@@ -166,7 +166,7 @@ func serveAttachOnce(t *testing.T, ln net.Listener, status int) {
 		if req.Method != http.MethodPost {
 			t.Errorf("method = %s", req.Method)
 		}
-		if !strings.HasPrefix(req.URL.Path, "/secrets/") {
+		if !strings.HasPrefix(req.URL.Path, "/operations/") {
 			t.Errorf("path = %s", req.URL.Path)
 		}
 		resp := &http.Response{

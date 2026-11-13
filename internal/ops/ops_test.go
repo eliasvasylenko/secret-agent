@@ -3,19 +3,20 @@ package ops_test
 import (
 	"context"
 	"errors"
+	"io"
 	"testing"
 
+	"github.com/eliasvasylenko/secret-agent/internal/backend"
 	"github.com/eliasvasylenko/secret-agent/internal/command"
 	"github.com/eliasvasylenko/secret-agent/internal/executor"
 	"github.com/eliasvasylenko/secret-agent/internal/mocks"
 	"github.com/eliasvasylenko/secret-agent/internal/ops"
 	"github.com/eliasvasylenko/secret-agent/internal/secrets"
-	"github.com/eliasvasylenko/secret-agent/internal/backend"
 )
 
 type noopProposer struct{}
 
-func (noopProposer) Propose(context.Context, secrets.OperationName, executor.OperationParameters) error {
+func (noopProposer) Propose(context.Context, string, secrets.OperationName, executor.OperationParameters, io.ReadWriteCloser) error {
 	return nil
 }
 
@@ -53,12 +54,12 @@ func TestCreate_runAndWait(t *testing.T) {
 		string,
 		executor.OperationParameters,
 		backend.Proposer,
-		command.Stdio,
+		command.Files,
 	) (*secrets.Instance, backend.Handle, error) {
 		return started, doneHandle(completed, nil), nil
 	})
 
-	got, err := ops.Create(ctx, &mockRunner, executor.OperationParameters{}, noopProposer{}, command.Stdio{})
+	got, err := ops.Create(ctx, &mockRunner, executor.OperationParameters{}, noopProposer{}, command.Files{})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -80,12 +81,12 @@ func TestCreate_runError(t *testing.T) {
 		string,
 		executor.OperationParameters,
 		backend.Proposer,
-		command.Stdio,
+		command.Files,
 	) (*secrets.Instance, backend.Handle, error) {
 		return nil, nil, runErr
 	})
 
-	_, err := ops.Create(ctx, &mockRunner, executor.OperationParameters{}, noopProposer{}, command.Stdio{})
+	_, err := ops.Create(ctx, &mockRunner, executor.OperationParameters{}, noopProposer{}, command.Files{})
 	if !errors.Is(err, runErr) {
 		t.Fatalf("Create err = %v, want %v", err, runErr)
 	}
@@ -104,7 +105,7 @@ func TestActivate_passesInstanceId(t *testing.T) {
 		gotInstanceId string,
 		_ executor.OperationParameters,
 		_ backend.Proposer,
-		_ command.Stdio,
+		_ command.Files,
 	) (*secrets.Instance, backend.Handle, error) {
 		if name != secrets.Activate {
 			t.Fatalf("Run name = %q, want activate", name)
@@ -115,7 +116,7 @@ func TestActivate_passesInstanceId(t *testing.T) {
 		return &secrets.Instance{Id: instanceId}, doneHandle(&secrets.Instance{Id: instanceId}, nil), nil
 	})
 
-	_, err := ops.Activate(ctx, &mockRunner, instanceId, executor.OperationParameters{}, noopProposer{}, command.Stdio{})
+	_, err := ops.Activate(ctx, &mockRunner, instanceId, executor.OperationParameters{}, noopProposer{}, command.Files{})
 	if err != nil {
 		t.Fatalf("Activate: %v", err)
 	}
@@ -145,12 +146,12 @@ func TestRun_cancelOnWaitContextDone(t *testing.T) {
 		string,
 		executor.OperationParameters,
 		backend.Proposer,
-		command.Stdio,
+		command.Files,
 	) (*secrets.Instance, backend.Handle, error) {
 		return &secrets.Instance{Id: "inst-1"}, handle, nil
 	})
 
-	_, err := ops.Create(ctx, &mockRunner, executor.OperationParameters{}, noopProposer{}, command.Stdio{})
+	_, err := ops.Create(ctx, &mockRunner, executor.OperationParameters{}, noopProposer{}, command.Files{})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Create err = %v, want context.Canceled", err)
 	}

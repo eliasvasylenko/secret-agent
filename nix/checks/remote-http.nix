@@ -116,8 +116,9 @@ pkgs.testers.runNixOSTest {
       output = client.succeed("secret-agent -a https://server create remote </dev/null")
       assert "remote-hello" in output, f"stdout missing from: {output}"
       created = instance_json(output)
-      assert created["status"]["startedBy"] == "john@caddy", f"startedBy: {created}"
-      assert created["status"]["name"] == "create", f"op: {created}"
+      assert created["operation"]["startedBy"] == "john@caddy", f"startedBy: {created}"
+      assert created["operation"]["name"] == "create", f"op: {created}"
+      assert created["state"]["name"] == "create", f"state: {created}"
       instance_id = created["id"]
 
     with subtest("activate over HTTPS"):
@@ -125,12 +126,13 @@ pkgs.testers.runNixOSTest {
         f"secret-agent -a https://server activate remote {instance_id} </dev/null"
       )
       activated = instance_json(output)
-      assert activated["status"]["startedBy"] == "john@caddy", f"startedBy: {activated}"
-      assert activated["status"]["name"] == "activate", f"op: {activated}"
+      assert activated["operation"]["startedBy"] == "john@caddy", f"startedBy: {activated}"
+      assert activated["operation"]["name"] == "activate", f"op: {activated}"
+      assert activated["state"]["name"] == "activate", f"state: {activated}"
 
     with subtest("local unix is still the socket credential"):
       output = server.succeed("secret-agent create remote </dev/null")
       local = instance_json(output)
-      assert local["status"]["startedBy"] == "root/0@system", f"startedBy: {local}"
+      assert local["operation"]["startedBy"] == "root/0@system", f"startedBy: {local}"
   '';
 }

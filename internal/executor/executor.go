@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"time"
 
 	"github.com/eliasvasylenko/secret-agent/internal/command"
 	"github.com/eliasvasylenko/secret-agent/internal/secrets"
@@ -13,11 +14,13 @@ var processCommand = (*command.Command).Process
 
 // OperationParameters are the common parameters for an operation on a secret instance
 type OperationParameters struct {
-	Env                     command.Environment `json:"env"`
-	Forced                  bool                `json:"forced"`
-	Reason                  string              `json:"reason"`
-	StartedBy               string              `json:"startedBy"`
-	ExpectedOperationNumber *int                `json:"expectedOperationNumber,omitempty"`
+	Env              command.Environment `json:"env"`
+	Forced           bool                `json:"forced"`
+	Reason           string              `json:"reason"`
+	CreatedBy        string              `json:"createdBy,omitempty"`
+	CreatedAt        time.Time           `json:"createdAt,omitzero"`
+	StartedBy        string              `json:"startedBy"`
+	ExpectedRevision *int                `json:"expectedRevision,omitempty"`
 }
 
 // Validate enforces basic constraints
@@ -30,7 +33,7 @@ func (p OperationParameters) Validate(maxReasonLength int) error {
 }
 
 // Execute runs the command for the given operation on the secret.
-func Execute(ctx context.Context, secret *secrets.Secret, operation secrets.OperationName, stdio command.Stdio, parameters OperationParameters, instanceId string) error {
+func Execute(ctx context.Context, secret *secrets.Secret, operation secrets.OperationName, files command.Files, parameters OperationParameters, instanceId string) error {
 	parameters.Env = secret.Environment.ExpandAndMergeWith(command.Environment{
 		"INSTANCE":   instanceId,
 		"SECRET":     secret.Id,
@@ -41,7 +44,7 @@ func Execute(ctx context.Context, secret *secrets.Secret, operation secrets.Oper
 
 	cmd := secret.Command(operation)
 	if cmd != nil {
-		return processCommand(cmd, ctx, stdio, parameters.Env)
+		return processCommand(cmd, ctx, files, parameters.Env)
 	}
 	return nil
 }

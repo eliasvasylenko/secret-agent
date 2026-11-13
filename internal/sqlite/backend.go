@@ -47,10 +47,6 @@ func (c catalog) Instances() backend.Instances {
 	return instancesCatalog{repo: c.repo}
 }
 
-func (c catalog) Operations() backend.Operations {
-	return operationsCatalog{repo: c.repo}
-}
-
 type secretsCatalog struct {
 	repo *Repository
 }
@@ -79,14 +75,6 @@ func (i instancesCatalog) GetActive(ctx context.Context, secretId string) (*secr
 	return i.repo.getActiveInstance(ctx, secretId)
 }
 
-type operationsCatalog struct {
-	repo *Repository
-}
-
-func (o operationsCatalog) List(ctx context.Context, secretId, instanceId *string, from, to int) ([]*secrets.Operation, error) {
-	return o.repo.listOperations(ctx, secretId, instanceId, from, to)
-}
-
 type runner struct {
 	state *secretState
 }
@@ -97,10 +85,8 @@ func (r *runner) Run(
 	instanceId string,
 	params executor.OperationParameters,
 	proposer backend.Proposer,
-	stdio command.Stdio,
+	stdio command.Files,
 ) (*secrets.Instance, backend.Handle, error) {
-	_ = proposer
-
 	var (
 		instance  *secrets.Instance
 		operation secrets.Operation
@@ -108,14 +94,14 @@ func (r *runner) Run(
 	)
 	switch name {
 	case secrets.Create:
-		instance, operation, err = r.state.beginCreate(ctx, params)
+		instance, operation, err = r.state.startCreateOperation(ctx, params)
 	default:
-		instance, operation, err = r.state.beginUpdate(ctx, instanceId, name, params)
+		instance, operation, err = r.state.startUpdateOperation(ctx, instanceId, name, params)
 	}
 	if err != nil {
 		return nil, nil, err
 	}
-	return instance, r.state.launch(instance, operation, params, stdio), nil
+	return instance, r.state.launch(instance, operation, params, proposer, stdio), nil
 }
 
 func (h *opHandle) Wait(ctx context.Context) (*secrets.Instance, error) {
@@ -141,6 +127,5 @@ var _ backend.Backend = (*Backend)(nil)
 var _ backend.Catalog = (catalog{})
 var _ backend.Secrets = (secretsCatalog{})
 var _ backend.Instances = (instancesCatalog{})
-var _ backend.Operations = (operationsCatalog{})
 var _ backend.Runner = (*runner)(nil)
 var _ backend.Handle = (*opHandle)(nil)

@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"strings"
+	"os"
 	"testing"
 
 	"github.com/eliasvasylenko/secret-agent/internal/command"
@@ -17,23 +17,39 @@ type processCommandCall struct {
 	Env    command.Environment
 }
 
-func stdinString(r io.Reader) string {
-	if r == nil {
+func stdinString(files command.Files) string {
+	if len(files.Fds) == 0 || files.Fds[0] == nil {
 		return ""
 	}
-	b, err := io.ReadAll(r)
+	b, err := io.ReadAll(files.Fds[0])
 	if err != nil {
 		return ""
 	}
 	return string(b)
 }
 
+func stdinFile(t *testing.T, s string) *os.File {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = r.Close() })
+	if _, err := w.WriteString(s); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
 func TestExecute(t *testing.T) {
 	ctx := context.Background()
 	var call processCommandCall
 	saved := processCommand
-	processCommand = func(cmd *command.Command, _ context.Context, stdio command.Stdio, env command.Environment) error {
-		call = processCommandCall{Script: cmd.Script, Stdin: stdinString(stdio.Stdin), Env: env}
+	processCommand = func(cmd *command.Command, _ context.Context, stdio command.Files, env command.Environment) error {
+		call = processCommandCall{Script: cmd.Script, Stdin: stdinString(stdio), Env: env}
 		return nil
 	}
 	defer func() { processCommand = saved }()
@@ -42,7 +58,7 @@ func TestExecute(t *testing.T) {
 		Id:     "test-secret",
 		Create: command.New("echo -n", nil, ""),
 	}
-	stdio := command.Stdio{Stdout: io.Discard, Stderr: io.Discard}
+	stdio := command.Files{Tty: command.NoTty}
 	err := Execute(ctx, s, secrets.Create, stdio, OperationParameters{}, "inst-1")
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
@@ -65,8 +81,8 @@ func TestExecute_withEnv(t *testing.T) {
 	ctx := context.Background()
 	var call processCommandCall
 	saved := processCommand
-	processCommand = func(cmd *command.Command, _ context.Context, stdio command.Stdio, env command.Environment) error {
-		call = processCommandCall{Script: cmd.Script, Stdin: stdinString(stdio.Stdin), Env: env}
+	processCommand = func(cmd *command.Command, _ context.Context, stdio command.Files, env command.Environment) error {
+		call = processCommandCall{Script: cmd.Script, Stdin: stdinString(stdio), Env: env}
 		return nil
 	}
 	defer func() { processCommand = saved }()
@@ -79,7 +95,7 @@ func TestExecute_withEnv(t *testing.T) {
 		Reason:    "test",
 		StartedBy: "tests",
 	}
-	stdio := command.Stdio{Stdin: strings.NewReader("stdin"), Stdout: io.Discard, Stderr: io.Discard}
+	stdio := command.Files{Fds: []*os.File{stdinFile(t, "stdin")}, Tty: command.NoTty}
 	err := Execute(ctx, s, secrets.Create, stdio, params, "inst-1")
 	if err != nil {
 		t.Fatalf("Execute with env: %v", err)
@@ -102,14 +118,14 @@ func TestExecute_noCommandForOp(t *testing.T) {
 	ctx := context.Background()
 	var called bool
 	saved := processCommand
-	processCommand = func(*command.Command, context.Context, command.Stdio, command.Environment) error {
+	processCommand = func(*command.Command, context.Context, command.Files, command.Environment) error {
 		called = true
 		return nil
 	}
 	defer func() { processCommand = saved }()
 
 	s := &secrets.Secret{Id: "no-cmds"}
-	stdio := command.Stdio{Stdout: io.Discard, Stderr: io.Discard}
+	stdio := command.Files{Tty: command.NoTty}
 	err := Execute(ctx, s, secrets.Create, stdio, OperationParameters{}, "id")
 	if err != nil {
 		t.Fatalf("Execute when no command for op should succeed (no-op): %v", err)
@@ -123,13 +139,13 @@ func TestExecute_returnsCommandError(t *testing.T) {
 	ctx := context.Background()
 	wantErr := fmt.Errorf("command failed")
 	saved := processCommand
-	processCommand = func(*command.Command, context.Context, command.Stdio, command.Environment) error {
+	processCommand = func(*command.Command, context.Context, command.Files, command.Environment) error {
 		return wantErr
 	}
 	defer func() { processCommand = saved }()
 
 	s := &secrets.Secret{Id: "x", Create: command.New("script", nil, "")}
-	stdio := command.Stdio{Stdout: io.Discard, Stderr: io.Discard}
+	stdio := command.Files{Tty: command.NoTty}
 	err := Execute(ctx, s, secrets.Create, stdio, OperationParameters{}, "id")
 	if err != wantErr {
 		t.Errorf("Execute err = %v, want %v", err, wantErr)
@@ -139,7 +155,7 @@ func TestExecute_returnsCommandError(t *testing.T) {
 func TestExecute_noCommand(t *testing.T) {
 	ctx := context.Background()
 	s := &secrets.Secret{Id: "leaf"}
-	stdio := command.Stdio{Stdin: strings.NewReader("input"), Stdout: io.Discard, Stderr: io.Discard}
+	stdio := command.Files{Fds: []*os.File{stdinFile(t, "input")}, Tty: command.NoTty}
 	err := Execute(ctx, s, secrets.Create, stdio, OperationParameters{}, "id")
 	if err != nil {
 		t.Errorf("Execute with no command for op should succeed (no-op): %v", err)

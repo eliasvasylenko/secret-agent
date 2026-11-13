@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -28,6 +29,57 @@ var cmpSecretOpts = cmp.Options{
 var cmpInstanceOpts = cmp.Options{
 	cmpopts.IgnoreUnexported(secrets.Secret{}, command.Command{}),
 	cmpopts.IgnoreUnexported(time.Time{}),
+}
+
+func stdinFile(t *testing.T, s string) *os.File {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = r.Close() })
+	if _, err := w.WriteString(s); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+func devNullFile(t *testing.T) *os.File {
+	t.Helper()
+	f, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = f.Close() })
+	return f
+}
+
+func discardFile(t *testing.T) *os.File {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = r.Close()
+		_ = w.Close()
+	})
+	return w
+}
+
+func stdioFiles(t *testing.T) command.Files {
+	t.Helper()
+	return command.Files{
+		Fds: []*os.File{stdinFile(t, ""), discardFile(t), discardFile(t)},
+		Tty: command.NoTty,
+	}
+}
+
+func attachKey(group fileGroup) string {
+	return fmt.Sprintf("%v/%s", group.fds, group.mode)
 }
 
 type stubClient struct {
@@ -101,18 +153,22 @@ func TestBuildRequest(t *testing.T) {
 		}
 	})
 	t.Run("with body", func(t *testing.T) {
-		body := server.SecretOperationRequest{
+		body := server.StartOperationRequest{
 			SecretId: "s1",
+			Name:     secrets.Create,
 			OperationRequest: server.OperationRequest{
 				Reason: "create",
 			},
 		}
-		req, err := (&SecretClient{}).buildRequest(ctx, http.MethodPost, "/instances", body)
+		req, err := (&SecretClient{}).buildRequest(ctx, http.MethodPost, "/operations", body)
 		if err != nil {
 			t.Fatal(err)
 		}
+		if req.Header.Get("Content-Type") != "application/json" {
+			t.Errorf("content-type = %s", req.Header.Get("Content-Type"))
+		}
 		got := requestString(req)
-		want := "POST /instances\n" + `{"secretId":"s1","env":null,"forced":false,"reason":"create"}` + "\n"
+		want := "POST /operations\n" + `{"secretId":"s1","name":"create","env":null,"forced":false,"reason":"create"}` + "\n"
 		if got != want {
 			t.Errorf("request:\n%s", cmp.Diff(want, got))
 		}
@@ -242,7 +298,7 @@ func TestCatalog_InstancesGet(t *testing.T) {
 	if gotReq := requestString(stub.lastReq.Load()); gotReq != "GET /instances/i1\n" {
 		t.Errorf("request:\n%s", cmp.Diff("GET /instances/i1\n", gotReq))
 	}
-	want := &secrets.Instance{Id: "i1", Secret: secrets.Secret{Id: "s1", Version: 1}, Status: secrets.Status{}}
+	want := &secrets.Instance{Id: "i1", Secret: secrets.Secret{Id: "s1", Version: 1}}
 	if !cmp.Equal(got, want, cmpInstanceOpts) {
 		t.Errorf("Get response:\n%s", cmp.Diff(want, got, cmpInstanceOpts))
 	}
@@ -260,41 +316,9 @@ func TestCatalog_GetActive(t *testing.T) {
 	if gotReq := requestString(stub.lastReq.Load()); gotReq != wantReq {
 		t.Errorf("request:\n%s", cmp.Diff(wantReq, gotReq))
 	}
-	want := &secrets.Instance{Id: "active-id", Secret: secrets.Secret{Id: "s1", Version: 1}, Status: secrets.Status{}}
+	want := &secrets.Instance{Id: "active-id", Secret: secrets.Secret{Id: "s1", Version: 1}}
 	if !cmp.Equal(got, want, cmpInstanceOpts) {
 		t.Errorf("GetActive response:\n%s", cmp.Diff(want, got, cmpInstanceOpts))
-	}
-}
-
-func TestCatalog_OperationsList(t *testing.T) {
-	ctx := context.Background()
-	stub := &stubClient{status: 200, body: `[]`}
-	c := &SecretClient{client: stub}
-	got, err := c.Catalog().Operations().List(ctx, ptr("sid"), ptr("i1"), 5, 15)
-	if err != nil {
-		t.Fatalf("List: %v", err)
-	}
-	wantReq := "GET /operations?from=5&instanceId=i1&secretId=sid&to=15\n"
-	if gotReq := requestString(stub.lastReq.Load()); gotReq != wantReq {
-		t.Errorf("request:\n%s", cmp.Diff(wantReq, gotReq))
-	}
-	want := []*secrets.Operation{}
-	if !cmp.Equal(got, want, cmpInstanceOpts) {
-		t.Errorf("List response:\n%s", cmp.Diff(want, got, cmpInstanceOpts))
-	}
-}
-
-func TestCatalog_OperationsList_unfiltered(t *testing.T) {
-	ctx := context.Background()
-	stub := &stubClient{status: 200, body: `[]`}
-	c := &SecretClient{client: stub}
-	_, err := c.Catalog().Operations().List(ctx, nil, nil, 0, 10)
-	if err != nil {
-		t.Fatalf("List: %v", err)
-	}
-	wantReq := "GET /operations?from=0&to=10\n"
-	if gotReq := requestString(stub.lastReq.Load()); gotReq != wantReq {
-		t.Errorf("request:\n%s", cmp.Diff(wantReq, gotReq))
 	}
 }
 
@@ -312,9 +336,18 @@ func TestCatalog_InstancesList_unfiltered(t *testing.T) {
 	}
 }
 
-func holdAttach(t *testing.T) func(context.Context, string) (io.ReadWriteCloser, error) {
+func stubAttach(t *testing.T, fn func(context.Context, string, fileGroup) (io.ReadWriteCloser, error)) {
 	t.Helper()
-	return func(_ context.Context, _ string) (io.ReadWriteCloser, error) {
+	saved := openAttach
+	openAttach = func(_ *SecretClient, ctx context.Context, operationId string, group fileGroup) (io.ReadWriteCloser, error) {
+		return fn(ctx, operationId, group)
+	}
+	t.Cleanup(func() { openAttach = saved })
+}
+
+func holdAttach(t *testing.T) func(context.Context, string, fileGroup) (io.ReadWriteCloser, error) {
+	t.Helper()
+	return func(_ context.Context, _ string, _ fileGroup) (io.ReadWriteCloser, error) {
 		a, b := net.Pipe()
 		t.Cleanup(func() {
 			_ = a.Close()
@@ -324,34 +357,41 @@ func holdAttach(t *testing.T) func(context.Context, string) (io.ReadWriteCloser,
 	}
 }
 
-func TestRunner_Create_attachesBeforePOST(t *testing.T) {
+func TestRunner_Create_attachesBeforeStart(t *testing.T) {
 	ctx := context.Background()
 	var attached atomic.Int32
 	rec := &recordingClient{handler: func(req *http.Request) (*http.Response, error) {
-		if req.Method == http.MethodPost {
-			if attached.Load() != 3 {
-				t.Errorf("POST with %d attaches, want 3", attached.Load())
+		if isCreatePost(req) {
+			if attached.Load() != 0 {
+				t.Errorf("create with %d attaches, want 0", attached.Load())
 			}
-			if req.URL.Path != "/instances" {
+			return createdResponse(), nil
+		}
+		if isStartPost(req) {
+			if attached.Load() != 3 {
+				t.Errorf("start with %d attaches, want 3", attached.Load())
+			}
+			if req.URL.Path != "/operations/op1/start" {
 				t.Errorf("path = %s", req.URL.Path)
 			}
 		}
 		return jsonResponse(200, `{"id":"new-id","secret":{"id":"s1","version":1},"status":{}}`), nil
 	}}
-	c := &SecretClient{client: rec, attach: func(ctx context.Context, path string) (io.ReadWriteCloser, error) {
-		if !strings.Contains(path, "/secrets/sid/attach/") {
-			t.Errorf("attach path = %s", path)
+	stubAttach(t, func(ctx context.Context, operationId string, group fileGroup) (io.ReadWriteCloser, error) {
+		if operationId != "op1" {
+			t.Errorf("attach operationId = %s", operationId)
 		}
 		attached.Add(1)
-		return holdAttach(t)(ctx, path)
-	}}
+		return holdAttach(t)(ctx, operationId, group)
+	})
+	c := &SecretClient{client: rec}
 	params := executor.OperationParameters{Reason: "test", StartedBy: "user"}
-	started, handle, err := c.Runner("sid").Run(ctx, secrets.Create, "", params, nil, command.Stdio{})
+	started, handle, err := c.Runner("sid").Run(ctx, secrets.Create, "", params, nil, stdioFiles(t))
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	t.Cleanup(func() { _ = handle.Cancel(context.Background()) })
-	want := &secrets.Instance{Id: "new-id", Secret: secrets.Secret{Id: "s1", Version: 1}, Status: secrets.Status{}}
+	want := &secrets.Instance{Id: "new-id", Secret: secrets.Secret{Id: "s1", Version: 1}}
 	if !cmp.Equal(started, want, cmpInstanceOpts) {
 		t.Errorf("Run returned instance:\n%s", cmp.Diff(want, started, cmpInstanceOpts))
 	}
@@ -359,7 +399,7 @@ func TestRunner_Create_attachesBeforePOST(t *testing.T) {
 	if len(gots) < 1 {
 		t.Fatal("no requests")
 	}
-	wantReq := "POST /instances\n" + `{"secretId":"sid","env":null,"forced":false,"reason":"test"}` + "\n"
+	wantReq := "POST /operations\n" + `{"secretId":"sid","name":"create","env":null,"forced":false,"reason":"test"}` + "\n"
 	if gots[0] != wantReq {
 		t.Errorf("request:\n%s", cmp.Diff(wantReq, gots[0]))
 	}
@@ -370,11 +410,15 @@ func TestRunner_Create_attachesBeforePOST(t *testing.T) {
 
 func TestRunner_Create_POSTBodyHasNoInput(t *testing.T) {
 	ctx := context.Background()
-	rec := &recordingClient{handler: func(*http.Request) (*http.Response, error) {
+	rec := &recordingClient{handler: func(req *http.Request) (*http.Response, error) {
+		if isCreatePost(req) {
+			return createdResponse(), nil
+		}
 		return jsonResponse(200, `{"id":"new-id","secret":{"id":"s1","version":1},"status":{}}`), nil
 	}}
-	c := &SecretClient{client: rec, attach: holdAttach(t)}
-	_, handle, err := c.Runner("sid").Run(ctx, secrets.Create, "", executor.OperationParameters{Reason: "test"}, nil, command.Stdio{})
+	stubAttach(t, holdAttach(t))
+	c := &SecretClient{client: rec}
+	_, handle, err := c.Runner("sid").Run(ctx, secrets.Create, "", executor.OperationParameters{Reason: "test"}, nil, command.Files{})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -386,17 +430,21 @@ func TestRunner_Create_POSTBodyHasNoInput(t *testing.T) {
 
 func TestRunner_NamedOperation(t *testing.T) {
 	ctx := context.Background()
-	rec := &recordingClient{handler: func(*http.Request) (*http.Response, error) {
+	rec := &recordingClient{handler: func(req *http.Request) (*http.Response, error) {
+		if isCreatePost(req) {
+			return createdResponse(), nil
+		}
 		return jsonResponse(200, `{"id":"i1","secret":{"id":"s1","version":1},"status":{}}`), nil
 	}}
-	c := &SecretClient{client: rec, attach: holdAttach(t)}
+	stubAttach(t, holdAttach(t))
+	c := &SecretClient{client: rec}
 	params := executor.OperationParameters{Reason: "activate-reason", StartedBy: "user"}
-	_, handle, err := c.Runner("sid").Run(ctx, secrets.Activate, "i1", params, nil, command.Stdio{})
+	_, handle, err := c.Runner("sid").Run(ctx, secrets.Activate, "i1", params, nil, command.Files{})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 	t.Cleanup(func() { _ = handle.Cancel(context.Background()) })
-	wantReq := "POST /operations\n" + `{"instanceId":"i1","name":"activate","env":null,"forced":false,"reason":"activate-reason"}` + "\n"
+	wantReq := "POST /operations\n" + `{"secretId":"sid","instanceId":"i1","name":"activate","env":null,"forced":false,"reason":"activate-reason"}` + "\n"
 	if rec.got()[0] != wantReq {
 		t.Errorf("request:\n%s", cmp.Diff(wantReq, rec.got()[0]))
 	}
@@ -408,27 +456,33 @@ func TestRunner_Wait_getsInstanceAfterPumps(t *testing.T) {
 	var peersMu sync.Mutex
 	rec := &recordingClient{handler: func(req *http.Request) (*http.Response, error) {
 		switch {
-		case req.Method == http.MethodPost:
+		case isCreatePost(req):
+			return createdResponse(), nil
+		case isStartPost(req):
 			return jsonResponse(200, `{"id":"i1","secret":{"id":"s1","version":1},"status":{}}`), nil
-		case strings.HasSuffix(req.URL.Path, "/instances/i1"):
-			return jsonResponse(200, `{"id":"i1","secret":{"id":"s1","version":1},"status":{"completedAt":"2024-01-01T00:00:00Z"}}`), nil
+		case req.Method == http.MethodGet && req.URL.Path == "/operations/op1":
+			if req.URL.Query().Get("untilDone") != operationWaitUntilDoneHold.String() {
+				return jsonResponse(500, `{"error":{"status":500,"message":"untilDone required"}}`), nil
+			}
+			return operationOutcome(`{"id":"i1","secret":{"id":"s1","version":1},"operation":{"completedAt":"2024-01-01T00:00:00Z"}}`), nil
 		default:
 			return jsonResponse(500, `{"error":{"status":500,"message":"`+req.URL.Path+`"}}`), nil
 		}
 	}}
-	c := &SecretClient{client: rec, attach: func(_ context.Context, path string) (io.ReadWriteCloser, error) {
+	stubAttach(t, func(_ context.Context, _ string, group fileGroup) (io.ReadWriteCloser, error) {
 		a, b := net.Pipe()
 		peersMu.Lock()
-		peers[path] = b
+		peers[attachKey(group)] = b
 		peersMu.Unlock()
 		t.Cleanup(func() {
 			_ = a.Close()
 			_ = b.Close()
 		})
 		return a, nil
-	}}
+	})
+	c := &SecretClient{client: rec}
 
-	_, handle, err := c.Runner("sid").Run(ctx, secrets.Create, "", executor.OperationParameters{Reason: "r"}, nil, command.Stdio{})
+	_, handle, err := c.Runner("sid").Run(ctx, secrets.Create, "", executor.OperationParameters{Reason: "r"}, nil, stdioFiles(t))
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -450,48 +504,57 @@ func TestRunner_Wait_getsInstanceAfterPumps(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Wait: %v", err)
 	}
-	if final.Id != "i1" || final.Status.CompletedAt == nil {
+	if final.Id != "i1" || final.Operation.CompletedAt == nil {
 		t.Fatalf("final = %+v", final)
 	}
 }
 
 func TestRunner_Wait_successWithoutCancel(t *testing.T) {
 	ctx := context.Background()
-	var stdoutBuf bytes.Buffer
+	stdoutR, stdoutW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = stdoutR.Close() })
 	attachPeers := map[string]net.Conn{}
 
 	rec := &recordingClient{handler: func(req *http.Request) (*http.Response, error) {
 		switch {
-		case req.Method == http.MethodPost:
+		case isCreatePost(req):
+			return createdResponse(), nil
+		case isStartPost(req):
 			return jsonResponse(200, `{"id":"i1","secret":{"id":"s1","version":1},"status":{}}`), nil
-		case req.URL.Path == "/instances/i1":
-			return jsonResponse(200, `{"id":"i1","secret":{"id":"s1","version":1},"status":{"completedAt":"2024-01-01T00:00:00Z"}}`), nil
+		case req.Method == http.MethodGet && req.URL.Path == "/operations/op1":
+			if req.URL.Query().Get("untilDone") != operationWaitUntilDoneHold.String() {
+				return jsonResponse(500, `{"error":{"status":500,"message":"untilDone required"}}`), nil
+			}
+			return operationOutcome(`{"id":"i1","secret":{"id":"s1","version":1},"operation":{"completedAt":"2024-01-01T00:00:00Z"}}`), nil
 		default:
 			return jsonResponse(500, `{"error":{"status":500,"message":"unexpected"}}`), fmt.Errorf("unexpected %s %s", req.Method, req.URL.Path)
 		}
 	}}
-	c := &SecretClient{client: rec, attach: func(_ context.Context, path string) (io.ReadWriteCloser, error) {
+	stubAttach(t, func(_ context.Context, _ string, group fileGroup) (io.ReadWriteCloser, error) {
 		client, server := net.Pipe()
-		attachPeers[path] = server
+		attachPeers[attachKey(group)] = server
 		t.Cleanup(func() {
 			_ = client.Close()
 			_ = server.Close()
 		})
 		return client, nil
-	}}
+	})
+	c := &SecretClient{client: rec}
 
-	_, handle, err := c.Runner("sid").Run(ctx, secrets.Create, "", executor.OperationParameters{Reason: "r"}, nil, command.Stdio{
-		Stdin:  strings.NewReader("hello-in"),
-		Stdout: &stdoutBuf,
-		Stderr: io.Discard,
+	_, handle, err := c.Runner("sid").Run(ctx, secrets.Create, "", executor.OperationParameters{Reason: "r"}, nil, command.Files{
+		Fds: []*os.File{stdinFile(t, "hello-in"), stdoutW, devNullFile(t)},
+		Tty: command.NoTty,
 	})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 
-	stdinPeer := attachPeers["/secrets/sid/attach/stdin"]
-	stdoutPeer := attachPeers["/secrets/sid/attach/stdout"]
-	stderrPeer := attachPeers["/secrets/sid/attach/stderr"]
+	stdinPeer := attachPeers[attachKey(fileGroup{fds: []int{0}, mode: command.Read})]
+	stdoutPeer := attachPeers[attachKey(fileGroup{fds: []int{1}, mode: command.Write})]
+	stderrPeer := attachPeers[attachKey(fileGroup{fds: []int{2}, mode: command.Write})]
 	if stdinPeer == nil || stdoutPeer == nil || stderrPeer == nil {
 		t.Fatal("missing attach peer")
 	}
@@ -506,17 +569,27 @@ func TestRunner_Wait_successWithoutCancel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Wait: %v", err)
 	}
-	if final.Status.CompletedAt == nil {
+	if final.Operation.CompletedAt == nil {
 		t.Fatalf("final = %+v, want completedAt", final)
 	}
-	if stdoutBuf.String() != "hello-out" {
-		t.Fatalf("stdout = %q", stdoutBuf.String())
+	if err := stdoutW.Close(); err != nil {
+		t.Fatal(err)
+	}
+	stdout, err := io.ReadAll(stdoutR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(stdout) != "hello-out" {
+		t.Fatalf("stdout = %q", stdout)
 	}
 }
 
 func TestRunner_Wait_finishesIfStdinRemainsOpen(t *testing.T) {
 	ctx := context.Background()
-	stdinR, stdinW := io.Pipe()
+	stdinR, stdinW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() {
 		_ = stdinR.Close()
 		_ = stdinW.Close()
@@ -525,36 +598,41 @@ func TestRunner_Wait_finishesIfStdinRemainsOpen(t *testing.T) {
 
 	rec := &recordingClient{handler: func(req *http.Request) (*http.Response, error) {
 		switch {
-		case req.Method == http.MethodPost:
+		case isCreatePost(req):
+			return createdResponse(), nil
+		case isStartPost(req):
 			return jsonResponse(200, `{"id":"i1","secret":{"id":"s1","version":1},"status":{}}`), nil
-		case req.URL.Path == "/instances/i1":
-			return jsonResponse(200, `{"id":"i1","secret":{"id":"s1","version":1},"status":{"completedAt":"2024-01-01T00:00:00Z"}}`), nil
+		case req.Method == http.MethodGet && req.URL.Path == "/operations/op1":
+			if req.URL.Query().Get("untilDone") != operationWaitUntilDoneHold.String() {
+				return jsonResponse(500, `{"error":{"status":500,"message":"untilDone required"}}`), nil
+			}
+			return operationOutcome(`{"id":"i1","secret":{"id":"s1","version":1},"operation":{"completedAt":"2024-01-01T00:00:00Z"}}`), nil
 		default:
 			return jsonResponse(500, `{"error":{"status":500,"message":"unexpected"}}`), fmt.Errorf("unexpected %s %s", req.Method, req.URL.Path)
 		}
 	}}
-	c := &SecretClient{client: rec, attach: func(_ context.Context, path string) (io.ReadWriteCloser, error) {
+	stubAttach(t, func(_ context.Context, _ string, group fileGroup) (io.ReadWriteCloser, error) {
 		client, server := net.Pipe()
-		attachPeers[path] = server
+		attachPeers[attachKey(group)] = server
 		t.Cleanup(func() {
 			_ = client.Close()
 			_ = server.Close()
 		})
 		return client, nil
-	}}
+	})
+	c := &SecretClient{client: rec}
 
-	_, handle, err := c.Runner("sid").Run(ctx, secrets.Create, "", executor.OperationParameters{Reason: "r"}, nil, command.Stdio{
-		Stdin:  stdinR,
-		Stdout: io.Discard,
-		Stderr: io.Discard,
+	_, handle, err := c.Runner("sid").Run(ctx, secrets.Create, "", executor.OperationParameters{Reason: "r"}, nil, command.Files{
+		Fds: []*os.File{stdinR, discardFile(t), discardFile(t)},
+		Tty: command.NoTty,
 	})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 
-	stdoutPeer := attachPeers["/secrets/sid/attach/stdout"]
-	stderrPeer := attachPeers["/secrets/sid/attach/stderr"]
-	if stdoutPeer == nil || stderrPeer == nil || attachPeers["/secrets/sid/attach/stdin"] == nil {
+	stdoutPeer := attachPeers[attachKey(fileGroup{fds: []int{1}, mode: command.Write})]
+	stderrPeer := attachPeers[attachKey(fileGroup{fds: []int{2}, mode: command.Write})]
+	if stdoutPeer == nil || stderrPeer == nil || attachPeers[attachKey(fileGroup{fds: []int{0}, mode: command.Read})] == nil {
 		t.Fatal("missing attach peer")
 	}
 	_ = stdoutPeer.Close()
@@ -566,41 +644,44 @@ func TestRunner_Wait_finishesIfStdinRemainsOpen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Wait: %v", err)
 	}
-	if final.Status.CompletedAt == nil {
+	if final.Operation.CompletedAt == nil {
 		t.Fatalf("final = %+v", final)
 	}
 }
 
-func TestRunner_closesAttachOnPOSTFailure(t *testing.T) {
+func TestRunner_closesAttachOnStartFailure(t *testing.T) {
 	ctx := context.Background()
 	stdinClient, stdinServer := net.Pipe()
 	t.Cleanup(func() { _ = stdinServer.Close() })
 
 	attachN := 0
+	stubAttach(t, func(_ context.Context, _ string, group fileGroup) (io.ReadWriteCloser, error) {
+		attachN++
+		if len(group.fds) > 0 && group.fds[0] == 0 {
+			return stdinClient, nil
+		}
+		a, b := net.Pipe()
+		t.Cleanup(func() {
+			_ = a.Close()
+			_ = b.Close()
+		})
+		return a, nil
+	})
 	c := &SecretClient{
-		client: &recordingClient{handler: func(*http.Request) (*http.Response, error) {
+		client: &recordingClient{handler: func(req *http.Request) (*http.Response, error) {
+			if isCreatePost(req) {
+				return createdResponse(), nil
+			}
 			return jsonResponse(400, `{"error":{"status":400,"message":"bad"}}`), nil
 		}},
-		attach: func(_ context.Context, path string) (io.ReadWriteCloser, error) {
-			attachN++
-			if strings.HasSuffix(path, "/stdin") {
-				return stdinClient, nil
-			}
-			a, b := net.Pipe()
-			t.Cleanup(func() {
-				_ = a.Close()
-				_ = b.Close()
-			})
-			return a, nil
-		},
 	}
 
-	_, _, err := c.Runner("sid").Run(ctx, secrets.Create, "", executor.OperationParameters{Reason: "r"}, nil, command.Stdio{})
+	_, _, err := c.Runner("sid").Run(ctx, secrets.Create, "", executor.OperationParameters{Reason: "r"}, nil, stdioFiles(t))
 	if err == nil {
-		t.Fatal("want POST error")
+		t.Fatal("want start POST error")
 	}
 	if attachN != 3 {
-		t.Fatalf("attaches = %d, want 3 before failed POST", attachN)
+		t.Fatalf("attaches = %d, want 3 before failed start", attachN)
 	}
 
 	buf := make([]byte, 1)
@@ -613,13 +694,20 @@ func TestRunner_closesAttachOnPOSTFailure(t *testing.T) {
 func TestRunner_Wait_notCompleted(t *testing.T) {
 	ctx := context.Background()
 	rec := &recordingClient{handler: func(req *http.Request) (*http.Response, error) {
-		if req.Method == http.MethodPost {
+		switch {
+		case isCreatePost(req):
+			return createdResponse(), nil
+		case isStartPost(req):
 			return jsonResponse(200, `{"id":"i1","secret":{"id":"s1","version":1},"status":{}}`), nil
+		case req.Method == http.MethodDelete && req.URL.Path == "/operations/op1":
+			return &http.Response{StatusCode: http.StatusNoContent, Body: io.NopCloser(bytes.NewReader(nil))}, nil
+		default:
+			return operationOutcome(`{"id":"i1","secret":{"id":"s1","version":1},"operation":{"startedAt":"2024-01-01T00:00:00Z"}}`), nil
 		}
-		return jsonResponse(200, `{"id":"i1","secret":{"id":"s1","version":1},"status":{"startedAt":"2024-01-01T00:00:00Z"}}`), nil
 	}}
-	c := &SecretClient{client: rec, attach: holdAttach(t)}
-	_, handle, err := c.Runner("sid").Run(ctx, secrets.Create, "", executor.OperationParameters{Reason: "r"}, nil, command.Stdio{})
+	stubAttach(t, holdAttach(t))
+	c := &SecretClient{client: rec}
+	_, handle, err := c.Runner("sid").Run(ctx, secrets.Create, "", executor.OperationParameters{Reason: "r"}, nil, command.Files{})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -627,34 +715,67 @@ func TestRunner_Wait_notCompleted(t *testing.T) {
 		t.Fatalf("Cancel: %v", err)
 	}
 	_, err = handle.Wait(ctx)
-	if err == nil || !strings.Contains(err.Error(), "not completed") {
-		t.Fatalf("Wait = %v, want not completed error", err)
+	if err == nil || !strings.Contains(err.Error(), "canceled") {
+		t.Fatalf("Wait = %v, want canceled", err)
 	}
 }
 
 func TestRunner_Wait_failedAt(t *testing.T) {
 	ctx := context.Background()
 	rec := &recordingClient{handler: func(req *http.Request) (*http.Response, error) {
-		if req.Method == http.MethodPost {
+		switch {
+		case isCreatePost(req):
+			return createdResponse(), nil
+		case isStartPost(req):
 			return jsonResponse(200, `{"id":"i1","secret":{"id":"s1","version":1},"status":{}}`), nil
+		case req.Method == http.MethodDelete && req.URL.Path == "/operations/op1":
+			return &http.Response{StatusCode: http.StatusNoContent, Body: io.NopCloser(bytes.NewReader(nil))}, nil
+		default:
+			return operationOutcome(`{"id":"i1","secret":{"id":"s1","version":1},"operation":{"failedAt":"2024-01-01T00:00:00Z"}}`), nil
 		}
-		return jsonResponse(200, `{"id":"i1","secret":{"id":"s1","version":1},"status":{"failedAt":"2024-01-01T00:00:00Z"}}`), nil
 	}}
-	c := &SecretClient{client: rec, attach: holdAttach(t)}
-	_, handle, err := c.Runner("sid").Run(ctx, secrets.Create, "", executor.OperationParameters{Reason: "r"}, nil, command.Stdio{})
+	stubAttach(t, holdAttach(t))
+	c := &SecretClient{client: rec}
+	_, handle, err := c.Runner("sid").Run(ctx, secrets.Create, "", executor.OperationParameters{Reason: "r"}, nil, command.Files{})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
-	}
-	if err := handle.Cancel(ctx); err != nil {
-		t.Fatalf("Cancel: %v", err)
 	}
 	final, err := handle.Wait(ctx)
 	if err == nil {
 		t.Fatal("Wait = nil, want failed error")
 	}
-	if final == nil || final.Status.FailedAt == nil {
+	if final == nil || final.Operation.FailedAt == nil {
 		t.Fatal("expected failedAt")
 	}
+	if err := handle.Cancel(ctx); err != nil {
+		t.Fatalf("Cancel: %v", err)
+	}
+	sawDelete := false
+	for _, got := range rec.got() {
+		if strings.HasPrefix(got, "DELETE /operations/op1") {
+			sawDelete = true
+			break
+		}
+	}
+	if !sawDelete {
+		t.Fatalf("Cancel did not DELETE the started operation: %v", rec.got())
+	}
+}
+
+func operationOutcome(instanceJSON string) *http.Response {
+	return jsonResponse(200, `{"state":"completed","instance":`+instanceJSON+`}`)
+}
+
+func createdResponse() *http.Response {
+	return jsonResponse(201, `{"operationId":"op1","state":"pending","expiresAt":"2026-01-01T00:00:00Z"}`)
+}
+
+func isCreatePost(req *http.Request) bool {
+	return req.Method == http.MethodPost && req.URL.Path == "/operations"
+}
+
+func isStartPost(req *http.Request) bool {
+	return req.Method == http.MethodPost && strings.HasSuffix(req.URL.Path, "/start")
 }
 
 func jsonResponse(status int, body string) *http.Response {

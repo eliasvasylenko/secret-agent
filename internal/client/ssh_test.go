@@ -124,7 +124,7 @@ func TestClient_sshAttach(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	conn, err := c.upgrade(t.Context(), "/secrets/sid/attach/stdin")
+	conn, err := c.upgrade(t.Context(), "/operations/op1/attach", nil)
 	if err != nil {
 		t.Fatalf("upgrade: %v", err)
 	}

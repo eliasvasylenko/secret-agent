@@ -24,7 +24,7 @@ Goal: written decisions before large refactors.
 - `Handle`: `Wait` joins; `Cancel` stops op; two ctx lifecycles
 - HTTP routes: attach before start; flat `/instances` and `/operations`
 - Wire DTOs: `OperationRequest`, `SecretOperationRequest`, `InstanceOperationRequest`
-- `attachSlot` state machine documented
+- `operationEntry` state machine documented
 
 </details>
 
@@ -56,7 +56,8 @@ In-process path: persist → background execute → `Handle`; no global op regis
 
 ## Phase 4 — HTTP server attach slot + routes ✅
 
-Attach-before-start per `(secretId, principal)`; POST consumes pending slot; flat routes.
+Originally attach-before-start per `(secretId, principal)`. Replaced by pending
+`operationEntry` keyed by operation id; attach and start are later calls on that id.
 
 **Verification:** `go test ./internal/server/...`
 
@@ -116,7 +117,6 @@ Phase 0 → Phase 1 → Phase 2
 | Item | Notes |
 |------|--------|
 | Agent restart marks in-flight ops failed | design.md § Open |
-| Orphan attach-slot timeout | `OutputTTL` CLI flag reserved |
 | Rich exit code over HTTP | `errors.As` on local path; stderr on wire |
 | Remote access / auth | **[plan-remote.md](plan-remote.md)** |
 | Federation / Proposer wire | Parked — [plan-federation.md](plan-federation.md) |

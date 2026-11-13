@@ -16,7 +16,6 @@ import (
 type SecretClient struct {
 	endpoint endpoint
 	client   httpClient
-	attach   func(ctx context.Context, path string) (io.ReadWriteCloser, error)
 }
 
 type httpClient interface {
@@ -52,7 +51,38 @@ func (c *SecretClient) buildRequest(ctx context.Context, method string, path str
 			return nil, err
 		}
 	}
-	return http.NewRequestWithContext(ctx, method, c.endpoint.requestURL(path).String(), buffer)
+	req, err := http.NewRequestWithContext(ctx, method, c.endpoint.requestURL(path).String(), buffer)
+	if err != nil {
+		return nil, err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	return req, nil
+}
+
+func (c *SecretClient) upgrade(ctx context.Context, path string, body any) (io.ReadWriteCloser, error) {
+	req, err := c.buildRequest(ctx, http.MethodPost, path, body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", server.AttachUpgradeProtocol)
+
+	response, err := c.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	if response.StatusCode != http.StatusSwitchingProtocols {
+		defer response.Body.Close()
+		return nil, fmt.Errorf("attach upgrade: status %d", response.StatusCode)
+	}
+	conn, ok := response.Body.(io.ReadWriteCloser)
+	if !ok {
+		_ = response.Body.Close()
+		return nil, fmt.Errorf("attach upgrade: response body is not writable")
+	}
+	return conn, nil
 }
 
 func Do[T any](client httpClient, req *http.Request, err error) (T, error) {

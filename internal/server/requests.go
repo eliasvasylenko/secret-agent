@@ -1,6 +1,8 @@
 package server
 
 import (
+	"fmt"
+
 	"github.com/eliasvasylenko/secret-agent/internal/command"
 	"github.com/eliasvasylenko/secret-agent/internal/secrets"
 )
@@ -13,17 +15,39 @@ type OperationRequest struct {
 	Reason string              `json:"reason"`
 }
 
-// SecretOperationRequest starts an operation on a secret: POST /instances.
-// Create is the only such operation, so no name is carried.
-type SecretOperationRequest struct {
-	SecretId         string `json:"secretId"`
-	OperationRequest `json:""`
+// AttachRequest is one attach. Fds are the descriptors that share the
+// file. Mode is what the process does with it.
+type AttachRequest struct {
+	Fds  []int            `json:"fds"`
+	Mode command.FileMode `json:"mode"`
 }
 
-// InstanceOperationRequest starts a named operation on an instance: POST /operations.
-// The operation's secret is derived from InstanceId, never sent by the client.
-type InstanceOperationRequest struct {
-	InstanceId       string                `json:"instanceId"`
+func (r AttachRequest) Validate() error {
+	if !r.Mode.Valid() {
+		return fmt.Errorf("unknown attach mode %q", r.Mode)
+	}
+	if len(r.Fds) == 0 {
+		return fmt.Errorf("attach fds required")
+	}
+	seen := map[int]bool{}
+	for _, fd := range r.Fds {
+		if fd < 0 || fd > command.MaxFd {
+			return fmt.Errorf("attach fd %d out of range", fd)
+		}
+		if seen[fd] {
+			return fmt.Errorf("duplicate attach fd %d", fd)
+		}
+		seen[fd] = true
+	}
+	return nil
+}
+
+// StartOperationRequest creates an operation: POST /operations.
+// Create operations carry SecretId and no InstanceId; other operations carry
+// InstanceId (and derive their secret from it), with Name saying which.
+type StartOperationRequest struct {
+	SecretId         string                `json:"secretId,omitempty"`
+	InstanceId       string                `json:"instanceId,omitempty"`
 	Name             secrets.OperationName `json:"name"`
 	OperationRequest `json:""`
 }

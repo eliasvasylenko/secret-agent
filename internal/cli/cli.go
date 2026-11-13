@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"time"
@@ -30,7 +31,6 @@ type CLI struct {
 	Instances       Instances       `cmd:"" help:"List instances of a secret"`
 	Instance        Instance        `cmd:"" help:"Show an instance of a secret"`
 	Active          Secret          `cmd:"" help:"Show the active instance of a secret"`
-	History         History         `cmd:"" help:"Show the operation history of a secret"`
 	Create          SecretCommand   `cmd:"" help:"Create an instance of a secret"`
 	Destroy         InstanceCommand `cmd:"" help:"Destroy an instance of a secret"`
 	Activate        InstanceCommand `cmd:"" help:"Activate an instance of a secret"`
@@ -88,31 +88,25 @@ func (c *CLI) Run(ctx context.Context) {
 		result, err = catalog.Instances().Get(ctx, c.Instance.InstanceID)
 	case "active <secret-id>":
 		result, err = catalog.Instances().GetActive(ctx, c.Active.SecretID)
-	case "history <secret-id>":
-		secretId := c.History.SecretID
-		result, err = catalog.Operations().List(ctx, &secretId, nil, c.History.From, c.History.To)
-	case "history <secret-id> <instance-id>":
-		secretId := c.History.SecretID
-		instanceId := c.History.InstanceID
-		result, err = catalog.Operations().List(ctx, &secretId, &instanceId, c.History.From, c.History.To)
 	case "create <secret-id>":
-		result, err = ops.Create(ctx, c.agent.Runner(c.Create.SecretID), c.Create.parameters(), noopProposer{}, c.stdio())
+		result, err = ops.Create(ctx, c.agent.Runner(c.Create.SecretID), c.Create.parameters(), noopProposer{}, c.files())
 	case "destroy <secret-id> <instance-id>":
-		result, err = ops.Destroy(ctx, c.agent.Runner(c.Destroy.SecretID), c.Destroy.InstanceID, c.Destroy.parameters(), noopProposer{}, c.stdio())
+		result, err = ops.Destroy(ctx, c.agent.Runner(c.Destroy.SecretID), c.Destroy.InstanceID, c.Destroy.parameters(), noopProposer{}, c.files())
 	case "activate <secret-id> <instance-id>":
-		result, err = ops.Activate(ctx, c.agent.Runner(c.Activate.SecretID), c.Activate.InstanceID, c.Activate.parameters(), noopProposer{}, c.stdio())
+		result, err = ops.Activate(ctx, c.agent.Runner(c.Activate.SecretID), c.Activate.InstanceID, c.Activate.parameters(), noopProposer{}, c.files())
 	case "deactivate <secret-id> <instance-id>":
-		result, err = ops.Deactivate(ctx, c.agent.Runner(c.Deactivate.SecretID), c.Deactivate.InstanceID, c.Deactivate.parameters(), noopProposer{}, c.stdio())
+		result, err = ops.Deactivate(ctx, c.agent.Runner(c.Deactivate.SecretID), c.Deactivate.InstanceID, c.Deactivate.parameters(), noopProposer{}, c.files())
 	case "test <secret-id> <instance-id>":
-		result, err = ops.Test(ctx, c.agent.Runner(c.Test.SecretID), c.Test.InstanceID, c.Test.parameters(), noopProposer{}, c.stdio())
+		result, err = ops.Test(ctx, c.agent.Runner(c.Test.SecretID), c.Test.InstanceID, c.Test.parameters(), noopProposer{}, c.files())
 	case "serve":
 		permissionsConfig, err := server.LoadPermissions(c.PermissionsFile)
 		c.ctx.FatalIfErrorf(err)
 		config := server.ServerConfig{
-			Socket:        c.Serve.ServerSocket,
-			RequestLimit:  c.Serve.RequestLimit,
-			RequestWindow: c.Serve.RequestWindow,
-			OutputTTL:     c.Serve.OutputTTL,
+			Socket:               c.Serve.ServerSocket,
+			RequestLimit:         c.Serve.RequestLimit,
+			RequestWindow:        c.Serve.RequestWindow,
+			PendingOperationTTL:  c.Serve.PendingOperationTTL,
+			FinishedOperationTTL: c.Serve.FinishedOperationTTL,
 		}
 		server := server.New(config, c.agent, permissionsConfig)
 		err = server.Serve()
@@ -137,12 +131,19 @@ func (c *CLI) Run(ctx context.Context) {
 
 type noopProposer struct{}
 
-func (noopProposer) Propose(context.Context, secrets.OperationName, executor.OperationParameters) error {
+func (noopProposer) Propose(context.Context, string, secrets.OperationName, executor.OperationParameters, io.ReadWriteCloser) error {
 	return nil
 }
 
-func (c *CLI) stdio() command.Stdio {
-	return command.Stdio{Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr}
+func (c *CLI) files() command.Files {
+	files := command.Files{Fds: []*os.File{os.Stdin, os.Stdout, os.Stderr}, Tty: command.NoTty}
+	for fd, file := range files.Fds {
+		if command.ControllingTerminal(file) {
+			files.Tty = fd
+			break
+		}
+	}
+	return files
 }
 
 type Secrets struct{}
@@ -159,12 +160,6 @@ type Instances struct {
 type Instance struct {
 	SecretID   string `arg:"" help:"ID of the secret"`
 	InstanceID string `arg:"" help:"ID of the instance"`
-}
-
-type History struct {
-	SecretID   string `arg:"" help:"ID of the secret"`
-	InstanceID string `arg:"" optional:"" help:"Optional ID of the instance"`
-	Bounds
 }
 
 type Bounds struct {
@@ -197,10 +192,11 @@ func (c *Command) parameters() executor.OperationParameters {
 }
 
 type Serve struct {
-	ServerSocket  string        `short:"s" help:"Unix socket path for serving the HTTP API"`
-	RequestLimit  uint32        `short:"L" default:"100" help:"Maximum number of requests per request window"`
-	RequestWindow time.Duration `short:"W" default:"1m" help:"Window of time over which the request limit is enforced"`
-	OutputTTL     time.Duration `short:"T" default:"5m" help:"Reserved: future orphan attach-slot timeout (unused)"`
+	ServerSocket         string        `short:"s" help:"Unix socket path for serving the HTTP API"`
+	RequestLimit         uint32        `short:"L" default:"100" help:"Maximum number of requests per request window"`
+	RequestWindow        time.Duration `short:"W" default:"1m" help:"Window of time over which the request limit is enforced"`
+	PendingOperationTTL  time.Duration `default:"10m" help:"How long an unstarted operation stays readable"`
+	FinishedOperationTTL time.Duration `default:"2m" help:"How long a finished operation stays readable"`
 }
 
 type DialStdio struct {

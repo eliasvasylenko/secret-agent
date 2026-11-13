@@ -6,43 +6,116 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"strings"
+
+	"github.com/eliasvasylenko/secret-agent/internal/command"
+	"golang.org/x/sys/unix"
 )
 
 const AttachUpgradeProtocol = "secret-agent-process/1"
 
-var errNoAttachSlot = NewErrorResponse(http.StatusNotFound, fmt.Errorf("no attach slot"))
+// attachment is one open file for one or more descriptors, and the other
+// end of that file, which is the attached connection. r and w are pipes.
+// tty and ctty are a pty. ctty is also the controlling terminal.
+type attachment struct {
+	fds  []int
+	mode command.FileMode
 
-type attachStream string
+	// process is dup'd onto each claimed process descriptor.
+	// peer is the end served to the attached connection.
+	process *os.File
+	peer    *os.File
+}
 
-const (
-	attachStreamStdin  attachStream = "stdin"
-	attachStreamStdout attachStream = "stdout"
-	attachStreamStderr attachStream = "stderr"
-)
-
-func parseAttachStream(name string) (attachStream, error) {
-	switch attachStream(name) {
-	case attachStreamStdin, attachStreamStdout, attachStreamStderr:
-		return attachStream(name), nil
+func newAttachment(fds []int, mode command.FileMode) (*attachment, error) {
+	a := &attachment{fds: fds, mode: mode}
+	var err error
+	switch mode {
+	case command.Tty, command.Ctty:
+		a.process, a.peer, err = openTerminal()
+	case command.Read:
+		a.process, a.peer, err = os.Pipe()
+	case command.Write:
+		a.peer, a.process, err = os.Pipe()
 	default:
-		return "", NewErrorResponse(http.StatusBadRequest, fmt.Errorf("unknown attach stream %q", name))
+		// New modes (seekable file, duplex fifo) plug in here.
+		return nil, fmt.Errorf("unknown attach mode %q", mode)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return a, nil
+}
+
+func (a *attachment) close() {
+	if a.peer != nil {
+		_ = a.peer.Close()
+	}
+	if a.process != nil {
+		_ = a.process.Close()
 	}
 }
 
-func (s *Controller) attachSecret(w http.ResponseWriter, r *http.Request) {
-	secretId := r.PathValue("secretId")
-	if !requirePermit(w, r, secretId) {
+// serve copies bytes until one side finishes. For a read pipe, client EOF
+// closes the write end. A terminal is copied both ways, and client EOF
+// leaves the master open so the process can still write.
+func (a *attachment) serve(conn io.ReadWriter) {
+	if a.mode.Terminal() {
+		done := make(chan struct{})
+		go func() {
+			_, _ = io.Copy(a.peer, conn)
+			close(done)
+		}()
+		_, _ = io.Copy(conn, a.peer)
+		<-done
 		return
 	}
-	stream, err := parseAttachStream(r.PathValue("stream"))
+	if a.mode.Reads() {
+		defer a.peer.Close()
+		_, _ = io.Copy(a.peer, conn)
+		return
+	}
+	_, _ = io.Copy(conn, a.peer)
+}
+
+func openTerminal() (slave, master *os.File, err error) {
+	master, err = os.OpenFile("/dev/ptmx", os.O_RDWR|unix.O_NOCTTY|unix.O_CLOEXEC, 0)
 	if err != nil {
-		writeError(w, err)
+		return nil, nil, err
+	}
+	defer func() {
+		if err != nil {
+			_ = master.Close()
+		}
+	}()
+	if err = unix.IoctlSetPointerInt(int(master.Fd()), unix.TIOCSPTLCK, 0); err != nil {
+		return nil, nil, err
+	}
+	n, err := unix.IoctlGetInt(int(master.Fd()), unix.TIOCGPTN)
+	if err != nil {
+		return nil, nil, err
+	}
+	slave, err = os.OpenFile(fmt.Sprintf("/dev/pts/%d", n), os.O_RDWR|unix.O_NOCTTY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, nil, err
+	}
+	return slave, master, nil
+}
+
+func (s *Controller) attachOperation(w http.ResponseWriter, r *http.Request) {
+	if !connectionUpgrade(r, AttachUpgradeProtocol) {
+		writeError(w, NewErrorResponse(http.StatusUpgradeRequired, fmt.Errorf("connection upgrade required")))
 		return
 	}
 
-	if !connectionUpgrade(r, AttachUpgradeProtocol) {
-		writeError(w, NewErrorResponse(http.StatusUpgradeRequired, fmt.Errorf("connection upgrade required")))
+	var request AttachRequest
+	if err := readBody(r, &request); err != nil {
+		writeError(w, err)
+		return
+	}
+	if err := request.Validate(); err != nil {
+		writeError(w, NewErrorResponse(http.StatusBadRequest, err))
 		return
 	}
 
@@ -52,52 +125,65 @@ func (s *Controller) attachSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	slot, err := s.claimSlot(secretId, identity.Principal.GetName(), stream)
+	entry, err := s.operations.get(r.PathValue("operationId"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	att, err := entry.claimAttach(identity.Principal.GetName(), request.Fds, request.Mode)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
 
-	armed := true
-	defer func() {
-		if armed {
-			s.closeSlot(slot)
-		}
-	}()
-
-	var bodyPrefix []byte
-	if stream == attachStreamStdin && r.Body != nil {
-		bodyPrefix, err = io.ReadAll(r.Body)
-		if err != nil {
-			writeError(w, NewErrorResponse(http.StatusBadRequest, err))
-			return
-		}
-	}
-
-	hijacker, ok := w.(http.Hijacker)
-	if !ok {
-		writeError(w, NewErrorResponse(http.StatusInternalServerError, fmt.Errorf("response writer does not support hijacking")))
-		return
-	}
-
-	conn, bufrw, err := hijacker.Hijack()
+	conn, err := upgradeConnection(w, r)
 	if err != nil {
-		writeError(w, NewErrorResponse(http.StatusInternalServerError, err))
+		_ = s.operations.cancel(entry)
+		writeError(w, err)
 		return
 	}
 	defer conn.Close()
+	// Close the connection when the run is cancelled or finishes, so serve
+	// unblocks.
+	defer context.AfterFunc(entry.ctx, func() { _ = conn.Close() })()
+
+	att.serve(conn)
+	s.operations.attachEnded(entry, att)
+}
+
+// attachConn reads through the hijack buffer, so bytes sent ahead of the
+// 101 are not dropped.
+type attachConn struct {
+	io.Reader
+	net.Conn
+}
+
+func (c attachConn) Read(p []byte) (int, error) { return c.Reader.Read(p) }
+
+// upgradeConnection hijacks the request and writes the 101. The body was
+// the attach claim. Bytes after the 101 are the file.
+func upgradeConnection(w http.ResponseWriter, r *http.Request) (net.Conn, error) {
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		return nil, NewErrorResponse(http.StatusInternalServerError, fmt.Errorf("response writer does not support hijacking"))
+	}
+	conn, bufrw, err := hijacker.Hijack()
+	if err != nil {
+		return nil, NewErrorResponse(http.StatusInternalServerError, err)
+	}
 
 	if _, err := bufrw.WriteString("HTTP/1.1 101 Switching Protocols\r\n" +
 		"Connection: Upgrade\r\n" +
 		"Upgrade: " + AttachUpgradeProtocol + "\r\n\r\n"); err != nil {
-		return
+		_ = conn.Close()
+		return nil, NewErrorResponse(http.StatusInternalServerError, err)
 	}
 	if err := bufrw.Flush(); err != nil {
-		return
+		_ = conn.Close()
+		return nil, NewErrorResponse(http.StatusInternalServerError, err)
 	}
 
-	armed = false
-	s.attachFinished(slot, stream, slot.serveAttach(slot.ctx, stream, bodyPrefix, conn))
+	return attachConn{Reader: bufrw.Reader, Conn: conn}, nil
 }
 
 func connectionUpgrade(r *http.Request, protocol string) bool {
@@ -127,44 +213,4 @@ func splitHeaderList(value string) []string {
 		}
 	}
 	return parts
-}
-
-func (slot *attachSlot) serveAttach(ctx context.Context, stream attachStream, bodyPrefix []byte, conn net.Conn) error {
-	switch stream {
-	case attachStreamStdin:
-		defer slot.pipes.stdinW.Close()
-		if len(bodyPrefix) > 0 {
-			if _, err := slot.pipes.stdinW.Write(bodyPrefix); err != nil {
-				return err
-			}
-		}
-		_, err := copyWithContext(ctx, slot.pipes.stdinW, conn)
-		return err
-	case attachStreamStdout:
-		_, err := copyWithContext(ctx, conn, slot.pipes.stdoutR)
-		return err
-	case attachStreamStderr:
-		_, err := copyWithContext(ctx, conn, slot.pipes.stderrR)
-		return err
-	default:
-		return fmt.Errorf("unknown attach stream %q", stream)
-	}
-}
-
-func copyWithContext(ctx context.Context, dst io.Writer, src io.Reader) (int64, error) {
-	type result struct {
-		n   int64
-		err error
-	}
-	done := make(chan result, 1)
-	go func() {
-		n, err := io.Copy(dst, src)
-		done <- result{n: n, err: err}
-	}()
-	select {
-	case <-ctx.Done():
-		return 0, ctx.Err()
-	case res := <-done:
-		return res.n, res.err
-	}
 }

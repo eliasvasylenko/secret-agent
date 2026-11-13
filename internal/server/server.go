@@ -22,15 +22,17 @@ type ServerConfig struct {
 	Socket        string
 	RequestLimit  uint32
 	RequestWindow time.Duration
-	// OutputTTL was the /result poll retention; unused until orphan attach-slot timeout.
-	OutputTTL time.Duration
+	// PendingOperationTTL is how long an unstarted operation stays readable. Zero uses the default.
+	PendingOperationTTL time.Duration
+	// FinishedOperationTTL is how long a finished operation stays readable. Zero uses the default.
+	FinishedOperationTTL time.Duration
 }
 
 func New(config ServerConfig, secretStore backend.Backend, policy *auth.Policy) *Server {
 	limiter := NewLimiter(config.RequestLimit, config.RequestWindow)
 	return &Server{
 		config:     config,
-		controller: NewController(secretStore, policy, limiter),
+		controller: NewController(secretStore, policy, limiter, config.PendingOperationTTL, config.FinishedOperationTTL),
 	}
 }
 

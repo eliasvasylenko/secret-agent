@@ -5,11 +5,30 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
+	"time"
+
+	"github.com/eliasvasylenko/secret-agent/internal/secrets"
 )
 
 type ItemsResponse[T any] struct {
 	Items T `json:"items"`
+}
+
+// OperationCreatedResponse answers POST /operations: a pending operation.
+type OperationCreatedResponse struct {
+	OperationID string    `json:"operationId"`
+	State       string    `json:"state"`
+	ExpiresAt   time.Time `json:"expiresAt"`
+}
+
+// OperationStatusResponse answers GET /operations/{operationId}.
+type OperationStatusResponse struct {
+	Operation secrets.Operation `json:"operation"`
+	State     string            `json:"state"`
+	ExpiresAt time.Time         `json:"expiresAt,omitzero"`
+	Instance  *secrets.Instance `json:"instance,omitempty"`
 }
 
 type ErrorResponse struct {
@@ -67,7 +86,12 @@ func writeError(w http.ResponseWriter, err error) error {
 	return writeResult(w, response, response.HttpError.Code)
 }
 
+// readBody decodes a JSON request body. The request must say it is JSON.
 func readBody(r *http.Request, v any) error {
+	contentType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || contentType != "application/json" {
+		return NewErrorResponse(http.StatusUnsupportedMediaType, fmt.Errorf("request body must be application/json"))
+	}
 	bytes, err := io.ReadAll(r.Body)
 	if err == nil {
 		err = json.Unmarshal(bytes, v)

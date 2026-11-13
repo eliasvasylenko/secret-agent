@@ -1,6 +1,6 @@
 package auth
 
-import "fmt"
+import "errors"
 
 type Identity struct {
 	Principal Principal
@@ -13,11 +13,7 @@ func (id Identity) AssertPermission(permissions Permissions, secretID string) er
 	if id.CheckPermission(permissions, secretID) {
 		return nil
 	}
-	names := make([]RoleName, len(id.Roles))
-	for i, role := range id.Roles {
-		names[i] = role.Name
-	}
-	return fmt.Errorf("operation not permitted with roles %v", names)
+	return errors.New("operation not permitted")
 }
 
 // CheckPermission reports whether one held role grants every subject in permissions.
@@ -35,6 +31,16 @@ func (id Identity) CheckPermission(permissions Permissions, secretID string) boo
 			if role.allows(permissions, secret) {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+// HasRole reports whether the caller holds a role with this name.
+func (id Identity) HasRole(name RoleName) bool {
+	for _, role := range id.Roles {
+		if role.Name == name {
+			return true
 		}
 	}
 	return false

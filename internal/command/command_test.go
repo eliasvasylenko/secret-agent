@@ -1,14 +1,12 @@
 package command
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
-	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -185,14 +183,39 @@ func TestProcess(t *testing.T) {
 				Script:      tc.script,
 				Shell:       tc.shell,
 			}
-			var stdout bytes.Buffer
-			stdio := Stdio{Stdin: strings.NewReader(tc.expectedInput), Stdout: &stdout, Stderr: io.Discard}
-			err := command.Process(context.Background(), stdio, Environment{})
+			stdinR, stdinW, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer stdinR.Close()
+			if _, err := stdinW.WriteString(tc.expectedInput); err != nil {
+				t.Fatal(err)
+			}
+			if err := stdinW.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			stdoutR, stdoutW, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer stdoutR.Close()
+			out := make(chan string, 1)
+			go func() {
+				b, _ := io.ReadAll(stdoutR)
+				out <- string(b)
+			}()
+
+			files := Files{Fds: []*os.File{stdinR, stdoutW, devNull(t)}, Tty: NoTty}
+			err = command.Process(context.Background(), files, Environment{})
 			if err != nil {
 				t.Errorf("unexpected error '%v'", err)
 			}
-			if stdout.String() != tc.mockOutput {
-				t.Errorf("expected '%v', got '%v'", tc.mockOutput, stdout.String())
+			if err := stdoutW.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if got := <-out; got != tc.mockOutput {
+				t.Errorf("expected '%v', got '%v'", tc.mockOutput, got)
 			}
 		})
 	}
