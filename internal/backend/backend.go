@@ -2,7 +2,6 @@ package backend
 
 import (
 	"context"
-	"fmt"
 	"io"
 
 	"github.com/eliasvasylenko/secret-agent/internal/command"
@@ -22,12 +21,17 @@ type Catalog interface {
 
 type Secrets interface {
 	List(ctx context.Context) (secrets.Secrets, error)
+	// Get returns *SecretNotFoundError when the plan is missing. A
+	// successful call returns a non-nil secret.
 	Get(ctx context.Context, secretId string) (*secrets.Secret, error)
 }
 
 type Instances interface {
 	List(ctx context.Context, secretId *string, from, to int) (secrets.Instances, error)
+	// Get returns *InstanceNotFoundError when the instance is missing. A
+	// successful call returns a non-nil instance.
 	Get(ctx context.Context, instanceId string) (*secrets.Instance, error)
+	// GetActive returns (nil, nil) when the secret has no active instance.
 	GetActive(ctx context.Context, secretId string) (*secrets.Instance, error)
 }
 
@@ -58,22 +62,4 @@ type Proposer interface {
 	// for approval. The operator authenticates to that host on those bytes.
 	// Nil means the host recorded the approval. pipe is nil only for an in-process call.
 	Propose(ctx context.Context, secretID string, name secrets.OperationName, params executor.OperationParameters, pipe io.ReadWriteCloser) error
-}
-
-type StaleOperationError struct {
-	Expected int
-	Latest   int
-}
-
-func (e *StaleOperationError) Error() string {
-	return fmt.Sprintf("stale operation: expected %d, latest is %d", e.Expected, e.Latest)
-}
-
-type UnknownOperationError struct {
-	Expected int
-	Latest   int
-}
-
-func (e *UnknownOperationError) Error() string {
-	return fmt.Sprintf("unknown operation: expected %d, latest is %d", e.Expected, e.Latest)
 }

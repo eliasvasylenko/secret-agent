@@ -88,7 +88,7 @@ func (c *Controller) buildHandler(registerHandler func(pattern string, handler h
 func (s *Controller) listSecrets(w http.ResponseWriter, r *http.Request) {
 	secs, err := s.secretStore.Catalog().Secrets().List(r.Context())
 	if err != nil {
-		writeError(w, NewErrorResponse(http.StatusBadRequest, err))
+		writeError(w, err)
 		return
 	}
 	var visible secrets.Secrets
@@ -110,7 +110,7 @@ func (s *Controller) getSecret(w http.ResponseWriter, r *http.Request) {
 	}
 	secret, err := s.secretStore.Catalog().Secrets().Get(r.Context(), secretId)
 	if err != nil {
-		writeError(w, NewErrorResponse(http.StatusBadRequest, err))
+		writeError(w, err)
 		return
 	}
 	writeResult(w, secret, http.StatusOK)
@@ -128,7 +128,7 @@ func (s *Controller) listInstances(w http.ResponseWriter, r *http.Request) {
 	}
 	insts, err := s.secretStore.Catalog().Instances().List(r.Context(), secretId, int(from), int(to))
 	if err != nil {
-		writeError(w, NewErrorResponse(http.StatusBadRequest, err))
+		writeError(w, err)
 		return
 	}
 	var visible secrets.Instances
@@ -163,7 +163,7 @@ func (s *Controller) getInstance(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	if instance != nil && !requirePermission(w, r, instance.Secret.Id) {
+	if !requirePermission(w, r, instance.Secret.Id) {
 		return
 	}
 	writeResult(w, instance, http.StatusOK)
@@ -195,9 +195,8 @@ func (s *Controller) createOperation(w http.ResponseWriter, r *http.Request) {
 			writeError(w, NewErrorResponse(http.StatusBadRequest, fmt.Errorf("instanceId must be empty for create")))
 			return
 		}
-		secret, err := s.secretStore.Catalog().Secrets().Get(r.Context(), secretId)
-		if err != nil || secret == nil {
-			writeError(w, NewErrorResponse(http.StatusNotFound, fmt.Errorf("unknown secret %s", secretId)))
+		if _, err := s.secretStore.Catalog().Secrets().Get(r.Context(), secretId); err != nil {
+			writeError(w, err)
 			return
 		}
 	case isInstanceOperation(request.Name):
@@ -208,8 +207,8 @@ func (s *Controller) createOperation(w http.ResponseWriter, r *http.Request) {
 		// The secret comes from the instance, so a request cannot name one
 		// secret while operating on another secret's instance.
 		instance, err := s.secretStore.Catalog().Instances().Get(r.Context(), instanceId)
-		if err != nil || instance == nil {
-			writeError(w, NewErrorResponse(http.StatusNotFound, fmt.Errorf("unknown instance %s", instanceId)))
+		if err != nil {
+			writeError(w, err)
 			return
 		}
 		if secretId != "" && secretId != instance.Secret.Id {
@@ -357,9 +356,6 @@ func (s *Controller) secretParents(ctx context.Context, secretID string) ([]secr
 	secret, err := s.secretStore.Catalog().Secrets().Get(ctx, secretID)
 	if err != nil {
 		return nil, err
-	}
-	if secret == nil {
-		return nil, fmt.Errorf("unknown secret %s", secretID)
 	}
 	return secret.Parents, nil
 }
