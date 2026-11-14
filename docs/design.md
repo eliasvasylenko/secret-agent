@@ -7,7 +7,7 @@ Concise record of settled constraints and open tensions. Supersedes [`plan-proce
 - **Secret** — versioned plan (scripts for create/activate/…).
 - **Instance** — deployed copy of a secret; many instances, **one active** per secret.
 - **Operation** (`secrets.Operation`) — one transition attempt (the *edge*): name, creator/starter, timestamps. Ephemeral as a resource; the instance keeps only the last one that started. Not an audit record and not HTTP attach state.
-- **State** (`secrets.State`) — the instance's established lifecycle state (the *node*): the last operation that completed, read as its postcondition. Operation names double as state names. See [plan-federation.md](plan-federation.md) § Operation and status model.
+- **State** (`secrets.State`) — the instance's established lifecycle state (the *node*): the postcondition of the last operation that completed (`proposed`, `inactive`, `active`, `tested`, `destroyed`). Operation names are the edges into those nodes. See [plan-federation.md](plan-federation.md) § Operation and status model.
 - Pending operations are keyed by their own global operation ID, so assembling one
   does not serialize another for the same `(secret, principal)`. Reads (`List`/`Get`)
   are unconstrained.

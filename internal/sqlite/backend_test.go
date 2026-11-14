@@ -435,8 +435,8 @@ func TestRunner_Snapshot(t *testing.T) {
 	if created.Operation.Id != "" {
 		t.Errorf("Operation.Id = %q, want empty", created.Operation.Id)
 	}
-	if created.State.Name != secrets.Created || created.Operation.Name != secrets.Create {
-		t.Errorf("state %s operation %s, want create", created.State.Name, created.Operation.Name)
+	if created.State.Name != secrets.Inactive || created.Operation.Name != secrets.Create {
+		t.Errorf("state %s operation %s, want inactive / create", created.State.Name, created.Operation.Name)
 	}
 	if created.Operation.CreatedBy != "user" || created.Operation.StartedBy != "user" {
 		t.Errorf("createdBy %q startedBy %q", created.Operation.CreatedBy, created.Operation.StartedBy)
@@ -452,7 +452,7 @@ func TestRunner_Snapshot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if got.Revision != created.Revision || got.State.Name != secrets.Created {
+	if got.Revision != created.Revision || got.State.Name != secrets.Inactive {
 		t.Errorf("reloaded = %+v", got)
 	}
 }
@@ -464,8 +464,8 @@ func TestRunner_Activate_Deactivate(t *testing.T) {
 	instances := repo.Catalog().Instances()
 
 	created := mustCreateInstance(t, repo, secretId, executor.OperationParameters{Reason: "create", StartedBy: "user"})
-	if created.State.Name != secrets.Created {
-		t.Errorf("Create returned instance in state %s, want %s", created.State.Name, secrets.Created)
+	if created.State.Name != secrets.Inactive {
+		t.Errorf("Create returned instance in state %s, want %s", created.State.Name, secrets.Inactive)
 	}
 
 	activated := runOperation(t, repo, secretId, created.Id, ops.Activate, executor.OperationParameters{Reason: "activate", StartedBy: "user"})
@@ -473,8 +473,8 @@ func TestRunner_Activate_Deactivate(t *testing.T) {
 	if active == nil || active.Id != created.Id {
 		t.Errorf("after Activate, GetActive = %v", active)
 	}
-	if activated.State.Name != secrets.Activated {
-		t.Errorf("Activate returned instance in state %s, want %s", activated.State.Name, secrets.Activated)
+	if activated.State.Name != secrets.Active {
+		t.Errorf("Activate returned instance in state %s, want %s", activated.State.Name, secrets.Active)
 	}
 
 	deactivated := runOperation(t, repo, secretId, created.Id, ops.Deactivate, executor.OperationParameters{Reason: "deactivate", StartedBy: "user"})
@@ -482,8 +482,8 @@ func TestRunner_Activate_Deactivate(t *testing.T) {
 	if active != nil {
 		t.Errorf("after Deactivate, GetActive = %v, want nil", active)
 	}
-	if deactivated.State.Name != secrets.Deactivated {
-		t.Errorf("Deactivate returned instance in state %s, want %s", deactivated.State.Name, secrets.Deactivated)
+	if deactivated.State.Name != secrets.Inactive {
+		t.Errorf("Deactivate returned instance in state %s, want %s", deactivated.State.Name, secrets.Inactive)
 	}
 }
 
@@ -536,7 +536,7 @@ func TestRunner_Destroy_refusesWhileActive(t *testing.T) {
 	if getErr != nil {
 		t.Fatal(getErr)
 	}
-	if got == nil || got.Id != active.Id || got.State.Name != secrets.Activated {
+	if got == nil || got.Id != active.Id || got.State.Name != secrets.Active {
 		t.Fatalf("GetActive after refused destroy = %+v, want activated %s", got, active.Id)
 	}
 
@@ -645,8 +645,8 @@ func TestRunner_FailureLeavesState(t *testing.T) {
 	if getErr != nil {
 		t.Fatal(getErr)
 	}
-	if got.State.Name != secrets.Created {
-		t.Errorf("state = %s, want %s", got.State.Name, secrets.Created)
+	if got.State.Name != secrets.Inactive {
+		t.Errorf("state = %s, want %s", got.State.Name, secrets.Inactive)
 	}
 	if got.Operation.Name != secrets.Activate || got.Operation.FailedAt == nil {
 		t.Errorf("operation = %+v, want failed activate", got.Operation)
@@ -781,8 +781,8 @@ func TestCatalog_Get_timesOutOrphanedOperation(t *testing.T) {
 	if got.Operation.FailedAt == nil || got.Operation.CompletedAt != nil {
 		t.Fatalf("after Get, operation = %+v, want failed", got.Operation)
 	}
-	if got.State.Name != secrets.Created {
-		t.Errorf("state = %s, want %s", got.State.Name, secrets.Created)
+	if got.State.Name != secrets.Inactive {
+		t.Errorf("state = %s, want %s", got.State.Name, secrets.Inactive)
 	}
 }
 

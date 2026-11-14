@@ -230,7 +230,7 @@ func TestNewInstances(t *testing.T) {
 }
 
 func TestInstances_UnmarshalJSON(t *testing.T) {
-	data := `[{"id":"i1","secret":{"id":"s1","version":1},"revision":1,"state":{"name":"create"},"operation":{"name":"create"}}]`
+	data := `[{"id":"i1","secret":{"id":"s1","version":1},"revision":1,"state":{"name":"inactive"},"operation":{"name":"create"}}]`
 	var instances Instances
 	err := json.Unmarshal([]byte(data), &instances)
 	if err != nil {

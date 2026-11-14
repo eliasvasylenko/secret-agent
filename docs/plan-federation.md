@@ -166,15 +166,15 @@ type Instance struct {
     Operation Operation // edge: the last operation that *started* on this instance
 }
 type State struct {
-    Name OperationName
+    Name StateName
     At   time.Time
 }
 ```
 
 Invariants (the state machine written as data):
 
-- `Operation.CompletedAt != nil` ⇒ `State.Name == Operation.Name` and
-  `State.At == *CompletedAt`. A successful edge *is* the arrival at the node.
+- `Operation.CompletedAt != nil` ⇒ `State.Name` is the target of `Operation.Name` and
+  `State.At == *CompletedAt`. A successful edge arrives at that node.
 - `Operation.FailedAt != nil` ⇒ `State` is unchanged from before the attempt. A failed
   operation establishes nothing, but still constrains what may follow: retry the same
   operation, or `force` another.
