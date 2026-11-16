@@ -2,7 +2,6 @@ package sqlite
 
 import (
 	"context"
-	"time"
 
 	"github.com/eliasvasylenko/secret-agent/internal/backend"
 	"github.com/eliasvasylenko/secret-agent/internal/command"
@@ -16,8 +15,8 @@ type Backend struct {
 }
 
 // Open opens a sqlite database and returns a Backend.
-func Open(ctx context.Context, dbFile string, secrets secrets.Secrets, debug bool, maxReasonLen int, operationTimeout time.Duration) (*Backend, error) {
-	repo, err := NewRepository(ctx, dbFile, secrets, debug, maxReasonLen, operationTimeout)
+func Open(ctx context.Context, dbFile string, secrets secrets.Secrets, debug bool, maxReasonLen int) (*Backend, error) {
+	repo, err := NewRepository(ctx, dbFile, secrets, debug, maxReasonLen)
 	if err != nil {
 		return nil, err
 	}
@@ -88,21 +87,12 @@ func (r *runner) Run(
 	proposer backend.Proposer,
 	stdio command.Files,
 ) (*secrets.Instance, backend.Handle, error) {
-	var (
-		instance  *secrets.Instance
-		operation secrets.Operation
-		err       error
-	)
 	switch name {
 	case secrets.Create:
-		instance, operation, err = r.state.startCreateOperation(ctx, params)
+		return r.state.startCreateOperation(ctx, params, proposer, stdio)
 	default:
-		instance, operation, err = r.state.startUpdateOperation(ctx, instanceId, name, params)
+		return r.state.startUpdateOperation(ctx, instanceId, name, params, proposer, stdio)
 	}
-	if err != nil {
-		return nil, nil, err
-	}
-	return instance, r.state.launch(instance, operation, params, proposer, stdio), nil
 }
 
 func (h *opHandle) Wait(ctx context.Context) (*secrets.Instance, error) {

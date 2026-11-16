@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -22,11 +23,11 @@ import (
 
 // Repository persists secrets and the current status of their instances.
 type Repository struct {
-	db               *sql.DB
-	secrets          secrets.Secrets
-	maxReasonLen     int
-	operationTimeout time.Duration
-	secretStates     sync.Map
+	db           *sql.DB
+	secrets      secrets.Secrets
+	maxReasonLen int
+	lockDir      string
+	secretStates sync.Map
 }
 
 type secretState struct {
@@ -36,7 +37,7 @@ type secretState struct {
 	maxReasonLen int
 }
 
-func NewRepository(ctx context.Context, dbFile string, secrets secrets.Secrets, debug bool, maxReasonLen int, operationTimeout time.Duration) (*Repository, error) {
+func NewRepository(ctx context.Context, dbFile string, secrets secrets.Secrets, debug bool, maxReasonLen int) (*Repository, error) {
 	dsn := dbFile
 	if strings.Contains(dsn, "?") {
 		dsn += "&_fk=1"
@@ -88,12 +89,21 @@ func NewRepository(ctx context.Context, dbFile string, secrets secrets.Secrets, 
 		db.Close()
 		return nil, err
 	}
-	return &Repository{
-		db:               db,
-		secrets:          secrets,
-		maxReasonLen:     maxReasonLen,
-		operationTimeout: operationTimeout,
-	}, nil
+	repo := &Repository{
+		db:           db,
+		secrets:      secrets,
+		maxReasonLen: maxReasonLen,
+		lockDir:      dbFile + ".locks",
+	}
+	if err := os.MkdirAll(repo.lockDir, 0o700); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err := repo.failUnlocked(ctx); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return repo, nil
 }
 
 func (r *Repository) Close() {
@@ -159,7 +169,7 @@ func (r *Repository) listInstances(ctx context.Context, secretId *string, from, 
 	query += " ORDER BY i.opCreatedAt DESC, i.id ASC LIMIT ? OFFSET ?"
 	args = append(args, to-from, from)
 
-	if err := r.failExpired(ctx); err != nil {
+	if err := r.failUnlocked(ctx); err != nil {
 		return nil, err
 	}
 	rows, err := r.db.QueryContext(ctx, query, args...)
@@ -171,7 +181,7 @@ func (r *Repository) listInstances(ctx context.Context, secretId *string, from, 
 }
 
 func (r *Repository) getInstance(ctx context.Context, instanceId string) (*secrets.Instance, error) {
-	if err := r.failExpired(ctx); err != nil {
+	if err := r.failUnlocked(ctx); err != nil {
 		return nil, err
 	}
 	instance, err := scanInstance(r.db.QueryRowContext(ctx, `
@@ -188,7 +198,7 @@ func (r *Repository) getInstance(ctx context.Context, instanceId string) (*secre
 }
 
 func (r *Repository) getActiveInstance(ctx context.Context, secretId string) (*secrets.Instance, error) {
-	if err := r.failExpired(ctx); err != nil {
+	if err := r.failUnlocked(ctx); err != nil {
 		return nil, err
 	}
 	instance, err := scanInstance(r.db.QueryRowContext(ctx, `
@@ -206,31 +216,44 @@ func (r *Repository) getActiveInstance(ctx context.Context, secretId string) (*s
 	return instance, err
 }
 
-func (st *secretState) startCreateOperation(ctx context.Context, parameters executor.OperationParameters) (*secrets.Instance, secrets.Operation, error) {
+func (st *secretState) startCreateOperation(ctx context.Context, parameters executor.OperationParameters, proposer backend.Proposer, stdio command.Files) (*secrets.Instance, backend.Handle, error) {
 	if err := reasonTooLong(parameters, st.maxReasonLen); err != nil {
-		return nil, secrets.Operation{}, err
+		return nil, nil, err
 	}
 	if st.secret == nil {
-		return nil, secrets.Operation{}, &backend.SecretNotFoundError{SecretId: st.secretId}
+		return nil, nil, &backend.SecretNotFoundError{SecretId: st.secretId}
 	}
+
+	instanceId := uuid.NewString()
+	lock, held, err := st.repo.tryLockInstance(instanceId)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !held {
+		return nil, nil, fmt.Errorf("instance %s already running", instanceId)
+	}
+	defer func() {
+		if lock != nil {
+			lock.Unlock()
+		}
+	}()
 
 	tx, commit, rollback, err := beginTx(st.repo.db)
 	if err != nil {
-		return nil, secrets.Operation{}, err
+		return nil, nil, err
 	}
 	defer rollback()
 
 	if _, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO secret(id) VALUES (?)`, st.secretId); err != nil {
-		return nil, secrets.Operation{}, err
+		return nil, nil, err
 	}
 
-	instanceId := uuid.NewString()
 	operation, revision, err := createInstance(ctx, tx, st.secretId, instanceId, st.secret.Version, parameters)
 	if err != nil {
-		return nil, secrets.Operation{}, err
+		return nil, nil, err
 	}
 	if err = commit(); err != nil {
-		return nil, secrets.Operation{}, err
+		return nil, nil, err
 	}
 
 	instance := &secrets.Instance{
@@ -240,20 +263,40 @@ func (st *secretState) startCreateOperation(ctx context.Context, parameters exec
 		Operation: operation,
 		Secret:    *st.secret,
 	}
-	return instance, operation, nil
+	handle := st.launch(lock, instance, operation, parameters, proposer, stdio)
+	lock = nil
+	return instance, handle, nil
 }
 
-func (st *secretState) startUpdateOperation(ctx context.Context, instanceId string, operationName secrets.OperationName, parameters executor.OperationParameters) (*secrets.Instance, secrets.Operation, error) {
+func (st *secretState) startUpdateOperation(ctx context.Context, instanceId string, operationName secrets.OperationName, parameters executor.OperationParameters, proposer backend.Proposer, stdio command.Files) (*secrets.Instance, backend.Handle, error) {
 	if err := reasonTooLong(parameters, st.maxReasonLen); err != nil {
-		return nil, secrets.Operation{}, err
+		return nil, nil, err
 	}
-	if err := st.repo.failExpired(ctx); err != nil {
-		return nil, secrets.Operation{}, err
+	current, err := st.repo.getInstance(ctx, instanceId)
+	if err != nil {
+		return nil, nil, err
+	}
+	lock, held, err := st.repo.tryLockInstance(instanceId)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !held {
+		return nil, nil, &backend.IncompleteOperationError{Operation: operationName, Previous: current.Operation.Name}
+	}
+	defer func() {
+		if lock != nil {
+			lock.Unlock()
+		}
+	}()
+	if current.Operation.CompletedAt == nil && current.Operation.FailedAt == nil {
+		if err := st.repo.failOrphan(ctx, instanceId); err != nil {
+			return nil, nil, err
+		}
 	}
 
 	tx, commit, rollback, err := beginTx(st.repo.db)
 	if err != nil {
-		return nil, secrets.Operation{}, err
+		return nil, nil, err
 	}
 	defer rollback()
 
@@ -289,31 +332,31 @@ func (st *secretState) startUpdateOperation(ctx context.Context, instanceId stri
 		&previousCompletedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, secrets.Operation{}, &backend.InstanceNotFoundError{InstanceId: instanceId}
+		return nil, nil, &backend.InstanceNotFoundError{InstanceId: instanceId}
 	}
 	if err != nil {
-		return nil, secrets.Operation{}, err
+		return nil, nil, err
 	}
 
 	var secretPlan secrets.Secret
 	if err = json.Unmarshal(secretBytes, &secretPlan); err != nil {
-		return nil, secrets.Operation{}, err
+		return nil, nil, err
 	}
 
 	if err := refuseUpdate(operationName, parameters, revision, previousName, previousCompletedAt, activeInstanceId, instanceId); err != nil {
 		if parameters.Forced {
 			log.Default().Printf("forcing %s", err)
 		} else {
-			return nil, secrets.Operation{}, err
+			return nil, nil, err
 		}
 	}
 
 	operation, revision, err := updateInstance(ctx, tx, st.secretId, instanceId, operationName, parameters)
 	if err != nil {
-		return nil, secrets.Operation{}, err
+		return nil, nil, err
 	}
 	if err = commit(); err != nil {
-		return nil, secrets.Operation{}, err
+		return nil, nil, err
 	}
 
 	instance := &secrets.Instance{
@@ -326,32 +369,26 @@ func (st *secretState) startUpdateOperation(ctx context.Context, instanceId stri
 	if stateEnteredAt.Valid {
 		instance.State.EnteredAt = stateEnteredAt.Time
 	}
-	return instance, operation, nil
+	handle := st.launch(lock, instance, operation, parameters, proposer, stdio)
+	lock = nil
+	return instance, handle, nil
 }
 
-func (st *secretState) launch(instance *secrets.Instance, operation secrets.Operation, parameters executor.OperationParameters, proposer backend.Proposer, stdio command.Files) *opHandle {
-	var (
-		execCtx    context.Context
-		execCancel context.CancelFunc
-	)
-	if st.repo.operationTimeout > 0 {
-		execCtx, execCancel = context.WithTimeout(context.Background(), st.repo.operationTimeout)
-	} else {
-		execCtx, execCancel = context.WithCancel(context.Background())
-	}
+func (st *secretState) launch(lock *instanceLock, instance *secrets.Instance, operation secrets.Operation, parameters executor.OperationParameters, proposer backend.Proposer, stdio command.Files) *opHandle {
+	execCtx, execCancel := context.WithCancel(context.Background())
 	h := &opHandle{
 		done:       make(chan struct{}),
 		execCancel: execCancel,
+		lock:       lock,
 		proposer:   proposer,
 	}
-
 	repo := st.repo
 	secretId := st.secretId
-	inst := instance
 	go func() {
 		defer close(h.done)
-		err := completeOperation(execCtx, repo.db, secretId, inst, operation, parameters, stdio)
-		got, getErr := repo.getInstance(context.Background(), inst.Id)
+		defer h.lock.Unlock()
+		err := completeOperation(execCtx, repo.db, secretId, instance, operation, parameters, stdio)
+		got, getErr := repo.getInstance(context.Background(), instance.Id)
 		if getErr != nil {
 			h.waitErr = getErr
 			return
@@ -361,28 +398,55 @@ func (st *secretState) launch(instance *secrets.Instance, operation secrets.Oper
 			h.waitErr = err
 		}
 	}()
-
 	return h
 }
 
-func (r *Repository) failExpired(ctx context.Context) error {
-	if r.operationTimeout <= 0 {
-		return nil
-	}
-	now := time.Now()
-	result, err := r.db.ExecContext(ctx, `
+func (r *Repository) failOrphan(ctx context.Context, instanceId string) error {
+	_, err := r.db.ExecContext(ctx, `
 		UPDATE instance SET revision = revision + 1, opFailedAt = ?
-		WHERE opCompletedAt IS NULL AND opFailedAt IS NULL AND opStartedAt <= ?
-	`, now, now.Add(-r.operationTimeout))
+		WHERE id = ? AND opCompletedAt IS NULL AND opFailedAt IS NULL
+	`, time.Now(), instanceId)
+	return err
+}
+
+func (r *Repository) failUnlocked(ctx context.Context) error {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT id FROM instance
+		WHERE opCompletedAt IS NULL AND opFailedAt IS NULL
+	`)
 	if err != nil {
 		return err
 	}
-	n, err := result.RowsAffected()
-	if err != nil {
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
 		return err
 	}
-	if n > 0 {
-		log.Default().Printf("timing out %d in-flight operation(s) after %s", n, r.operationTimeout)
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, id := range ids {
+		lock, held, err := r.tryLockInstance(id)
+		if err != nil {
+			return err
+		}
+		if !held {
+			continue
+		}
+		log.Default().Printf("failing orphaned operation on instance %s", id)
+		err = r.failOrphan(ctx, id)
+		lock.Unlock()
+		if err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -390,6 +454,7 @@ func (r *Repository) failExpired(ctx context.Context) error {
 type opHandle struct {
 	done       chan struct{}
 	execCancel context.CancelFunc
+	lock       *instanceLock
 	proposer   backend.Proposer
 	final      *secrets.Instance
 	waitErr    error
