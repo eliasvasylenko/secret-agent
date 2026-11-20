@@ -865,6 +865,12 @@ func TestOpen_doesNotFailLockedOperation(t *testing.T) {
 	if got.Operation.FailedAt != nil {
 		t.Fatal("failUnlocked marked a locked operation failed")
 	}
+	if err := repo.repo.removeUnusedLockFiles(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(repo.repo.lockPath(started.Id)); err != nil {
+		t.Fatal("removed lock file while operation held")
+	}
 
 	if err := handle.Cancel(ctx); err != nil {
 		t.Fatalf("Cancel: %v", err)
@@ -920,4 +926,76 @@ func TestRunner_Run_failsUnlockedOrphanBeforeAccept(t *testing.T) {
 	if err == nil || !errors.As(err, &incomplete) {
 		t.Fatalf("Activate = %v, want IncompleteOperationError after failing unlocked create", err)
 	}
+}
+
+func TestLockFile_removedAfterOperation(t *testing.T) {
+	repo := newTestBackend(t, nil)
+	created := mustCreateInstance(t, repo, "s1", executor.OperationParameters{Reason: "create", StartedBy: "user"})
+	path := repo.repo.lockPath(created.Id)
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("lock file still present after create: %v", err)
+	}
+
+	runOperation(t, repo, "s1", created.Id, ops.Destroy, executor.OperationParameters{Reason: "destroy", StartedBy: "user"})
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("lock file still present after destroy: %v", err)
+	}
+}
+
+func TestOpen_removesStaleLockFiles(t *testing.T) {
+	dbFile := filepath.Join(t.TempDir(), "backend.db")
+	ctx := context.Background()
+	first, err := Open(ctx, dbFile, secrets.Secrets{"s1": noOpSecret}, false, 256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := mustCreateInstance(t, first, "s1", executor.OperationParameters{Reason: "create", StartedBy: "user"})
+	runOperation(t, first, "s1", created.Id, ops.Destroy, executor.OperationParameters{Reason: "destroy", StartedBy: "user"})
+
+	destroyedPath := first.repo.lockPath(created.Id)
+	if err := os.WriteFile(destroyedPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ghostPath := first.repo.lockPath("ghost")
+	if err := os.WriteFile(ghostPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	first.Close()
+
+	repo, err := Open(ctx, dbFile, secrets.Secrets{"s1": noOpSecret}, false, 256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(repo.Close)
+
+	if _, err := os.Stat(destroyedPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("Open left a lock file for a destroyed instance")
+	}
+	if _, err := os.Stat(ghostPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("Open left a lock file with no instance")
+	}
+}
+
+func TestOpen_removesUnlockedLockFileForLiveInstance(t *testing.T) {
+	dbFile := filepath.Join(t.TempDir(), "backend.db")
+	ctx := context.Background()
+	first, err := Open(ctx, dbFile, secrets.Secrets{"s1": noOpSecret}, false, 256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := mustCreateInstance(t, first, "s1", executor.OperationParameters{Reason: "create", StartedBy: "user"})
+	path := first.repo.lockPath(created.Id)
+	first.Close()
+
+	repo, err := Open(ctx, dbFile, secrets.Secrets{"s1": noOpSecret}, false, 256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(repo.Close)
+
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("Open left an unlocked lock file")
+	}
+
+	runOperation(t, repo, "s1", created.Id, ops.Activate, executor.OperationParameters{Reason: "act", StartedBy: "user"})
 }
