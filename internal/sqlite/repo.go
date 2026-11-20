@@ -2,15 +2,15 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"strings"
 	"sync"
 	"time"
-
-	"database/sql"
 
 	"github.com/eliasvasylenko/secret-agent/internal/backend"
 	"github.com/eliasvasylenko/secret-agent/internal/command"
@@ -26,6 +26,7 @@ type Repository struct {
 	db           *sql.DB
 	secrets      secrets.Secrets
 	maxReasonLen int
+	lockDir      string
 	secretStates sync.Map
 }
 
@@ -88,11 +89,25 @@ func NewRepository(ctx context.Context, dbFile string, secrets secrets.Secrets, 
 		db.Close()
 		return nil, err
 	}
-	return &Repository{
+	repo := &Repository{
 		db:           db,
 		secrets:      secrets,
 		maxReasonLen: maxReasonLen,
-	}, nil
+		lockDir:      dbFile + ".locks",
+	}
+	if err := os.MkdirAll(repo.lockDir, 0o700); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err := repo.failUnlocked(ctx); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err := repo.removeUnusedLockFiles(); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return repo, nil
 }
 
 func (r *Repository) Close() {
@@ -158,6 +173,9 @@ func (r *Repository) listInstances(ctx context.Context, secretId *string, from, 
 	query += " ORDER BY i.opCreatedAt DESC, i.id ASC LIMIT ? OFFSET ?"
 	args = append(args, to-from, from)
 
+	if err := r.failUnlocked(ctx); err != nil {
+		return nil, err
+	}
 	rows, err := r.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
@@ -166,26 +184,36 @@ func (r *Repository) listInstances(ctx context.Context, secretId *string, from, 
 	return scanInstances(rows)
 }
 
-func (r *Repository) getInstance(ctx context.Context, instanceId string) (*secrets.Instance, error) {
-	row := r.db.QueryRowContext(ctx, `
+type queryRower interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+func loadInstance(ctx context.Context, q queryRower, instanceId string) (*secrets.Instance, error) {
+	instance, err := scanInstance(q.QueryRowContext(ctx, `
 		SELECT`+instanceSnapshotColumns+`
 		FROM instance i
 		INNER JOIN revision r
 			ON r.secretId = i.secretId AND r.version = i.version
 		WHERE i.id = ?
-	`, instanceId)
-	instance, err := scanInstance(row)
+	`, instanceId))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, &backend.InstanceNotFoundError{InstanceId: instanceId}
 	}
-	if err != nil {
+	return instance, err
+}
+
+func (r *Repository) getInstance(ctx context.Context, instanceId string) (*secrets.Instance, error) {
+	if err := r.failUnlocked(ctx); err != nil {
 		return nil, err
 	}
-	return instance, nil
+	return loadInstance(ctx, r.db, instanceId)
 }
 
 func (r *Repository) getActiveInstance(ctx context.Context, secretId string) (*secrets.Instance, error) {
-	rows, err := r.db.QueryContext(ctx, `
+	if err := r.failUnlocked(ctx); err != nil {
+		return nil, err
+	}
+	instance, err := scanInstance(r.db.QueryRowContext(ctx, `
 		SELECT`+instanceSnapshotColumns+`
 		FROM secret s
 		INNER JOIN instance i
@@ -193,46 +221,51 @@ func (r *Repository) getActiveInstance(ctx context.Context, secretId string) (*s
 		INNER JOIN revision r
 			ON r.secretId = i.secretId AND r.version = i.version
 		WHERE s.id = ?
-	`, secretId)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	if !rows.Next() {
+	`, secretId))
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
-	instance, err := scanInstance(rows)
-	if err != nil {
-		return nil, err
-	}
-	return instance, nil
+	return instance, err
 }
 
-func (st *secretState) startCreateOperation(ctx context.Context, parameters executor.OperationParameters) (*secrets.Instance, secrets.Operation, error) {
+func (st *secretState) startCreateOperation(ctx context.Context, parameters executor.OperationParameters, proposer backend.Proposer, stdio command.Files) (*secrets.Instance, backend.Handle, error) {
 	if err := reasonTooLong(parameters, st.maxReasonLen); err != nil {
-		return nil, secrets.Operation{}, err
+		return nil, nil, err
 	}
 	if st.secret == nil {
-		return nil, secrets.Operation{}, &backend.SecretNotFoundError{SecretId: st.secretId}
+		return nil, nil, &backend.SecretNotFoundError{SecretId: st.secretId}
 	}
+
+	instanceId := uuid.NewString()
+	lock, held, err := st.repo.tryLockInstance(instanceId)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !held {
+		return nil, nil, fmt.Errorf("instance %s already running", instanceId)
+	}
+	defer func() {
+		if lock != nil {
+			lock.Unlock()
+		}
+	}()
 
 	tx, commit, rollback, err := beginTx(st.repo.db)
 	if err != nil {
-		return nil, secrets.Operation{}, err
+		return nil, nil, err
 	}
 	defer rollback()
 
 	if _, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO secret(id) VALUES (?)`, st.secretId); err != nil {
-		return nil, secrets.Operation{}, err
+		return nil, nil, err
 	}
 
-	instanceId := uuid.NewString()
 	operation, revision, err := createInstance(ctx, tx, st.secretId, instanceId, st.secret.Version, parameters)
 	if err != nil {
-		return nil, secrets.Operation{}, err
+		return nil, nil, err
 	}
 	if err = commit(); err != nil {
-		return nil, secrets.Operation{}, err
+		return nil, nil, err
 	}
 
 	instance := &secrets.Instance{
@@ -242,17 +275,40 @@ func (st *secretState) startCreateOperation(ctx context.Context, parameters exec
 		Operation: operation,
 		Secret:    *st.secret,
 	}
-	return instance, operation, nil
+	handle := st.launch(lock, instance, operation, parameters, proposer, stdio)
+	lock = nil
+	return instance, handle, nil
 }
 
-func (st *secretState) startUpdateOperation(ctx context.Context, instanceId string, operationName secrets.OperationName, parameters executor.OperationParameters) (*secrets.Instance, secrets.Operation, error) {
+func (st *secretState) startUpdateOperation(ctx context.Context, instanceId string, operationName secrets.OperationName, parameters executor.OperationParameters, proposer backend.Proposer, stdio command.Files) (*secrets.Instance, backend.Handle, error) {
 	if err := reasonTooLong(parameters, st.maxReasonLen); err != nil {
-		return nil, secrets.Operation{}, err
+		return nil, nil, err
+	}
+	current, err := st.repo.getInstance(ctx, instanceId)
+	if err != nil {
+		return nil, nil, err
+	}
+	lock, held, err := st.repo.tryLockInstance(instanceId)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !held {
+		return nil, nil, &backend.IncompleteOperationError{Operation: operationName, Previous: current.Operation.Name}
+	}
+	defer func() {
+		if lock != nil {
+			lock.Unlock()
+		}
+	}()
+	if current.Operation.CompletedAt == nil && current.Operation.FailedAt == nil {
+		if err := st.repo.failOrphan(ctx, instanceId); err != nil {
+			return nil, nil, err
+		}
 	}
 
 	tx, commit, rollback, err := beginTx(st.repo.db)
 	if err != nil {
-		return nil, secrets.Operation{}, err
+		return nil, nil, err
 	}
 	defer rollback()
 
@@ -288,31 +344,31 @@ func (st *secretState) startUpdateOperation(ctx context.Context, instanceId stri
 		&previousCompletedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, secrets.Operation{}, &backend.InstanceNotFoundError{InstanceId: instanceId}
+		return nil, nil, &backend.InstanceNotFoundError{InstanceId: instanceId}
 	}
 	if err != nil {
-		return nil, secrets.Operation{}, err
+		return nil, nil, err
 	}
 
 	var secretPlan secrets.Secret
 	if err = json.Unmarshal(secretBytes, &secretPlan); err != nil {
-		return nil, secrets.Operation{}, err
+		return nil, nil, err
 	}
 
 	if err := refuseUpdate(operationName, parameters, revision, previousName, previousCompletedAt, activeInstanceId, instanceId); err != nil {
 		if parameters.Forced {
 			log.Default().Printf("forcing %s", err)
 		} else {
-			return nil, secrets.Operation{}, err
+			return nil, nil, err
 		}
 	}
 
 	operation, revision, err := updateInstance(ctx, tx, st.secretId, instanceId, operationName, parameters)
 	if err != nil {
-		return nil, secrets.Operation{}, err
+		return nil, nil, err
 	}
 	if err = commit(); err != nil {
-		return nil, secrets.Operation{}, err
+		return nil, nil, err
 	}
 
 	instance := &secrets.Instance{
@@ -325,40 +381,115 @@ func (st *secretState) startUpdateOperation(ctx context.Context, instanceId stri
 	if stateEnteredAt.Valid {
 		instance.State.EnteredAt = stateEnteredAt.Time
 	}
-	return instance, operation, nil
+	handle := st.launch(lock, instance, operation, parameters, proposer, stdio)
+	lock = nil
+	return instance, handle, nil
 }
 
-func (st *secretState) launch(instance *secrets.Instance, operation secrets.Operation, parameters executor.OperationParameters, proposer backend.Proposer, stdio command.Files) *opHandle {
+func (st *secretState) launch(lock *instanceLock, instance *secrets.Instance, operation secrets.Operation, parameters executor.OperationParameters, proposer backend.Proposer, stdio command.Files) *opHandle {
 	execCtx, execCancel := context.WithCancel(context.Background())
 	h := &opHandle{
 		done:       make(chan struct{}),
 		execCancel: execCancel,
+		lock:       lock,
 		proposer:   proposer,
 	}
-
 	repo := st.repo
 	secretId := st.secretId
-	inst := instance
 	go func() {
 		defer close(h.done)
-		err := completeOperation(execCtx, repo.db, secretId, inst, operation, parameters, stdio)
-		got, getErr := repo.getInstance(context.Background(), inst.Id)
-		if getErr != nil {
-			h.waitErr = getErr
-			return
+		defer h.lock.Unlock()
+		got, err := completeOperation(execCtx, repo.db, secretId, instance, operation, parameters, stdio)
+		if got != nil {
+			h.final = got
 		}
-		h.final = got
 		if err != nil {
 			h.waitErr = err
 		}
 	}()
-
 	return h
+}
+
+func (r *Repository) failOrphan(ctx context.Context, instanceId string) error {
+	_, err := r.db.ExecContext(ctx, `
+		UPDATE instance SET revision = revision + 1, opFailedAt = ?
+		WHERE id = ? AND opCompletedAt IS NULL AND opFailedAt IS NULL
+	`, time.Now(), instanceId)
+	return err
+}
+
+func (r *Repository) failUnlocked(ctx context.Context) error {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT id FROM instance
+		WHERE opCompletedAt IS NULL AND opFailedAt IS NULL
+	`)
+	if err != nil {
+		return err
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, id := range ids {
+		lock, held, err := r.tryLockInstance(id)
+		if err != nil {
+			return err
+		}
+		if !held {
+			continue
+		}
+		log.Default().Printf("failing orphaned operation on instance %s", id)
+		err = r.failOrphan(ctx, id)
+		lock.Unlock()
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *Repository) removeUnusedLockFiles() error {
+	entries, err := os.ReadDir(r.lockDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".lock") {
+			continue
+		}
+		id := strings.TrimSuffix(name, ".lock")
+		lock, held, err := r.tryLockInstance(id)
+		if err != nil {
+			return err
+		}
+		if !held {
+			continue
+		}
+		lock.Unlock()
+	}
+	return nil
 }
 
 type opHandle struct {
 	done       chan struct{}
 	execCancel context.CancelFunc
+	lock       *instanceLock
 	proposer   backend.Proposer
 	final      *secrets.Instance
 	waitErr    error
@@ -452,7 +583,7 @@ func updateInstance(ctx context.Context, tx *sql.Tx, secretId, instanceId string
 	return operation, revision, err
 }
 
-func completeOperation(ctx context.Context, db *sql.DB, secretId string, instance *secrets.Instance, operation secrets.Operation, parameters executor.OperationParameters, stdio command.Files) error {
+func completeOperation(ctx context.Context, db *sql.DB, secretId string, instance *secrets.Instance, operation secrets.Operation, parameters executor.OperationParameters, stdio command.Files) (*secrets.Instance, error) {
 	processErr := executor.Execute(ctx, &instance.Secret, operation.Name, stdio, parameters, operation.InstanceId)
 
 	// Persist terminal state with a fresh ctx: execute ctx may already be canceled (Handle.Cancel).
@@ -460,7 +591,7 @@ func completeOperation(ctx context.Context, db *sql.DB, secretId string, instanc
 
 	tx, commit, rollback, err := beginTx(db)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer rollback()
 
@@ -469,39 +600,43 @@ func completeOperation(ctx context.Context, db *sql.DB, secretId string, instanc
 		if _, err := tx.ExecContext(dbCtx, `
 			UPDATE instance SET revision = revision + 1, opFailedAt = ? WHERE id = ?
 		`, now, instance.Id); err != nil {
-			return err
+			return nil, err
 		}
-		if err := commit(); err != nil {
-			return err
+	} else {
+		if operation.Name == secrets.Activate {
+			if _, err := tx.ExecContext(dbCtx, `UPDATE secret SET activeInstanceId = ? WHERE id = ?`, instance.Id, secretId); err != nil {
+				return nil, err
+			}
 		}
-		return processErr
+		if operation.Name == secrets.Deactivate {
+			if _, err := tx.ExecContext(dbCtx, `UPDATE secret SET activeInstanceId = NULL WHERE id = ?`, secretId); err != nil {
+				return nil, err
+			}
+		}
+		if operation.Name == secrets.Destroy {
+			if _, err := tx.ExecContext(dbCtx, `UPDATE secret SET activeInstanceId = NULL WHERE id = ? AND activeInstanceId = ?`, secretId, instance.Id); err != nil {
+				return nil, err
+			}
+		}
+		target, ok := secrets.TargetState(operation.Name)
+		if !ok {
+			return nil, fmt.Errorf("operation %s has no target state", operation.Name)
+		}
+		if _, err := tx.ExecContext(dbCtx, `
+			UPDATE instance SET revision = revision + 1, state = ?, stateEnteredAt = ?, opCompletedAt = ? WHERE id = ?
+		`, target, now, now, instance.Id); err != nil {
+			return nil, err
+		}
 	}
 
-	if operation.Name == secrets.Activate {
-		if _, err := tx.ExecContext(dbCtx, `UPDATE secret SET activeInstanceId = ? WHERE id = ?`, instance.Id, secretId); err != nil {
-			return err
-		}
+	got, err := loadInstance(dbCtx, tx, instance.Id)
+	if err != nil {
+		return nil, err
 	}
-	if operation.Name == secrets.Deactivate {
-		if _, err := tx.ExecContext(dbCtx, `UPDATE secret SET activeInstanceId = NULL WHERE id = ?`, secretId); err != nil {
-			return err
-		}
+	if err := commit(); err != nil {
+		return nil, err
 	}
-	if operation.Name == secrets.Destroy {
-		if _, err := tx.ExecContext(dbCtx, `UPDATE secret SET activeInstanceId = NULL WHERE id = ? AND activeInstanceId = ?`, secretId, instance.Id); err != nil {
-			return err
-		}
-	}
-	target, ok := secrets.TargetState(operation.Name)
-	if !ok {
-		return fmt.Errorf("operation %s has no target state", operation.Name)
-	}
-	if _, err := tx.ExecContext(dbCtx, `
-		UPDATE instance SET revision = revision + 1, state = ?, stateEnteredAt = ?, opCompletedAt = ? WHERE id = ?
-	`, target, now, now, instance.Id); err != nil {
-		return err
-	}
-	return commit()
+	return got, processErr
 }
 
 func reasonTooLong(parameters executor.OperationParameters, max int) error {

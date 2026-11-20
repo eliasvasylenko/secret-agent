@@ -47,19 +47,18 @@ const (
 type StateName string
 
 const (
-	Proposed    StateName = "proposed"
-	Created     StateName = "create"
-	Destroyed   StateName = "destroy"
-	Activated   StateName = "activate"
-	Deactivated StateName = "deactivate"
-	Tested      StateName = "test"
+	Proposed  StateName = "proposed"
+	Destroyed StateName = "destroyed"
+	Active    StateName = "active"
+	Inactive  StateName = "inactive"
+	Tested    StateName = "tested"
 )
 
 var operationTargetStates = map[OperationName]StateName{
-	Create:     Created,
+	Create:     Inactive,
 	Destroy:    Destroyed,
-	Activate:   Activated,
-	Deactivate: Deactivated,
+	Activate:   Active,
+	Deactivate: Inactive,
 	Test:       Tested,
 }
 

@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -434,8 +435,8 @@ func TestRunner_Snapshot(t *testing.T) {
 	if created.Operation.Id != "" {
 		t.Errorf("Operation.Id = %q, want empty", created.Operation.Id)
 	}
-	if created.State.Name != secrets.Created || created.Operation.Name != secrets.Create {
-		t.Errorf("state %s operation %s, want create", created.State.Name, created.Operation.Name)
+	if created.State.Name != secrets.Inactive || created.Operation.Name != secrets.Create {
+		t.Errorf("state %s operation %s, want inactive / create", created.State.Name, created.Operation.Name)
 	}
 	if created.Operation.CreatedBy != "user" || created.Operation.StartedBy != "user" {
 		t.Errorf("createdBy %q startedBy %q", created.Operation.CreatedBy, created.Operation.StartedBy)
@@ -451,7 +452,7 @@ func TestRunner_Snapshot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if got.Revision != created.Revision || got.State.Name != secrets.Created {
+	if got.Revision != created.Revision || got.State.Name != secrets.Inactive {
 		t.Errorf("reloaded = %+v", got)
 	}
 }
@@ -463,8 +464,8 @@ func TestRunner_Activate_Deactivate(t *testing.T) {
 	instances := repo.Catalog().Instances()
 
 	created := mustCreateInstance(t, repo, secretId, executor.OperationParameters{Reason: "create", StartedBy: "user"})
-	if created.State.Name != secrets.Created {
-		t.Errorf("Create returned instance in state %s, want %s", created.State.Name, secrets.Created)
+	if created.State.Name != secrets.Inactive {
+		t.Errorf("Create returned instance in state %s, want %s", created.State.Name, secrets.Inactive)
 	}
 
 	activated := runOperation(t, repo, secretId, created.Id, ops.Activate, executor.OperationParameters{Reason: "activate", StartedBy: "user"})
@@ -472,8 +473,8 @@ func TestRunner_Activate_Deactivate(t *testing.T) {
 	if active == nil || active.Id != created.Id {
 		t.Errorf("after Activate, GetActive = %v", active)
 	}
-	if activated.State.Name != secrets.Activated {
-		t.Errorf("Activate returned instance in state %s, want %s", activated.State.Name, secrets.Activated)
+	if activated.State.Name != secrets.Active {
+		t.Errorf("Activate returned instance in state %s, want %s", activated.State.Name, secrets.Active)
 	}
 
 	deactivated := runOperation(t, repo, secretId, created.Id, ops.Deactivate, executor.OperationParameters{Reason: "deactivate", StartedBy: "user"})
@@ -481,8 +482,8 @@ func TestRunner_Activate_Deactivate(t *testing.T) {
 	if active != nil {
 		t.Errorf("after Deactivate, GetActive = %v, want nil", active)
 	}
-	if deactivated.State.Name != secrets.Deactivated {
-		t.Errorf("Deactivate returned instance in state %s, want %s", deactivated.State.Name, secrets.Deactivated)
+	if deactivated.State.Name != secrets.Inactive {
+		t.Errorf("Deactivate returned instance in state %s, want %s", deactivated.State.Name, secrets.Inactive)
 	}
 }
 
@@ -535,7 +536,7 @@ func TestRunner_Destroy_refusesWhileActive(t *testing.T) {
 	if getErr != nil {
 		t.Fatal(getErr)
 	}
-	if got == nil || got.Id != active.Id || got.State.Name != secrets.Activated {
+	if got == nil || got.Id != active.Id || got.State.Name != secrets.Active {
 		t.Fatalf("GetActive after refused destroy = %+v, want activated %s", got, active.Id)
 	}
 
@@ -644,8 +645,8 @@ func TestRunner_FailureLeavesState(t *testing.T) {
 	if getErr != nil {
 		t.Fatal(getErr)
 	}
-	if got.State.Name != secrets.Created {
-		t.Errorf("state = %s, want %s", got.State.Name, secrets.Created)
+	if got.State.Name != secrets.Inactive {
+		t.Errorf("state = %s, want %s", got.State.Name, secrets.Inactive)
 	}
 	if got.Operation.Name != secrets.Activate || got.Operation.FailedAt == nil {
 		t.Errorf("operation = %+v, want failed activate", got.Operation)
@@ -738,4 +739,263 @@ func TestRunner_planPinnedAfterVersionBump(t *testing.T) {
 	if got.Secret.Version != 1 {
 		t.Errorf("Get().Secret.Version = %d, want 1", got.Secret.Version)
 	}
+}
+
+func orphanInFlight(t *testing.T, b *Backend, instanceId string) {
+	t.Helper()
+	_, err := b.repo.db.Exec(`UPDATE instance SET opCompletedAt = NULL, opFailedAt = NULL WHERE id = ?`, instanceId)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCatalog_Get_failsUnlockedOrphan(t *testing.T) {
+	repo := newTestBackend(t, nil)
+	ctx := context.Background()
+	created := mustCreateInstance(t, repo, "s1", executor.OperationParameters{Reason: "create", StartedBy: "user"})
+	orphanInFlight(t, repo, created.Id)
+
+	got, err := repo.Catalog().Instances().Get(ctx, created.Id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Operation.FailedAt == nil || got.Operation.CompletedAt != nil {
+		t.Fatalf("after Get, operation = %+v, want failed", got.Operation)
+	}
+	if got.State.Name != secrets.Inactive {
+		t.Errorf("state = %s, want %s", got.State.Name, secrets.Inactive)
+	}
+}
+
+func TestCatalog_List_failsUnlockedOrphan(t *testing.T) {
+	repo := newTestBackend(t, nil)
+	ctx := context.Background()
+	created := mustCreateInstance(t, repo, "s1", executor.OperationParameters{Reason: "create", StartedBy: "user"})
+	orphanInFlight(t, repo, created.Id)
+
+	got, err := repo.Catalog().Instances().List(ctx, nil, 0, 10)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	instance := got[created.Id]
+	if instance == nil || instance.Operation.FailedAt == nil {
+		t.Fatalf("List = %+v, want failed orphan", got)
+	}
+}
+
+func TestCatalog_GetActive_failsUnlockedOrphan(t *testing.T) {
+	repo := newTestBackend(t, nil)
+	ctx := context.Background()
+	created := mustCreateInstance(t, repo, "s1", executor.OperationParameters{Reason: "create", StartedBy: "user"})
+	runOperation(t, repo, "s1", created.Id, ops.Activate, executor.OperationParameters{Reason: "act", StartedBy: "user"})
+	orphanInFlight(t, repo, created.Id)
+
+	got, err := repo.Catalog().Instances().GetActive(ctx, "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || got.Id != created.Id || got.Operation.FailedAt == nil {
+		t.Fatalf("GetActive = %+v, want failed active instance", got)
+	}
+}
+
+func TestOpen_failsUnlockedOrphan(t *testing.T) {
+	dbFile := filepath.Join(t.TempDir(), "backend.db")
+	ctx := context.Background()
+	first, err := Open(ctx, dbFile, secrets.Secrets{"s1": noOpSecret}, false, 256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := mustCreateInstance(t, first, "s1", executor.OperationParameters{Reason: "create", StartedBy: "user"})
+	orphanInFlight(t, first, created.Id)
+	first.Close()
+
+	repo, err := Open(ctx, dbFile, secrets.Secrets{"s1": noOpSecret}, false, 256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(repo.Close)
+
+	var failedAt sql.NullTime
+	if err := repo.repo.db.QueryRow(`SELECT opFailedAt FROM instance WHERE id = ?`, created.Id).Scan(&failedAt); err != nil {
+		t.Fatal(err)
+	}
+	if !failedAt.Valid {
+		t.Fatal("Open left the unlocked orphan in-flight")
+	}
+
+	got, err := repo.Catalog().Instances().Get(ctx, created.Id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Operation.FailedAt == nil || got.Operation.CompletedAt != nil {
+		t.Fatalf("after Open, operation = %+v, want failed", got.Operation)
+	}
+	if got.State.Name != secrets.Inactive {
+		t.Errorf("state = %s, want %s", got.State.Name, secrets.Inactive)
+	}
+}
+
+func TestOpen_doesNotFailLockedOperation(t *testing.T) {
+	s := &secrets.Secret{
+		Id:     "s1",
+		Create: command.New(`read -r _`, command.NewEnvironment(), ""),
+	}
+	ctx := context.Background()
+	repo := newTestBackend(t, secrets.Secrets{"s1": s})
+
+	stdinR, stdinW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = stdinR.Close() })
+	t.Cleanup(func() { _ = stdinW.Close() })
+
+	started, handle, err := repo.Runner("s1").Run(ctx, secrets.Create, "", executor.OperationParameters{Reason: "r", StartedBy: "u"}, noopProposer{}, command.Files{Fds: []*os.File{stdinR}, Tty: command.NoTty})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if err := repo.repo.failUnlocked(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got, err := repo.Catalog().Instances().Get(ctx, started.Id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Operation.FailedAt != nil {
+		t.Fatal("failUnlocked marked a locked operation failed")
+	}
+	if err := repo.repo.removeUnusedLockFiles(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(repo.repo.lockPath(started.Id)); err != nil {
+		t.Fatal("removed lock file while operation held")
+	}
+
+	if err := handle.Cancel(ctx); err != nil {
+		t.Fatalf("Cancel: %v", err)
+	}
+	if _, err := handle.Wait(ctx); err == nil {
+		t.Fatal("Wait = nil, want cancel error")
+	}
+}
+
+func TestRunner_Run_refusesWhileLocked(t *testing.T) {
+	s := &secrets.Secret{
+		Id:       "s1",
+		Create:   command.New(`read -r _`, command.NewEnvironment(), ""),
+		Activate: command.New(`true`, command.NewEnvironment(), ""),
+	}
+	ctx := context.Background()
+	repo := newTestBackend(t, secrets.Secrets{"s1": s})
+
+	stdinR, stdinW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = stdinR.Close() })
+	t.Cleanup(func() { _ = stdinW.Close() })
+
+	started, handle, err := repo.Runner("s1").Run(ctx, secrets.Create, "", executor.OperationParameters{Reason: "r", StartedBy: "u"}, noopProposer{}, command.Files{Fds: []*os.File{stdinR}, Tty: command.NoTty})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	_, err = ops.Activate(ctx, repo.Runner("s1"), started.Id, executor.OperationParameters{Reason: "act", StartedBy: "user"}, noopProposer{}, discardFiles())
+	var incomplete *backend.IncompleteOperationError
+	if err == nil || !errors.As(err, &incomplete) {
+		t.Fatalf("Activate = %v, want IncompleteOperationError while create is locked", err)
+	}
+
+	if err := handle.Cancel(ctx); err != nil {
+		t.Fatalf("Cancel: %v", err)
+	}
+	if _, err := handle.Wait(ctx); err == nil {
+		t.Fatal("Wait = nil, want cancel error")
+	}
+}
+
+func TestRunner_Run_failsUnlockedOrphanBeforeAccept(t *testing.T) {
+	repo := newTestBackend(t, nil)
+	ctx := context.Background()
+	created := mustCreateInstance(t, repo, "s1", executor.OperationParameters{Reason: "create", StartedBy: "user"})
+	orphanInFlight(t, repo, created.Id)
+
+	_, err := ops.Activate(ctx, repo.Runner("s1"), created.Id, executor.OperationParameters{Reason: "act", StartedBy: "user"}, noopProposer{}, discardFiles())
+	var incomplete *backend.IncompleteOperationError
+	if err == nil || !errors.As(err, &incomplete) {
+		t.Fatalf("Activate = %v, want IncompleteOperationError after failing unlocked create", err)
+	}
+}
+
+func TestLockFile_removedAfterOperation(t *testing.T) {
+	repo := newTestBackend(t, nil)
+	created := mustCreateInstance(t, repo, "s1", executor.OperationParameters{Reason: "create", StartedBy: "user"})
+	path := repo.repo.lockPath(created.Id)
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("lock file still present after create: %v", err)
+	}
+
+	runOperation(t, repo, "s1", created.Id, ops.Destroy, executor.OperationParameters{Reason: "destroy", StartedBy: "user"})
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("lock file still present after destroy: %v", err)
+	}
+}
+
+func TestOpen_removesStaleLockFiles(t *testing.T) {
+	dbFile := filepath.Join(t.TempDir(), "backend.db")
+	ctx := context.Background()
+	first, err := Open(ctx, dbFile, secrets.Secrets{"s1": noOpSecret}, false, 256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := mustCreateInstance(t, first, "s1", executor.OperationParameters{Reason: "create", StartedBy: "user"})
+	runOperation(t, first, "s1", created.Id, ops.Destroy, executor.OperationParameters{Reason: "destroy", StartedBy: "user"})
+
+	destroyedPath := first.repo.lockPath(created.Id)
+	if err := os.WriteFile(destroyedPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ghostPath := first.repo.lockPath("ghost")
+	if err := os.WriteFile(ghostPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	first.Close()
+
+	repo, err := Open(ctx, dbFile, secrets.Secrets{"s1": noOpSecret}, false, 256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(repo.Close)
+
+	if _, err := os.Stat(destroyedPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("Open left a lock file for a destroyed instance")
+	}
+	if _, err := os.Stat(ghostPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("Open left a lock file with no instance")
+	}
+}
+
+func TestOpen_removesUnlockedLockFileForLiveInstance(t *testing.T) {
+	dbFile := filepath.Join(t.TempDir(), "backend.db")
+	ctx := context.Background()
+	first, err := Open(ctx, dbFile, secrets.Secrets{"s1": noOpSecret}, false, 256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := mustCreateInstance(t, first, "s1", executor.OperationParameters{Reason: "create", StartedBy: "user"})
+	path := first.repo.lockPath(created.Id)
+	first.Close()
+
+	repo, err := Open(ctx, dbFile, secrets.Secrets{"s1": noOpSecret}, false, 256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(repo.Close)
+
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("Open left an unlocked lock file")
+	}
+
+	runOperation(t, repo, "s1", created.Id, ops.Activate, executor.OperationParameters{Reason: "act", StartedBy: "user"})
 }

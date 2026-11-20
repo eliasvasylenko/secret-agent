@@ -87,21 +87,12 @@ func (r *runner) Run(
 	proposer backend.Proposer,
 	stdio command.Files,
 ) (*secrets.Instance, backend.Handle, error) {
-	var (
-		instance  *secrets.Instance
-		operation secrets.Operation
-		err       error
-	)
 	switch name {
 	case secrets.Create:
-		instance, operation, err = r.state.startCreateOperation(ctx, params)
+		return r.state.startCreateOperation(ctx, params, proposer, stdio)
 	default:
-		instance, operation, err = r.state.startUpdateOperation(ctx, instanceId, name, params)
+		return r.state.startUpdateOperation(ctx, instanceId, name, params, proposer, stdio)
 	}
-	if err != nil {
-		return nil, nil, err
-	}
-	return instance, r.state.launch(instance, operation, params, proposer, stdio), nil
 }
 
 func (h *opHandle) Wait(ctx context.Context) (*secrets.Instance, error) {
