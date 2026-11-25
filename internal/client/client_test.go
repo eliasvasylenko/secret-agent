@@ -78,8 +78,17 @@ func stdioFiles(t *testing.T) command.Files {
 	}
 }
 
-func attachKey(group fileGroup) string {
-	return fmt.Sprintf("%v/%s", group.fds, group.mode)
+func fileGroups(t *testing.T, files command.Files) command.FileGroups {
+	t.Helper()
+	groups, err := command.GroupFiles(files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return groups
+}
+
+func attachKey(group command.FileGroup) string {
+	return fmt.Sprintf("%v/%s", group.Fds, group.Mode)
 }
 
 type stubClient struct {
@@ -336,18 +345,18 @@ func TestCatalog_InstancesList_unfiltered(t *testing.T) {
 	}
 }
 
-func stubAttach(t *testing.T, fn func(context.Context, string, fileGroup) (io.ReadWriteCloser, error)) {
+func stubAttach(t *testing.T, fn func(context.Context, string, command.FileGroup) (io.ReadWriteCloser, error)) {
 	t.Helper()
 	saved := openAttach
-	openAttach = func(_ *SecretClient, ctx context.Context, operationId string, group fileGroup) (io.ReadWriteCloser, error) {
+	openAttach = func(_ *SecretClient, ctx context.Context, operationId string, group command.FileGroup) (io.ReadWriteCloser, error) {
 		return fn(ctx, operationId, group)
 	}
 	t.Cleanup(func() { openAttach = saved })
 }
 
-func holdAttach(t *testing.T) func(context.Context, string, fileGroup) (io.ReadWriteCloser, error) {
+func holdAttach(t *testing.T) func(context.Context, string, command.FileGroup) (io.ReadWriteCloser, error) {
 	t.Helper()
-	return func(_ context.Context, _ string, _ fileGroup) (io.ReadWriteCloser, error) {
+	return func(_ context.Context, _ string, _ command.FileGroup) (io.ReadWriteCloser, error) {
 		a, b := net.Pipe()
 		t.Cleanup(func() {
 			_ = a.Close()
@@ -377,7 +386,7 @@ func TestRunner_Create_attachesBeforeStart(t *testing.T) {
 		}
 		return jsonResponse(200, `{"id":"new-id","secret":{"id":"s1","version":1},"status":{}}`), nil
 	}}
-	stubAttach(t, func(ctx context.Context, operationId string, group fileGroup) (io.ReadWriteCloser, error) {
+	stubAttach(t, func(ctx context.Context, operationId string, group command.FileGroup) (io.ReadWriteCloser, error) {
 		if operationId != "op1" {
 			t.Errorf("attach operationId = %s", operationId)
 		}
@@ -386,7 +395,7 @@ func TestRunner_Create_attachesBeforeStart(t *testing.T) {
 	})
 	c := &SecretClient{client: rec}
 	params := executor.OperationParameters{Reason: "test", StartedBy: "user"}
-	started, handle, err := c.Runner("sid").Run(ctx, secrets.Create, "", params, nil, stdioFiles(t))
+	started, handle, err := c.Runner("sid").Run(ctx, secrets.Create, "", params, nil, fileGroups(t, stdioFiles(t)))
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -418,7 +427,7 @@ func TestRunner_Create_POSTBodyHasNoInput(t *testing.T) {
 	}}
 	stubAttach(t, holdAttach(t))
 	c := &SecretClient{client: rec}
-	_, handle, err := c.Runner("sid").Run(ctx, secrets.Create, "", executor.OperationParameters{Reason: "test"}, nil, command.Files{})
+	_, handle, err := c.Runner("sid").Run(ctx, secrets.Create, "", executor.OperationParameters{Reason: "test"}, nil, nil)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -439,7 +448,7 @@ func TestRunner_NamedOperation(t *testing.T) {
 	stubAttach(t, holdAttach(t))
 	c := &SecretClient{client: rec}
 	params := executor.OperationParameters{Reason: "activate-reason", StartedBy: "user"}
-	_, handle, err := c.Runner("sid").Run(ctx, secrets.Activate, "i1", params, nil, command.Files{})
+	_, handle, err := c.Runner("sid").Run(ctx, secrets.Activate, "i1", params, nil, nil)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -469,7 +478,7 @@ func TestRunner_Wait_getsInstanceAfterPumps(t *testing.T) {
 			return jsonResponse(500, `{"error":{"status":500,"message":"`+req.URL.Path+`"}}`), nil
 		}
 	}}
-	stubAttach(t, func(_ context.Context, _ string, group fileGroup) (io.ReadWriteCloser, error) {
+	stubAttach(t, func(_ context.Context, _ string, group command.FileGroup) (io.ReadWriteCloser, error) {
 		a, b := net.Pipe()
 		peersMu.Lock()
 		peers[attachKey(group)] = b
@@ -482,7 +491,7 @@ func TestRunner_Wait_getsInstanceAfterPumps(t *testing.T) {
 	})
 	c := &SecretClient{client: rec}
 
-	_, handle, err := c.Runner("sid").Run(ctx, secrets.Create, "", executor.OperationParameters{Reason: "r"}, nil, stdioFiles(t))
+	_, handle, err := c.Runner("sid").Run(ctx, secrets.Create, "", executor.OperationParameters{Reason: "r"}, nil, fileGroups(t, stdioFiles(t)))
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -533,7 +542,7 @@ func TestRunner_Wait_successWithoutCancel(t *testing.T) {
 			return jsonResponse(500, `{"error":{"status":500,"message":"unexpected"}}`), fmt.Errorf("unexpected %s %s", req.Method, req.URL.Path)
 		}
 	}}
-	stubAttach(t, func(_ context.Context, _ string, group fileGroup) (io.ReadWriteCloser, error) {
+	stubAttach(t, func(_ context.Context, _ string, group command.FileGroup) (io.ReadWriteCloser, error) {
 		client, server := net.Pipe()
 		attachPeers[attachKey(group)] = server
 		t.Cleanup(func() {
@@ -544,17 +553,17 @@ func TestRunner_Wait_successWithoutCancel(t *testing.T) {
 	})
 	c := &SecretClient{client: rec}
 
-	_, handle, err := c.Runner("sid").Run(ctx, secrets.Create, "", executor.OperationParameters{Reason: "r"}, nil, command.Files{
+	_, handle, err := c.Runner("sid").Run(ctx, secrets.Create, "", executor.OperationParameters{Reason: "r"}, nil, fileGroups(t, command.Files{
 		Fds: []*os.File{stdinFile(t, "hello-in"), stdoutW, devNullFile(t)},
 		Tty: command.NoTty,
-	})
+	}))
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 
-	stdinPeer := attachPeers[attachKey(fileGroup{fds: []int{0}, mode: command.Read})]
-	stdoutPeer := attachPeers[attachKey(fileGroup{fds: []int{1}, mode: command.Write})]
-	stderrPeer := attachPeers[attachKey(fileGroup{fds: []int{2}, mode: command.Write})]
+	stdinPeer := attachPeers[attachKey(command.FileGroup{Fds: []int{0}, Mode: command.Read})]
+	stdoutPeer := attachPeers[attachKey(command.FileGroup{Fds: []int{1}, Mode: command.Write})]
+	stderrPeer := attachPeers[attachKey(command.FileGroup{Fds: []int{2}, Mode: command.Write})]
 	if stdinPeer == nil || stdoutPeer == nil || stderrPeer == nil {
 		t.Fatal("missing attach peer")
 	}
@@ -611,7 +620,7 @@ func TestRunner_Wait_finishesIfStdinRemainsOpen(t *testing.T) {
 			return jsonResponse(500, `{"error":{"status":500,"message":"unexpected"}}`), fmt.Errorf("unexpected %s %s", req.Method, req.URL.Path)
 		}
 	}}
-	stubAttach(t, func(_ context.Context, _ string, group fileGroup) (io.ReadWriteCloser, error) {
+	stubAttach(t, func(_ context.Context, _ string, group command.FileGroup) (io.ReadWriteCloser, error) {
 		client, server := net.Pipe()
 		attachPeers[attachKey(group)] = server
 		t.Cleanup(func() {
@@ -622,17 +631,17 @@ func TestRunner_Wait_finishesIfStdinRemainsOpen(t *testing.T) {
 	})
 	c := &SecretClient{client: rec}
 
-	_, handle, err := c.Runner("sid").Run(ctx, secrets.Create, "", executor.OperationParameters{Reason: "r"}, nil, command.Files{
+	_, handle, err := c.Runner("sid").Run(ctx, secrets.Create, "", executor.OperationParameters{Reason: "r"}, nil, fileGroups(t, command.Files{
 		Fds: []*os.File{stdinR, discardFile(t), discardFile(t)},
 		Tty: command.NoTty,
-	})
+	}))
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 
-	stdoutPeer := attachPeers[attachKey(fileGroup{fds: []int{1}, mode: command.Write})]
-	stderrPeer := attachPeers[attachKey(fileGroup{fds: []int{2}, mode: command.Write})]
-	if stdoutPeer == nil || stderrPeer == nil || attachPeers[attachKey(fileGroup{fds: []int{0}, mode: command.Read})] == nil {
+	stdoutPeer := attachPeers[attachKey(command.FileGroup{Fds: []int{1}, Mode: command.Write})]
+	stderrPeer := attachPeers[attachKey(command.FileGroup{Fds: []int{2}, Mode: command.Write})]
+	if stdoutPeer == nil || stderrPeer == nil || attachPeers[attachKey(command.FileGroup{Fds: []int{0}, Mode: command.Read})] == nil {
 		t.Fatal("missing attach peer")
 	}
 	_ = stdoutPeer.Close()
@@ -655,9 +664,9 @@ func TestRunner_closesAttachOnStartFailure(t *testing.T) {
 	t.Cleanup(func() { _ = stdinServer.Close() })
 
 	attachN := 0
-	stubAttach(t, func(_ context.Context, _ string, group fileGroup) (io.ReadWriteCloser, error) {
+	stubAttach(t, func(_ context.Context, _ string, group command.FileGroup) (io.ReadWriteCloser, error) {
 		attachN++
-		if len(group.fds) > 0 && group.fds[0] == 0 {
+		if len(group.Fds) > 0 && group.Fds[0] == 0 {
 			return stdinClient, nil
 		}
 		a, b := net.Pipe()
@@ -676,7 +685,7 @@ func TestRunner_closesAttachOnStartFailure(t *testing.T) {
 		}},
 	}
 
-	_, _, err := c.Runner("sid").Run(ctx, secrets.Create, "", executor.OperationParameters{Reason: "r"}, nil, stdioFiles(t))
+	_, _, err := c.Runner("sid").Run(ctx, secrets.Create, "", executor.OperationParameters{Reason: "r"}, nil, fileGroups(t, stdioFiles(t)))
 	if err == nil {
 		t.Fatal("want start POST error")
 	}
@@ -707,7 +716,7 @@ func TestRunner_Wait_notCompleted(t *testing.T) {
 	}}
 	stubAttach(t, holdAttach(t))
 	c := &SecretClient{client: rec}
-	_, handle, err := c.Runner("sid").Run(ctx, secrets.Create, "", executor.OperationParameters{Reason: "r"}, nil, command.Files{})
+	_, handle, err := c.Runner("sid").Run(ctx, secrets.Create, "", executor.OperationParameters{Reason: "r"}, nil, nil)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -736,7 +745,7 @@ func TestRunner_Wait_failedAt(t *testing.T) {
 	}}
 	stubAttach(t, holdAttach(t))
 	c := &SecretClient{client: rec}
-	_, handle, err := c.Runner("sid").Run(ctx, secrets.Create, "", executor.OperationParameters{Reason: "r"}, nil, command.Files{})
+	_, handle, err := c.Runner("sid").Run(ctx, secrets.Create, "", executor.OperationParameters{Reason: "r"}, nil, nil)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}

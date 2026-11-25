@@ -85,13 +85,14 @@ func (r *runner) Run(
 	instanceId string,
 	params executor.OperationParameters,
 	proposer backend.Proposer,
-	stdio command.Files,
+	fileGroups command.FileGroups,
 ) (*secrets.Instance, backend.Handle, error) {
+	files := fileGroups.Files()
 	switch name {
 	case secrets.Create:
-		return r.state.startCreateOperation(ctx, params, proposer, stdio)
+		return r.state.startCreateOperation(ctx, params, proposer, files)
 	default:
-		return r.state.startUpdateOperation(ctx, instanceId, name, params, proposer, stdio)
+		return r.state.startUpdateOperation(ctx, instanceId, name, params, proposer, files)
 	}
 }
 

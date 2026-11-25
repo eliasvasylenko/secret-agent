@@ -6,6 +6,8 @@ import (
 	"io"
 	"log"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/alecthomas/kong"
@@ -38,9 +40,8 @@ type CLI struct {
 	Test            InstanceCommand `cmd:"" help:"Test an instance of a secret"`
 	Serve           Serve           `cmd:"" help:"Serve the secret agent API"`
 	DialStdio       DialStdio       `cmd:"" name:"dial-stdio" help:"Proxy stdio to the agent Unix socket. Should not be invoked manually."`
-
-	ctx   kongContext
-	agent backend.Backend
+	ctx             kongContext
+	agent           backend.Backend
 }
 
 type kongContext interface {
@@ -66,15 +67,23 @@ func NewCLI(ctx context.Context) *CLI {
 	return &c
 }
 
-func (c *CLI) Run(ctx context.Context) {
+func (c *CLI) Run(ctx context.Context) error {
 	if c.ctx.Command() == "dial-stdio" {
-		err := runDialStdio(c.DialStdio.Socket, c.DialStdio.User, c.DialStdio.Header, os.Stdin, os.Stdout)
-		c.ctx.FatalIfErrorf(err)
-		return
+		return runDialStdio(c.DialStdio.Socket, c.DialStdio.User, c.DialStdio.Header, os.Stdin, os.Stdout)
 	}
 
+	// Scripts run in their own session, so the terminal's Ctrl-C does not reach them.
+	// Cancelling the context is what stops them. Restore any raw terminal before a
+	// second signal kills this process.
+	var broker *command.Broker
+	closeBroker := func() { broker.Close() }
 	var result any
 	var err error
+	// The closure reads broker when the signal arrives. It is still nil here.
+	ctx, stop := interruptContext(ctx, closeBroker)
+	defer stop()
+	defer closeBroker()
+
 	catalog := c.agent.Catalog()
 	switch c.ctx.Command() {
 	case "secrets":
@@ -89,18 +98,32 @@ func (c *CLI) Run(ctx context.Context) {
 	case "active <secret-id>":
 		result, err = catalog.Instances().GetActive(ctx, c.Active.SecretID)
 	case "create <secret-id>":
-		result, err = ops.Create(ctx, c.agent.Runner(c.Create.SecretID), c.Create.parameters(), noopProposer{}, c.files())
+		broker, result, err = operate(func(groups command.FileGroups) (*secrets.Instance, error) {
+			return ops.Create(ctx, c.agent.Runner(c.Create.SecretID), c.Create.parameters(), noopProposer{}, groups)
+		})
 	case "destroy <secret-id> <instance-id>":
-		result, err = ops.Destroy(ctx, c.agent.Runner(c.Destroy.SecretID), c.Destroy.InstanceID, c.Destroy.parameters(), noopProposer{}, c.files())
+		broker, result, err = operate(func(groups command.FileGroups) (*secrets.Instance, error) {
+			return ops.Destroy(ctx, c.agent.Runner(c.Destroy.SecretID), c.Destroy.InstanceID, c.Destroy.parameters(), noopProposer{}, groups)
+		})
 	case "activate <secret-id> <instance-id>":
-		result, err = ops.Activate(ctx, c.agent.Runner(c.Activate.SecretID), c.Activate.InstanceID, c.Activate.parameters(), noopProposer{}, c.files())
+		broker, result, err = operate(func(groups command.FileGroups) (*secrets.Instance, error) {
+			return ops.Activate(ctx, c.agent.Runner(c.Activate.SecretID), c.Activate.InstanceID, c.Activate.parameters(), noopProposer{}, groups)
+		})
 	case "deactivate <secret-id> <instance-id>":
-		result, err = ops.Deactivate(ctx, c.agent.Runner(c.Deactivate.SecretID), c.Deactivate.InstanceID, c.Deactivate.parameters(), noopProposer{}, c.files())
+		broker, result, err = operate(func(groups command.FileGroups) (*secrets.Instance, error) {
+			return ops.Deactivate(ctx, c.agent.Runner(c.Deactivate.SecretID), c.Deactivate.InstanceID, c.Deactivate.parameters(), noopProposer{}, groups)
+		})
 	case "test <secret-id> <instance-id>":
-		result, err = ops.Test(ctx, c.agent.Runner(c.Test.SecretID), c.Test.InstanceID, c.Test.parameters(), noopProposer{}, c.files())
+		broker, result, err = operate(func(groups command.FileGroups) (*secrets.Instance, error) {
+			return ops.Test(ctx, c.agent.Runner(c.Test.SecretID), c.Test.InstanceID, c.Test.parameters(), noopProposer{}, groups)
+		})
 	case "serve":
+		// Serve does not observe ctx. Restore default signal handling so SIGTERM stops it.
+		stop()
 		permissionsConfig, err := server.LoadPermissions(c.PermissionsFile)
-		c.ctx.FatalIfErrorf(err)
+		if err != nil {
+			return err
+		}
 		config := server.ServerConfig{
 			Socket:               c.Serve.ServerSocket,
 			RequestLimit:         c.Serve.RequestLimit,
@@ -114,7 +137,10 @@ func (c *CLI) Run(ctx context.Context) {
 		panic(fmt.Errorf("unknown command: %s", c.ctx.Command()))
 	}
 
-	c.ctx.FatalIfErrorf(err)
+	closeBroker()
+	if err != nil {
+		return err
+	}
 
 	var bytes []byte
 	if c.Pretty {
@@ -122,11 +148,23 @@ func (c *CLI) Run(ctx context.Context) {
 	} else {
 		bytes, err = marshal.JSON(result)
 	}
-	c.ctx.FatalIfErrorf(err)
+	if err != nil {
+		return err
+	}
 
 	_, err = os.Stdout.Write(bytes)
+	return err
+}
 
-	c.ctx.FatalIfErrorf(err)
+// operate opens the broker and runs one operation on its file groups.
+// The broker is returned so the caller can restore the terminal.
+func operate(op func(command.FileGroups) (*secrets.Instance, error)) (*command.Broker, *secrets.Instance, error) {
+	broker, err := command.OpenBroker([]*os.File{os.Stdin, os.Stdout, os.Stderr})
+	if err != nil {
+		return nil, nil, err
+	}
+	instance, err := op(broker.Groups)
+	return broker, instance, err
 }
 
 type noopProposer struct{}
@@ -135,15 +173,36 @@ func (noopProposer) Propose(context.Context, string, secrets.OperationName, exec
 	return nil
 }
 
-func (c *CLI) files() command.Files {
-	files := command.Files{Fds: []*os.File{os.Stdin, os.Stdout, os.Stderr}, Tty: command.NoTty}
-	for fd, file := range files.Fds {
-		if command.ControllingTerminal(file) {
-			files.Tty = fd
-			break
+// interruptContext is cancelled by SIGINT, SIGTERM, SIGHUP, or SIGQUIT.
+// The first signal cancels. A second restores the terminal, then raises
+// the default action, so a stuck cancel cannot trap the operator.
+func interruptContext(parent context.Context, restore func()) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(parent)
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
+	go func() {
+		n := 0
+		for sig := range ch {
+			n++
+			if n == 1 {
+				cancel()
+				continue
+			}
+			if restore != nil {
+				restore()
+			}
+			signal.Stop(ch)
+			signal.Reset(sig)
+			if s, ok := sig.(syscall.Signal); ok {
+				_ = syscall.Kill(os.Getpid(), s)
+			}
+			return
 		}
+	}()
+	return ctx, func() {
+		signal.Stop(ch)
+		cancel()
 	}
-	return files
 }
 
 type Secrets struct{}

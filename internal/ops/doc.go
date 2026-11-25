@@ -8,7 +8,7 @@
 //
 //	inst, handle, err := runner.Run(...)
 //	final, err := handle.Wait(ctx)
-//	final, err := ops.Create(ctx, runner, params, proposer, stdio)
+//	final, err := ops.Create(ctx, runner, params, proposer, fileGroups)
 //
 // If handle.Wait(ctx) returns because ctx was canceled, ops calls handle.Cancel so a
 // CLI Ctrl+C stops the op. Abandoning wait alone (without ops) does not stop execution;
