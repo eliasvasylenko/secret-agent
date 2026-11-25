@@ -65,7 +65,7 @@ func (s *Server) Serve() error {
 		listener, err = net.FileListener(f)
 
 	} else {
-		return fmt.Errorf("No server socket")
+		return fmt.Errorf("no server socket")
 	}
 
 	if err != nil {

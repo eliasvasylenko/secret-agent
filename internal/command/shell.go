@@ -10,6 +10,6 @@ func BuildShellExec(script string, shell string) (string, []string, error) {
 	case "bash":
 		return "bash", []string{"-c", script}, nil
 	default:
-		return "", nil, fmt.Errorf("Unknown shell %s", shell)
+		return "", nil, fmt.Errorf("unknown shell %s", shell)
 	}
 }

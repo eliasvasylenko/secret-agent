@@ -132,7 +132,7 @@ func (c *CLI) Run(ctx context.Context) error {
 			FinishedOperationTTL: c.Serve.FinishedOperationTTL,
 		}
 		server := server.New(config, c.agent, permissionsConfig)
-		err = server.Serve()
+		return server.Serve()
 	default:
 		panic(fmt.Errorf("unknown command: %s", c.ctx.Command()))
 	}
