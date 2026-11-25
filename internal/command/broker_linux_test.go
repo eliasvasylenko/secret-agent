@@ -3,6 +3,7 @@
 package command
 
 import (
+	"bytes"
 	"os"
 	"syscall"
 	"testing"
@@ -49,6 +50,56 @@ func TestOpenBroker_forwardsOutput(t *testing.T) {
 	}
 	if string(buf[:n]) != "hello" {
 		t.Fatalf("read %q, want hello", buf[:n])
+	}
+}
+
+func TestOpenBroker_closeKeepsPendingOutput(t *testing.T) {
+	srcSlave, srcMaster, err := OpenPty()
+	if err != nil {
+		t.Skipf("no pseudo terminals: %v", err)
+	}
+	defer srcMaster.Close()
+	defer srcSlave.Close()
+
+	inR, inW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer inR.Close()
+	defer inW.Close()
+
+	broker, err := OpenBroker([]*os.File{inR, srcSlave, srcSlave})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer broker.Close()
+
+	const size = 32 << 10
+	got := make(chan int, 1)
+	go func() {
+		buf := make([]byte, 8192)
+		total := 0
+		for total < size {
+			n, err := srcMaster.Read(buf)
+			total += n
+			if err != nil {
+				break
+			}
+		}
+		got <- total
+	}()
+
+	if _, err := broker.Files().Fds[1].Write(bytes.Repeat([]byte("x"), size)); err != nil {
+		t.Fatal(err)
+	}
+	broker.Close()
+	select {
+	case n := <-got:
+		if n != size {
+			t.Fatalf("terminal got %d bytes, want %d", n, size)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("output written before Close did not arrive")
 	}
 }
 

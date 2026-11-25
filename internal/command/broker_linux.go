@@ -14,7 +14,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const ptyDrainTimeout = 250 * time.Millisecond
+const drainTimeout = 250 * time.Millisecond
 
 // Broker copies between the caller's terminals and PTY slaves that a
 // backend may be given. Close restores any terminal it changed.
@@ -49,13 +49,13 @@ type bridge struct {
 }
 
 type brokerState struct {
-	pty      *bridge
-	pipes    []*bridge
+	bridges  []*bridge
 	rawFile  *os.File
 	restore  func()
 	signalCh chan os.Signal
 	stop     chan struct{}
 	wg       sync.WaitGroup
+	output   sync.WaitGroup
 }
 
 // OpenBroker gives the controlling terminal, when it is among fds, one
@@ -119,7 +119,7 @@ func (s *brokerState) wrapControlling(group FileGroup) (FileGroup, error) {
 		return FileGroup{}, err
 	}
 	p := &bridge{script: slave, here: master}
-	s.pty = p
+	s.bridges = append(s.bridges, p)
 	_ = pty.InheritSize(group.File, master)
 	if err := s.raw(group.File); err != nil {
 		return FileGroup{}, err
@@ -165,13 +165,13 @@ func (s *brokerState) pipe(fds []int, terminal *os.File, mode FileMode) (FileGro
 		return FileGroup{}, err
 	}
 	p := &bridge{}
-	s.pipes = append(s.pipes, p)
+	s.bridges = append(s.bridges, p)
 	if mode == Read {
 		p.script, p.here = r, w
-		s.copy(w, terminal)
+		s.copy(&s.wg, w, terminal)
 	} else {
 		p.script, p.here = w, r
-		s.copy(terminal, r)
+		s.copy(&s.output, terminal, r)
 	}
 	return FileGroup{Fds: fds, Mode: mode, File: p.script}, nil
 }
@@ -187,14 +187,14 @@ func (s *brokerState) raw(f *os.File) error {
 }
 
 func (s *brokerState) forward(p *bridge, src *os.File) {
-	s.copy(p.here, src)
-	s.copy(src, p.here)
+	s.copy(&s.wg, p.here, src)
+	s.copy(&s.output, src, p.here)
 }
 
-func (s *brokerState) copy(dst, src *os.File) {
-	s.wg.Add(1)
+func (s *brokerState) copy(wg *sync.WaitGroup, dst, src *os.File) {
+	wg.Add(1)
 	go func() {
-		defer s.wg.Done()
+		defer wg.Done()
 		pollCopy(dst, src, s.stop)
 	}()
 }
@@ -229,41 +229,32 @@ func (s *brokerState) shutdown() {
 	if s.signalCh != nil {
 		signal.Stop(s.signalCh)
 	}
-	if s.stop != nil {
-		close(s.stop)
+	// With our script ends closed, output copies finish at EOF (EIO on a
+	// master). A leftover still holding one is cut off after drainTimeout.
+	for _, p := range s.bridges {
+		_ = p.script.Close()
 	}
+	waitTimeout(&s.output, drainTimeout)
+	close(s.stop)
+	s.wg.Wait()
+	s.output.Wait()
 	if s.restore != nil {
 		s.restore()
 	}
-	s.wg.Wait()
-	if s.pty != nil {
-		_ = s.pty.script.Close()
-		drainMaster(s.pty.here)
-		_ = s.pty.here.Close()
-	}
-	for _, p := range s.pipes {
+	for _, p := range s.bridges {
 		_ = p.here.Close()
-		_ = p.script.Close()
 	}
 }
 
-func drainMaster(master *os.File) {
-	buf := make([]byte, 8192)
-	fd := int32(master.Fd())
-	deadline := time.Now().Add(ptyDrainTimeout)
-	for {
-		remain := time.Until(deadline)
-		if remain <= 0 {
-			return
-		}
-		n, err := unix.Poll([]unix.PollFd{{Fd: fd, Events: unix.POLLIN}}, int(remain.Milliseconds()))
-		if n <= 0 || err != nil {
-			return
-		}
-		nread, err := unix.Read(int(fd), buf)
-		if nread <= 0 || err != nil {
-			return
-		}
+func waitTimeout(wg *sync.WaitGroup, d time.Duration) {
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(d):
 	}
 }
 
