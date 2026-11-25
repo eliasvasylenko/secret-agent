@@ -178,15 +178,12 @@ func TestCmdConn_deadlines(t *testing.T) {
 }
 
 func TestCmdConn_closeKillsHungProcess(t *testing.T) {
-	old := sshWaitAfterClose
-	t.Cleanup(func() { sshWaitAfterClose = old })
-	sshWaitAfterClose = 50 * time.Millisecond
-
 	cmd := exec.Command("sleep", "30")
 	conn, err := startCmdConn(cmd)
 	if err != nil {
 		t.Fatal(err)
 	}
+	conn.(*cmdConn).waitAfterClose = 50 * time.Millisecond
 	start := time.Now()
 	_ = conn.Close()
 	if time.Since(start) > 2*time.Second {
