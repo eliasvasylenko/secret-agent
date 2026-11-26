@@ -178,26 +178,17 @@ func (noopProposer) Propose(context.Context, string, secrets.OperationName, exec
 // the default action, so a stuck cancel cannot trap the operator.
 func interruptContext(parent context.Context, restore func()) (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithCancel(parent)
-	ch := make(chan os.Signal, 1)
+	ch := make(chan os.Signal, 2)
 	signal.Notify(ch, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP, syscall.SIGQUIT)
 	go func() {
-		n := 0
-		for sig := range ch {
-			n++
-			if n == 1 {
-				cancel()
-				continue
-			}
-			if restore != nil {
-				restore()
-			}
-			signal.Stop(ch)
-			signal.Reset(sig)
-			if s, ok := sig.(syscall.Signal); ok {
-				_ = syscall.Kill(os.Getpid(), s)
-			}
-			return
+		<-ch
+		cancel()
+		sig := <-ch
+		if restore != nil {
+			restore()
 		}
+		signal.Stop(ch)
+		_ = syscall.Kill(os.Getpid(), sig.(syscall.Signal))
 	}()
 	return ctx, func() {
 		signal.Stop(ch)
