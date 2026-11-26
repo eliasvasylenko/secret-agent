@@ -45,7 +45,7 @@ type Runner interface {
 		instanceId string,
 		params executor.OperationParameters,
 		proposer Proposer,
-		stdio command.Files,
+		fileGroups command.FileGroups,
 	) (startedInstance *secrets.Instance, handle Handle, err error)
 }
 

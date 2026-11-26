@@ -735,10 +735,10 @@ func TestController_startOperation_allowsNoAttach(t *testing.T) {
 		_ string,
 		_ executor.OperationParameters,
 		_ backend.Proposer,
-		files command.Files,
+		fileGroups command.FileGroups,
 	) (*secrets.Instance, backend.Handle, error) {
-		if len(files.Fds) != 0 {
-			t.Errorf("files.Fds = %v, want none attached", files.Fds)
+		if len(fileGroups) != 0 {
+			t.Errorf("fileGroups = %d, want none attached", len(fileGroups))
 		}
 		return instance, immediateHandle{inst: instance}, nil
 	})
@@ -776,7 +776,7 @@ func TestController_startOperation_domainErrors(t *testing.T) {
 				string,
 				executor.OperationParameters,
 				backend.Proposer,
-				command.Files,
+				command.FileGroups,
 			) (*secrets.Instance, backend.Handle, error) {
 				return nil, nil, tt.err
 			})
@@ -811,7 +811,7 @@ func TestController_createAndStartOperation(t *testing.T) {
 		instanceId string,
 		params executor.OperationParameters,
 		proposer backend.Proposer,
-		stdio command.Files,
+		fileGroups command.FileGroups,
 	) (*secrets.Instance, backend.Handle, error) {
 		if name != secrets.Create || params.StartedBy != principal || params.Reason != "create-reason" {
 			t.Errorf("Run name=%s StartedBy=%q Reason=%q", name, params.StartedBy, params.Reason)
@@ -852,10 +852,10 @@ func TestController_startOperation_passesAttachedFiles(t *testing.T) {
 		_ string,
 		_ executor.OperationParameters,
 		_ backend.Proposer,
-		stdio command.Files,
+		fileGroups command.FileGroups,
 	) (*secrets.Instance, backend.Handle, error) {
 		go func() {
-			capturedStdin, _ = io.ReadAll(stdio.Fds[0])
+			capturedStdin, _ = io.ReadAll(fileGroups.Files().Fds[0])
 			close(stdinRead)
 			handle.complete()
 		}()
@@ -937,7 +937,7 @@ func TestController_createOperation(t *testing.T) {
 				instanceId string,
 				params executor.OperationParameters,
 				_ backend.Proposer,
-				_ command.Files,
+				_ command.FileGroups,
 			) (*secrets.Instance, backend.Handle, error) {
 				if name != tt.opName || instanceId != "i1" || params.Reason != tt.reason {
 					t.Errorf("Run name=%s instanceId=%q reason=%q", name, instanceId, params.Reason)
@@ -1254,10 +1254,10 @@ func TestController_attachThenStart_stdinReachesRun(t *testing.T) {
 		_ string,
 		_ executor.OperationParameters,
 		_ backend.Proposer,
-		stdio command.Files,
+		fileGroups command.FileGroups,
 	) (*secrets.Instance, backend.Handle, error) {
 		go func() {
-			capturedStdin, _ = io.ReadAll(stdio.Fds[0])
+			capturedStdin, _ = io.ReadAll(fileGroups.Files().Fds[0])
 			close(stdinRead)
 			handle.complete()
 		}()
@@ -1395,7 +1395,7 @@ func TestClaimAttach_extraDescriptorKeepsItsNumber(t *testing.T) {
 		t.Fatal("fd 5 claimed twice")
 	}
 
-	files := entry.files()
+	files := entry.fileGroups().Files()
 	if len(files.Fds) != 6 {
 		t.Fatalf("files.Fds = %d entries, want 6", len(files.Fds))
 	}
@@ -1423,7 +1423,7 @@ func TestClaimAttach_cttyOnExtraDescriptor(t *testing.T) {
 		t.Fatal("controlling terminal claimed twice")
 	}
 
-	files := entry.files()
+	files := entry.fileGroups().Files()
 	if files.Tty != 5 {
 		t.Fatalf("files.Tty = %d, want 5", files.Tty)
 	}
@@ -1449,7 +1449,7 @@ func TestClaimAttach_terminalIsOneFile(t *testing.T) {
 	if !command.Terminal(in.process) {
 		t.Fatal("process file is not a terminal")
 	}
-	if files := entry.files(); files.Tty != 0 {
+	if files := entry.fileGroups().Files(); files.Tty != 0 {
 		t.Fatalf("files.Tty = %d, want 0", files.Tty)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"syscall"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -254,6 +255,61 @@ func (f *fakeCommand) testExec(t *testing.T, name string, test func(t *testing.T
 
 		fmt.Fprint(os.Stdout, f.mockOutput)
 		os.Exit(0)
+	})
+}
+
+func TestMarshalJSON_credentialWithoutEnvironment(t *testing.T) {
+	in := Command{
+		Script: "id",
+		CommandOptions: CommandOptions{
+			Credential: &syscall.Credential{Uid: 1001, Gid: 1001, Groups: []uint32{1001, 1002}},
+		},
+	}
+	data, err := json.Marshal(&in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out Command
+	if err := json.Unmarshal(data, &out); err != nil {
+		t.Fatal(err)
+	}
+	if !cmp.Equal(out, in) {
+		t.Errorf("round-trip mismatch:\n%s", cmp.Diff(in, out))
+	}
+}
+
+func TestProcess_sessionAndCredential(t *testing.T) {
+	saved := execCommand
+	t.Cleanup(func() { execCommand = saved })
+
+	var got *exec.Cmd
+	execCommand = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		got = exec.CommandContext(ctx, "true")
+		return got
+	}
+
+	t.Run("own session", func(t *testing.T) {
+		if err := New("true", nil, "").Process(context.Background(), Files{Tty: NoTty}, nil); err != nil {
+			t.Fatal(err)
+		}
+		if got.SysProcAttr == nil || !got.SysProcAttr.Setsid {
+			t.Fatal("process should run in its own session")
+		}
+		if got.Cancel == nil {
+			t.Fatal("cancel should kill the process group")
+		}
+	})
+
+	t.Run("credential", func(t *testing.T) {
+		cred := &syscall.Credential{Uid: 1000, Gid: 1000, Groups: []uint32{1001}}
+		cmd := New("true", nil, "")
+		cmd.Credential = cred
+		if err := cmd.Process(context.Background(), Files{Tty: NoTty}, nil); err == nil {
+			t.Fatal("starting as another user should be refused")
+		}
+		if !cmp.Equal(got.SysProcAttr.Credential, cred) {
+			t.Fatalf("Credential = %v", got.SysProcAttr.Credential)
+		}
 	})
 }
 

@@ -28,14 +28,14 @@ func (r *httpRunner) Run(
 	instanceId string,
 	params executor.OperationParameters,
 	proposer backend.Proposer,
-	files command.Files,
+	fileGroups command.FileGroups,
 ) (*secrets.Instance, backend.Handle, error) {
 	operationId, err := r.postCreate(ctx, name, instanceId, params)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	conns, err := r.attachAll(ctx, operationId, files)
+	conns, err := r.attachAll(ctx, operationId, fileGroups)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -85,13 +85,12 @@ func (r *httpRunner) postCreate(
 	return created.OperationID, nil
 }
 
-func (r *httpRunner) attachAll(ctx context.Context, operationId string, files command.Files) ([]attached, error) {
-	groups, err := fileGroups(files)
-	if err != nil {
-		return nil, err
-	}
-	opened := make([]attached, 0, len(groups))
-	for _, group := range groups {
+func (r *httpRunner) attachAll(ctx context.Context, operationId string, fileGroups command.FileGroups) ([]attached, error) {
+	opened := make([]attached, 0, len(fileGroups))
+	for _, group := range fileGroups {
+		if !group.Mode.Valid() {
+			continue
+		}
 		conn, err := openAttach(r.client, ctx, operationId, group)
 		if err != nil {
 			for _, att := range opened {
@@ -99,7 +98,7 @@ func (r *httpRunner) attachAll(ctx context.Context, operationId string, files co
 			}
 			return nil, err
 		}
-		opened = append(opened, attached{fileGroup: group, conn: conn})
+		opened = append(opened, attached{FileGroup: group, conn: conn})
 	}
 	return opened, nil
 }
@@ -153,19 +152,19 @@ func newRunHandle(runner *httpRunner, groups []attached) *runHandle {
 
 func (h *runHandle) startPumps() {
 	for _, group := range h.groups {
-		if group.mode.Writes() {
+		if group.Mode.Writes() {
 			// Output is joined. Wait drains it after the process exits.
-			if group.mode.Reads() {
-				conn, in := group.conn, group.reader()
+			if group.Mode.Reads() {
+				conn, in := group.conn, group.File
 				go func() { _, _ = io.Copy(conn, in) }()
 			}
-			out, conn := group.writer(), group.conn
+			out, conn := group.File, group.conn
 			h.pump(func() error { return copyAttach(out, conn, conn) })
 			continue
 		}
-		if group.mode.Reads() {
+		if group.Mode.Reads() {
 			// Input is not joined. The process can exit while this is still open.
-			conn, in := group.conn, group.reader()
+			conn, in := group.conn, group.File
 			go func() { _ = copyAttach(conn, in, conn) }()
 		}
 	}

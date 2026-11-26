@@ -5,11 +5,38 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"syscall"
 
 	"github.com/eliasvasylenko/secret-agent/internal/marshal"
+	"golang.org/x/sys/unix"
 )
+
+const defaultShell = "bash"
+
+// CommandOptions is how a script process is run. Credential, when set, is
+// the uid and gid of that process.
+type CommandOptions struct {
+	Credential *syscall.Credential `json:"credential,omitempty"`
+}
+
+func (o CommandOptions) zero() bool {
+	return o.Credential == nil
+}
+
+// ownTerminals sets the owner of each terminal slave to the process uid,
+// so tools that reopen the terminal by name are not denied.
+func ownTerminals(o CommandOptions, files Files) {
+	if o.Credential == nil {
+		return
+	}
+	for _, f := range files.Fds {
+		if f != nil && Terminal(f) {
+			_ = unix.Fchown(int(f.Fd()), int(o.Credential.Uid), int(o.Credential.Gid))
+		}
+	}
+}
 
 // The function to execute a command
 var execCommand = exec.CommandContext
@@ -66,7 +93,16 @@ func (c *Command) Process(ctx context.Context, files Files, environment Environm
 
 	subProcess := execCommand(ctx, shell, args...)
 	subProcess.Env = append(subProcess.Env, env.Render()...)
-	c.CommandOptions.Apply(subProcess)
+	// Own session, so the script has no controlling terminal unless one is
+	// installed below. Own process group, so cancel kills the whole group.
+	subProcess.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Credential: c.Credential}
+	subProcess.Cancel = func() error {
+		err := syscall.Kill(-subProcess.Process.Pid, syscall.SIGKILL)
+		if errors.Is(err, syscall.ESRCH) {
+			return os.ErrProcessDone
+		}
+		return err
+	}
 
 	subProcess.Stdin = files.file(0)
 	subProcess.Stdout = files.file(1)
@@ -76,13 +112,11 @@ func (c *Command) Process(ctx context.Context, files Files, environment Environm
 	}
 
 	if files.Tty >= 0 && files.file(files.Tty) != nil {
-		if subProcess.SysProcAttr == nil {
-			subProcess.SysProcAttr = &syscall.SysProcAttr{}
-		}
-		subProcess.SysProcAttr.Setsid = true
 		subProcess.SysProcAttr.Setctty = true
 		subProcess.SysProcAttr.Ctty = files.Tty
 	}
+
+	ownTerminals(c.CommandOptions, files)
 
 	if err := subProcess.Start(); err != nil {
 		return fmt.Errorf("process failed '%v' - %s", c, err.Error())

@@ -3,9 +3,8 @@
 > **Model settled (Oct 2026).** Phases 0.5–2 below are implementable now against the local
 > agent; the branch `new-auth` already carries a first cut (see § Current code). Phases 4+
 > need John to reach B as himself ([plan-remote.md](plan-remote.md)). The terminal /
-> approval-prompt work ([plan-terminal.md](plan-terminal.md), branch `tty-terminal`) is
-> parallel: it decides *how* John's CLI shows and answers a proposal; this plan decides
-> *what* a proposal is.
+> approval-prompt work ([plan-terminal.md](plan-terminal.md)) is parallel: it decides
+> *how* John's CLI shows and answers a proposal; this plan decides *what* a proposal is.
 
 Last updated: 25 Oct 2026.
 
@@ -439,7 +438,9 @@ Phase 5 (pipe) ──→ Phase 6 (Nix) ──→ Phase 7 (cross-host)
 ```
 
 Phases 0.5–2 are implementable now on the local agent. Phase 2's prompt can land with a
-plain line prompt and move onto the plan-terminal console when `tty-terminal` merges.
+plain line prompt and move onto the plan-terminal gate once the CLI broker exists
+(plan-terminal steps 3 and 5). Approving from another terminal is possible on the wire
+but needs a command that does not exist yet.
 
 ---
 
@@ -472,7 +473,7 @@ plain line prompt and move onto the plan-terminal console when `tty-terminal` me
 ## References
 
 - [design.md](design.md) — § Proposer, § Federation (rule replaced here), threat model
-- [plan-terminal.md](plan-terminal.md) — the console John answers on (`tty-terminal`)
+- [plan-terminal.md](plan-terminal.md) — the terminal gate and prompt John answers on
 - [plan-remote.md](plan-remote.md) — how John reaches B as himself
 - [http-api.md](http-api.md) — routes; operation workflow in Phase 0–1
 - [plan.md](plan.md) — completed local-agent migration

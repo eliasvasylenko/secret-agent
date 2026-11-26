@@ -289,7 +289,7 @@ func (s *Controller) startOperation(w http.ResponseWriter, r *http.Request) {
 	params.StartedBy = op.CreatedBy
 	// r.Context() is the accept ctx for Run (persist only); execute uses Handle.
 	instance, handle, err := s.secretStore.Runner(op.SecretId).Run(
-		r.Context(), op.Name, op.InstanceId, params, noopProposer{}, entry.files(),
+		r.Context(), op.Name, op.InstanceId, params, noopProposer{}, entry.fileGroups(),
 	)
 	if err != nil {
 		// Rejected at accept: the operation has failed, and stays readable as such.

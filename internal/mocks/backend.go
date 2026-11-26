@@ -71,7 +71,7 @@ func (r *MockRunner) Run(
 	instanceId string,
 	params executor.OperationParameters,
 	proposer backend.Proposer,
-	stdio command.Files,
+	fileGroups command.FileGroups,
 ) (*secrets.Instance, backend.Handle, error) {
-	return nextCall(&r.Mock, r.Run)(ctx, name, instanceId, params, proposer, stdio)
+	return nextCall(&r.Mock, r.Run)(ctx, name, instanceId, params, proposer, fileGroups)
 }

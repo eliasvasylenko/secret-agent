@@ -3,10 +3,10 @@ package ops
 import (
 	"context"
 
+	"github.com/eliasvasylenko/secret-agent/internal/backend"
 	"github.com/eliasvasylenko/secret-agent/internal/command"
 	"github.com/eliasvasylenko/secret-agent/internal/executor"
 	"github.com/eliasvasylenko/secret-agent/internal/secrets"
-	"github.com/eliasvasylenko/secret-agent/internal/backend"
 )
 
 func Create(
@@ -14,9 +14,9 @@ func Create(
 	runner backend.Runner,
 	params executor.OperationParameters,
 	proposer backend.Proposer,
-	stdio command.Files,
+	fileGroups command.FileGroups,
 ) (*secrets.Instance, error) {
-	return run(ctx, runner, secrets.Create, "", params, proposer, stdio)
+	return run(ctx, runner, secrets.Create, "", params, proposer, fileGroups)
 }
 
 func Destroy(
@@ -25,9 +25,9 @@ func Destroy(
 	instanceId string,
 	params executor.OperationParameters,
 	proposer backend.Proposer,
-	stdio command.Files,
+	fileGroups command.FileGroups,
 ) (*secrets.Instance, error) {
-	return run(ctx, runner, secrets.Destroy, instanceId, params, proposer, stdio)
+	return run(ctx, runner, secrets.Destroy, instanceId, params, proposer, fileGroups)
 }
 
 func Activate(
@@ -36,9 +36,9 @@ func Activate(
 	instanceId string,
 	params executor.OperationParameters,
 	proposer backend.Proposer,
-	stdio command.Files,
+	fileGroups command.FileGroups,
 ) (*secrets.Instance, error) {
-	return run(ctx, runner, secrets.Activate, instanceId, params, proposer, stdio)
+	return run(ctx, runner, secrets.Activate, instanceId, params, proposer, fileGroups)
 }
 
 func Deactivate(
@@ -47,9 +47,9 @@ func Deactivate(
 	instanceId string,
 	params executor.OperationParameters,
 	proposer backend.Proposer,
-	stdio command.Files,
+	fileGroups command.FileGroups,
 ) (*secrets.Instance, error) {
-	return run(ctx, runner, secrets.Deactivate, instanceId, params, proposer, stdio)
+	return run(ctx, runner, secrets.Deactivate, instanceId, params, proposer, fileGroups)
 }
 
 func Test(
@@ -58,9 +58,9 @@ func Test(
 	instanceId string,
 	params executor.OperationParameters,
 	proposer backend.Proposer,
-	stdio command.Files,
+	fileGroups command.FileGroups,
 ) (*secrets.Instance, error) {
-	return run(ctx, runner, secrets.Test, instanceId, params, proposer, stdio)
+	return run(ctx, runner, secrets.Test, instanceId, params, proposer, fileGroups)
 }
 
 func run(
@@ -70,9 +70,9 @@ func run(
 	instanceId string,
 	params executor.OperationParameters,
 	proposer backend.Proposer,
-	stdio command.Files,
+	fileGroups command.FileGroups,
 ) (*secrets.Instance, error) {
-	_, handle, err := runner.Run(ctx, name, instanceId, params, proposer, stdio)
+	_, handle, err := runner.Run(ctx, name, instanceId, params, proposer, fileGroups)
 	if err != nil {
 		return nil, err
 	}

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -23,14 +22,13 @@ import (
 
 func TestMain(m *testing.M) {
 	if socket := os.Getenv("SECRET_AGENT_TEST_DIAL_STDIO"); socket != "" {
-		in := io.Reader(os.Stdin)
 		if user := os.Getenv("SECRET_AGENT_TEST_DIAL_STDIO_USER"); user != "" {
 			conn, err := net.Dial("unix", socket)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, err)
 				os.Exit(1)
 			}
-			in, err = auth.InjectAssertedUser(conn, os.Stdin, user, "")
+			in, err := auth.InjectAssertedUser(conn, os.Stdin, user, "")
 			if err != nil {
 				fmt.Fprintln(os.Stderr, err)
 				os.Exit(1)
@@ -178,15 +176,12 @@ func TestCmdConn_deadlines(t *testing.T) {
 }
 
 func TestCmdConn_closeKillsHungProcess(t *testing.T) {
-	old := sshWaitAfterClose
-	t.Cleanup(func() { sshWaitAfterClose = old })
-	sshWaitAfterClose = 50 * time.Millisecond
-
 	cmd := exec.Command("sleep", "30")
 	conn, err := startCmdConn(cmd)
 	if err != nil {
 		t.Fatal(err)
 	}
+	conn.(*cmdConn).waitAfterClose = 50 * time.Millisecond
 	start := time.Now()
 	_ = conn.Close()
 	if time.Since(start) > 2*time.Second {

@@ -45,8 +45,17 @@ func newTestBackend(t *testing.T, s secrets.Secrets) *Backend {
 	return backend
 }
 
-func discardFiles() command.Files {
-	return command.Files{Tty: command.NoTty}
+func discardFiles() command.FileGroups {
+	return nil
+}
+
+func fileGroups(t *testing.T, files command.Files) command.FileGroups {
+	t.Helper()
+	groups, err := command.GroupFiles(files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return groups
 }
 
 func stdinFile(t *testing.T, s string) *os.File {
@@ -79,7 +88,7 @@ func runOperation(
 	t *testing.T,
 	repo *Backend,
 	secretId, instanceId string,
-	op func(context.Context, backend.Runner, string, executor.OperationParameters, backend.Proposer, command.Files) (*secrets.Instance, error),
+	op func(context.Context, backend.Runner, string, executor.OperationParameters, backend.Proposer, command.FileGroups) (*secrets.Instance, error),
 	params executor.OperationParameters,
 ) *secrets.Instance {
 	t.Helper()
@@ -207,7 +216,7 @@ func TestRunner_Handle_CancelStopsExecute(t *testing.T) {
 	t.Cleanup(func() { _ = stdinR.Close() })
 	t.Cleanup(func() { _ = stdinW.Close() })
 
-	_, handle, err := runner.Run(ctx, secrets.Create, "", executor.OperationParameters{Reason: "r", StartedBy: "u"}, noopProposer{}, command.Files{Fds: []*os.File{stdinR}, Tty: command.NoTty})
+	_, handle, err := runner.Run(ctx, secrets.Create, "", executor.OperationParameters{Reason: "r", StartedBy: "u"}, noopProposer{}, fileGroups(t, command.Files{Fds: []*os.File{stdinR}, Tty: command.NoTty}))
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -246,7 +255,7 @@ func TestRunner_WaitAbandonThenRejoin(t *testing.T) {
 	t.Cleanup(func() { _ = stdinR.Close() })
 	t.Cleanup(func() { _ = stdinW.Close() })
 
-	_, handle, err := runner.Run(ctx, secrets.Create, "", executor.OperationParameters{Reason: "r", StartedBy: "u"}, noopProposer{}, command.Files{Fds: []*os.File{stdinR}, Tty: command.NoTty})
+	_, handle, err := runner.Run(ctx, secrets.Create, "", executor.OperationParameters{Reason: "r", StartedBy: "u"}, noopProposer{}, fileGroups(t, command.Files{Fds: []*os.File{stdinR}, Tty: command.NoTty}))
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -277,7 +286,7 @@ func TestRunner_Create_stdinReachesSubprocess(t *testing.T) {
 	repo := newTestBackend(t, secrets.Secrets{"s1": s})
 	ctx := context.Background()
 
-	_, err := ops.Create(ctx, repo.Runner("s1"), executor.OperationParameters{Reason: "r", StartedBy: "user"}, noopProposer{}, command.Files{Fds: []*os.File{stdinFile(t, "stdin-payload")}, Tty: command.NoTty})
+	_, err := ops.Create(ctx, repo.Runner("s1"), executor.OperationParameters{Reason: "r", StartedBy: "user"}, noopProposer{}, fileGroups(t, command.Files{Fds: []*os.File{stdinFile(t, "stdin-payload")}, Tty: command.NoTty}))
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -851,7 +860,7 @@ func TestOpen_doesNotFailLockedOperation(t *testing.T) {
 	t.Cleanup(func() { _ = stdinR.Close() })
 	t.Cleanup(func() { _ = stdinW.Close() })
 
-	started, handle, err := repo.Runner("s1").Run(ctx, secrets.Create, "", executor.OperationParameters{Reason: "r", StartedBy: "u"}, noopProposer{}, command.Files{Fds: []*os.File{stdinR}, Tty: command.NoTty})
+	started, handle, err := repo.Runner("s1").Run(ctx, secrets.Create, "", executor.OperationParameters{Reason: "r", StartedBy: "u"}, noopProposer{}, fileGroups(t, command.Files{Fds: []*os.File{stdinR}, Tty: command.NoTty}))
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -896,7 +905,7 @@ func TestRunner_Run_refusesWhileLocked(t *testing.T) {
 	t.Cleanup(func() { _ = stdinR.Close() })
 	t.Cleanup(func() { _ = stdinW.Close() })
 
-	started, handle, err := repo.Runner("s1").Run(ctx, secrets.Create, "", executor.OperationParameters{Reason: "r", StartedBy: "u"}, noopProposer{}, command.Files{Fds: []*os.File{stdinR}, Tty: command.NoTty})
+	started, handle, err := repo.Runner("s1").Run(ctx, secrets.Create, "", executor.OperationParameters{Reason: "r", StartedBy: "u"}, noopProposer{}, fileGroups(t, command.Files{Fds: []*os.File{stdinR}, Tty: command.NoTty}))
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}

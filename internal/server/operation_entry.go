@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"os"
 	"sync"
 	"time"
 
@@ -178,23 +177,17 @@ func (e *operationEntry) id() string        { return e.op.Id }
 func (e *operationEntry) createdBy() string { return e.op.CreatedBy }
 func (e *operationEntry) secretId() string  { return e.op.SecretId }
 
-// files is the file table built from the attaches so far.
-func (e *operationEntry) files() command.Files {
-	files := command.Files{Tty: command.NoTty}
-	last := -1
-	for fd := range e.byFd {
-		if fd > last {
-			last = fd
+func (e *operationEntry) fileGroups() command.FileGroups {
+	seen := make(map[*attachment]struct{})
+	var groups command.FileGroups
+	for _, att := range e.byFd {
+		if _, ok := seen[att]; ok {
+			continue
 		}
+		seen[att] = struct{}{}
+		groups = append(groups, command.FileGroup{Fds: att.fds, Mode: att.mode, File: att.process})
 	}
-	if last >= 0 {
-		files.Fds = make([]*os.File, last+1)
-		for fd, att := range e.byFd {
-			files.Fds[fd] = att.process
-		}
-	}
-	files.Tty = e.ctty
-	return files
+	return groups
 }
 
 // setLease records the expiry and the state it applies to. A closed entry

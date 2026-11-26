@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/eliasvasylenko/secret-agent/internal/command"
-	"golang.org/x/sys/unix"
 )
 
 const AttachUpgradeProtocol = "secret-agent-process/1"
@@ -33,7 +32,7 @@ func newAttachment(fds []int, mode command.FileMode) (*attachment, error) {
 	var err error
 	switch mode {
 	case command.Tty, command.Ctty:
-		a.process, a.peer, err = openTerminal()
+		a.process, a.peer, err = command.OpenPty()
 	case command.Read:
 		a.process, a.peer, err = os.Pipe()
 	case command.Write:
@@ -77,30 +76,6 @@ func (a *attachment) serve(conn io.ReadWriter) {
 		return
 	}
 	_, _ = io.Copy(conn, a.peer)
-}
-
-func openTerminal() (slave, master *os.File, err error) {
-	master, err = os.OpenFile("/dev/ptmx", os.O_RDWR|unix.O_NOCTTY|unix.O_CLOEXEC, 0)
-	if err != nil {
-		return nil, nil, err
-	}
-	defer func() {
-		if err != nil {
-			_ = master.Close()
-		}
-	}()
-	if err = unix.IoctlSetPointerInt(int(master.Fd()), unix.TIOCSPTLCK, 0); err != nil {
-		return nil, nil, err
-	}
-	n, err := unix.IoctlGetInt(int(master.Fd()), unix.TIOCGPTN)
-	if err != nil {
-		return nil, nil, err
-	}
-	slave, err = os.OpenFile(fmt.Sprintf("/dev/pts/%d", n), os.O_RDWR|unix.O_NOCTTY|unix.O_CLOEXEC, 0)
-	if err != nil {
-		return nil, nil, err
-	}
-	return slave, master, nil
 }
 
 func (s *Controller) attachOperation(w http.ResponseWriter, r *http.Request) {

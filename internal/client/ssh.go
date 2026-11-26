@@ -72,16 +72,17 @@ func startCmdConn(cmd *exec.Cmd) (net.Conn, error) {
 		_ = stdout.Close()
 		return nil, fmt.Errorf("ssh: %w", err)
 	}
-	return &cmdConn{cmd: cmd, stdin: stdin, stdout: stdout}, nil
+	return &cmdConn{cmd: cmd, stdin: stdin, stdout: stdout, waitAfterClose: sshWaitAfterClose}, nil
 }
 
-var sshWaitAfterClose = 5 * time.Second
+const sshWaitAfterClose = 5 * time.Second
 
 type cmdConn struct {
-	cmd    *exec.Cmd
-	stdin  io.WriteCloser
-	stdout io.ReadCloser
-	closed atomic.Bool
+	cmd            *exec.Cmd
+	stdin          io.WriteCloser
+	stdout         io.ReadCloser
+	waitAfterClose time.Duration
+	closed         atomic.Bool
 }
 
 func (c *cmdConn) Read(p []byte) (int, error)  { return c.stdout.Read(p) }
@@ -98,7 +99,7 @@ func (c *cmdConn) Close() error {
 	select {
 	case err := <-done:
 		return err
-	case <-time.After(sshWaitAfterClose):
+	case <-time.After(c.waitAfterClose):
 		if c.cmd.Process != nil {
 			_ = c.cmd.Process.Kill()
 		}

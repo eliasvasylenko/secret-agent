@@ -1,8 +1,15 @@
 package command
 
 import (
+	"errors"
 	"os"
+
+	"golang.org/x/sys/unix"
 )
+
+// errReadWriteFile is a duplex non-terminal. It is not an attachable mode
+// and not an I/O failure, so the broker can leave the file unchanged.
+var errReadWriteFile = errors.New("read-write file cannot be attached")
 
 // NoTty means no controlling terminal.
 const NoTty = -1
@@ -60,6 +67,28 @@ func (m FileMode) Writes() bool {
 }
 
 func (m FileMode) Terminal() bool { return m == Tty || m == Ctty }
+
+// LocalMode is r, w, or tty. ctty comes from Files.Tty, not from here.
+// A read-write open is refused: a pipe is one direction, and a regular
+// file's reads and writes share an offset. Open the file read-only or
+// write-only, or use a terminal.
+func LocalMode(f *os.File) (FileMode, error) {
+	if Terminal(f) {
+		return Tty, nil
+	}
+	flags, err := unix.FcntlInt(f.Fd(), unix.F_GETFL, 0)
+	if err != nil {
+		return "", err
+	}
+	switch flags & unix.O_ACCMODE {
+	case unix.O_RDONLY:
+		return Read, nil
+	case unix.O_WRONLY:
+		return Write, nil
+	default:
+		return "", errReadWriteFile
+	}
+}
 
 // MaxFd is the highest descriptor number we accept.
 const MaxFd = 1023
