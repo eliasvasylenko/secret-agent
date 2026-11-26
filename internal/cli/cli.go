@@ -72,54 +72,8 @@ func (c *CLI) Run(ctx context.Context) error {
 		return runDialStdio(c.DialStdio.Socket, c.DialStdio.User, c.DialStdio.Header, os.Stdin, os.Stdout)
 	}
 
-	// Scripts run in their own session, so the terminal's Ctrl-C does not reach them.
-	// Cancelling the context is what stops them. Restore any raw terminal before a
-	// second signal kills this process.
-	var broker *command.Broker
-	closeBroker := func() { broker.Close() }
-	var result any
-	var err error
-	// The closure reads broker when the signal arrives. It is still nil here.
-	ctx, stop := interruptContext(ctx, closeBroker)
-	defer stop()
-	defer closeBroker()
-
-	catalog := c.agent.Catalog()
-	switch c.ctx.Command() {
-	case "secrets":
-		result, err = catalog.Secrets().List(ctx)
-	case "secret <secret-id>":
-		result, err = catalog.Secrets().Get(ctx, c.Secret.SecretID)
-	case "instances <secret-id>":
-		secretId := c.Instances.SecretID
-		result, err = catalog.Instances().List(ctx, &secretId, c.Instances.From, c.Instances.To)
-	case "instance <secret-id> <instance-id>":
-		result, err = catalog.Instances().Get(ctx, c.Instance.InstanceID)
-	case "active <secret-id>":
-		result, err = catalog.Instances().GetActive(ctx, c.Active.SecretID)
-	case "create <secret-id>":
-		broker, result, err = operate(func(groups command.FileGroups) (*secrets.Instance, error) {
-			return ops.Create(ctx, c.agent.Runner(c.Create.SecretID), c.Create.parameters(), noopProposer{}, groups)
-		})
-	case "destroy <secret-id> <instance-id>":
-		broker, result, err = operate(func(groups command.FileGroups) (*secrets.Instance, error) {
-			return ops.Destroy(ctx, c.agent.Runner(c.Destroy.SecretID), c.Destroy.InstanceID, c.Destroy.parameters(), noopProposer{}, groups)
-		})
-	case "activate <secret-id> <instance-id>":
-		broker, result, err = operate(func(groups command.FileGroups) (*secrets.Instance, error) {
-			return ops.Activate(ctx, c.agent.Runner(c.Activate.SecretID), c.Activate.InstanceID, c.Activate.parameters(), noopProposer{}, groups)
-		})
-	case "deactivate <secret-id> <instance-id>":
-		broker, result, err = operate(func(groups command.FileGroups) (*secrets.Instance, error) {
-			return ops.Deactivate(ctx, c.agent.Runner(c.Deactivate.SecretID), c.Deactivate.InstanceID, c.Deactivate.parameters(), noopProposer{}, groups)
-		})
-	case "test <secret-id> <instance-id>":
-		broker, result, err = operate(func(groups command.FileGroups) (*secrets.Instance, error) {
-			return ops.Test(ctx, c.agent.Runner(c.Test.SecretID), c.Test.InstanceID, c.Test.parameters(), noopProposer{}, groups)
-		})
-	case "serve":
-		// Serve does not observe ctx. Restore default signal handling so SIGTERM stops it.
-		stop()
+	if c.ctx.Command() == "serve" {
+		// Serve does not observe ctx, and no handler is installed, so SIGTERM stops it.
 		permissionsConfig, err := server.LoadPermissions(c.PermissionsFile)
 		if err != nil {
 			return err
@@ -133,11 +87,27 @@ func (c *CLI) Run(ctx context.Context) error {
 		}
 		server := server.New(config, c.agent, permissionsConfig)
 		return server.Serve()
-	default:
-		panic(fmt.Errorf("unknown command: %s", c.ctx.Command()))
 	}
 
-	closeBroker()
+	var result any
+	var err error
+	catalog := c.agent.Catalog()
+	switch c.ctx.Command() {
+	case "secrets":
+		result, err = catalog.Secrets().List(ctx)
+	case "secret <secret-id>":
+		result, err = catalog.Secrets().Get(ctx, c.Secret.SecretID)
+	case "instances <secret-id>":
+		secretId := c.Instances.SecretID
+		result, err = catalog.Instances().List(ctx, &secretId, c.Instances.From, c.Instances.To)
+	case "instance <secret-id> <instance-id>":
+		result, err = catalog.Instances().Get(ctx, c.Instance.InstanceID)
+	case "active <secret-id>":
+		result, err = catalog.Instances().GetActive(ctx, c.Active.SecretID)
+	default:
+		result, err = c.operate(ctx)
+	}
+
 	if err != nil {
 		return err
 	}
@@ -156,15 +126,33 @@ func (c *CLI) Run(ctx context.Context) error {
 	return err
 }
 
-// operate opens the broker and runs one operation on its file groups.
-// The broker is returned so the caller can restore the terminal.
-func operate(op func(command.FileGroups) (*secrets.Instance, error)) (*command.Broker, *secrets.Instance, error) {
+// operate opens the broker and runs one script command on its file groups.
+// Scripts run in their own session, so the terminal's Ctrl-C does not reach
+// them. The first signal cancels ctx. A second restores the terminal, then
+// raises the default action. The broker is closed before operate returns.
+func (c *CLI) operate(ctx context.Context) (*secrets.Instance, error) {
 	broker, err := command.OpenBroker([]*os.File{os.Stdin, os.Stdout, os.Stderr})
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	instance, err := op(broker.Groups)
-	return broker, instance, err
+	defer broker.Close()
+	ctx, stop := interruptContext(ctx, broker.Close)
+	defer stop()
+
+	switch c.ctx.Command() {
+	case "create <secret-id>":
+		return ops.Create(ctx, c.agent.Runner(c.Create.SecretID), c.Create.parameters(), noopProposer{}, broker.Groups)
+	case "destroy <secret-id> <instance-id>":
+		return ops.Destroy(ctx, c.agent.Runner(c.Destroy.SecretID), c.Destroy.InstanceID, c.Destroy.parameters(), noopProposer{}, broker.Groups)
+	case "activate <secret-id> <instance-id>":
+		return ops.Activate(ctx, c.agent.Runner(c.Activate.SecretID), c.Activate.InstanceID, c.Activate.parameters(), noopProposer{}, broker.Groups)
+	case "deactivate <secret-id> <instance-id>":
+		return ops.Deactivate(ctx, c.agent.Runner(c.Deactivate.SecretID), c.Deactivate.InstanceID, c.Deactivate.parameters(), noopProposer{}, broker.Groups)
+	case "test <secret-id> <instance-id>":
+		return ops.Test(ctx, c.agent.Runner(c.Test.SecretID), c.Test.InstanceID, c.Test.parameters(), noopProposer{}, broker.Groups)
+	default:
+		panic(fmt.Errorf("unknown command: %s", c.ctx.Command()))
+	}
 }
 
 type noopProposer struct{}
